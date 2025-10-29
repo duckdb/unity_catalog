@@ -46,11 +46,7 @@ optional_ptr<SchemaCatalogEntry> UCCatalog::LookupSchema(CatalogTransaction tran
 									 const EntryLookupInfo &schema_lookup,
 									 OnEntryNotFound if_not_found) {
 	if (schema_lookup.GetEntryName() == DEFAULT_SCHEMA) {
-		if (default_schema.empty()) {
-			throw InvalidInputException("Attempting to fetch the default schema - but no database was "
-						    "provided in the connection string");
-		}
-		return GetSchema(transaction, default_schema, if_not_found);
+		//! FIXME: the default schema of the catalog should be looked up through the '/api/2.0/settings/types/default_namespace_ws/names/default' endpoint
 	}
 	auto entry = schemas.GetEntry(transaction.GetContext(), schema_lookup.GetEntryName());
 	if (!entry && if_not_found != OnEntryNotFound::RETURN_NULL) {

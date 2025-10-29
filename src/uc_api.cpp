@@ -117,31 +117,31 @@ static string GetCredentialsRequest(const string &url, const string &table_id, c
 	string body = StringUtil::Format(R"({"table_id" : "%s", "operation" : "READ_WRITE"})", table_id);
 
 	curl = curl_easy_init();
-	if (curl) {
-		curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, GetRequestWriteCallback);
-		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-
-		// Set headers
-		struct curl_slist *headers = curl_slist_append(nullptr, "Content-Type: application/json");
-		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
-		// Set request body
-		curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-		curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body.length());
-
-        InitializeCurlObject(curl, token);
-
-		res = curl_easy_perform(curl);
-		curl_easy_cleanup(curl);
-
-		if (res != CURLcode::CURLE_OK) {
-			string error = curl_easy_strerror(res);
-			throw IOException("Curl Request to '%s' failed with error: '%s'\n'%s'", url, error, readBuffer);
-		}
-		return readBuffer;
+	if (!curl) {
+		throw InternalException("Failed to initialize curl");
 	}
-	throw InternalException("Failed to initialize curl");
+	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, GetRequestWriteCallback);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+
+	// Set headers
+	struct curl_slist *headers = curl_slist_append(nullptr, "Content-Type: application/json");
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+	// Set request body
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body.length());
+
+	InitializeCurlObject(curl, token);
+
+	res = curl_easy_perform(curl);
+	curl_easy_cleanup(curl);
+
+	if (res != CURLcode::CURLE_OK) {
+		string error = curl_easy_strerror(res);
+		throw IOException("Curl Request to '%s' failed with error: '%s'\n'%s'", url, error, readBuffer);
+	}
+	return readBuffer;
 }
 
 void UCAPI::InitializeCurl() {
@@ -173,6 +173,15 @@ UCAPITableCredentials UCAPI::GetTableCredentials(const string &table_id, UCCrede
 	// Read JSON and get root
 	duckdb_yyjson::yyjson_doc *doc = duckdb_yyjson::yyjson_read(api_result.c_str(), api_result.size(), 0);
 	duckdb_yyjson::yyjson_val *root = yyjson_doc_get_root(doc);
+
+	auto error_code = TryGetStrFromObject(root, "error_code", false);
+	if (!error_code.empty()) {
+		auto message = TryGetStrFromObject(root, "message", false);
+		if (message.empty()) {
+			message = "-";
+		}
+		throw InvalidInputException("Failed to get table credentials for table_id: %s, error_code: %s, message: %s", table_id, error_code, message);
+	}
 
 	auto *aws_temp_credentials = yyjson_obj_get(root, "aws_temp_credentials");
 	if (aws_temp_credentials) {
