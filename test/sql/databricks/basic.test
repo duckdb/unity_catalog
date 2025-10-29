@@ -1,0 +1,42 @@
+# name: test/sql/databricks/basic.test
+# description: test
+# group: [uc_catalog]
+
+# Require statement will ensure this test is run with this extension loaded
+require parquet
+
+require uc_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+statement ok
+CREATE SECRET (
+    TYPE UC,
+    TOKEN '${DATABRICKS_TOKEN}',
+    ENDPOINT '${DATABRICKS_ENDPOINT}',
+    AWS_REGION '${DATABRICKS_REGION}'
+);
+
+# Attach to databricks through the unity catalog API
+statement ok
+ATTACH 'duckdb_test_4' (TYPE UC_CATALOG);
+
+# Can query a table
+statement ok
+from duckdb_test_4.test_schema.test_table;
+
+# mode output_result
+# 
+# statement ok
+# EXPLAIN insert into duckdb_test_4.test_schema.test_table values (7, 'a');
+
+# statement ok
+# use duckdb_test_4
