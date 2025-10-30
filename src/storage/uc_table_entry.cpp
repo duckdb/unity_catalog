@@ -99,6 +99,16 @@ TableFunction UCTableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
 	return delta_scan_function;
 }
 
+virtual_column_map_t UCTableEntry::GetVirtualColumns() const {
+	//! FIXME: requires changes in core to be able to delegate this
+	return TableCatalogEntry::GetVirtualColumns();
+}
+
+vector<column_t> UCTableEntry::GetRowIdColumns() const {
+	//! FIXME: requires changes in core to be able to delegate this
+	return TableCatalogEntry::GetRowIdColumns();
+}
+
 TableStorageInfo UCTableEntry::GetStorageInfo(ClientContext &context) {
 	TableStorageInfo result;
 	// TODO fill info
