@@ -1,0 +1,75 @@
+# name: test/sql/databricks/tpch.test_slow
+# description: test
+# group: [databricks]
+
+require parquet
+
+require uc_catalog
+
+require delta
+
+require tpch
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+CREATE SECRET (
+    TYPE UC,
+    TOKEN '${DATABRICKS_TOKEN}',
+    ENDPOINT '${DATABRICKS_ENDPOINT}',
+    AWS_REGION '${DATABRICKS_REGION}'
+);
+
+# Attach to databricks through the unity catalog API
+statement ok
+ATTACH 'duckdblabs_testing' (TYPE UC_CATALOG, DEFAULT_SCHEMA 'main');
+
+# Register tpch views
+foreach table customer lineitem nation orders part partsupp region supplier
+
+statement ok
+create view ${table}_delta as from duckdblabs_testing.main.tpch_sf1_${table};
+
+# NOTE: switch this to _parquet to easily compare plans while debugging
+statement ok
+create view ${table} as from ${table}_delta
+
+endloop
+
+loop i 1 9
+
+query I
+PRAGMA tpch(${i})
+----
+<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q0${i}.csv
+
+endloop
+
+loop i 10 23
+
+query I
+PRAGMA tpch(${i})
+----
+<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q${i}.csv
+
+endloop
+
+foreach table customer lineitem nation orders part partsupp region supplier
+
+# Cleanup
+statement ok
+DROP VIEW ${table}
+
+statement ok
+DROP VIEW ${table}_delta
+
+endloop
