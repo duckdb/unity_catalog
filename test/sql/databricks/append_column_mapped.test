@@ -1,8 +1,7 @@
-# name: test/sql/databricks/basic.test
+# name: test/sql/databricks/append_column_mapped.test
 # description: test
 # group: [databricks]
 
-# Require statement will ensure this test is run with this extension loaded
 require parquet
 
 require uc_catalog
@@ -17,6 +16,9 @@ require-env DATABRICKS_ENDPOINT
 
 require-env DATABRICKS_REGION
 
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
 statement ok
 CREATE SECRET (
     TYPE UC,
@@ -27,14 +29,8 @@ CREATE SECRET (
 
 # Attach to databricks through the unity catalog API
 statement ok
-ATTACH 'duckdb_test_4' (TYPE UC_CATALOG, DEFAULT_SCHEMA 'test_schema');
+ATTACH 'duckdblabs_testing' (TYPE UC_CATALOG, DEFAULT_SCHEMA 'main');
 
-# Can query a table
-query I nosort expected_res
-from duckdb_test_4.test_schema.test_table;
-
-statement ok
-use duckdb_test_4
-
-query I nosort expected_res
-from test_table;
+# Can't write to this table because of the permissions it was created with
+statement error
+insert into duckdblabs_testing.main.evolution_simple_id_mode VALUES (3, 3);

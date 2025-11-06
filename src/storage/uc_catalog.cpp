@@ -12,9 +12,9 @@
 namespace duckdb {
 
 UCCatalog::UCCatalog(AttachedDatabase &db_p, const string &internal_name, AttachOptions &attach_options,
-                     UCCredentials credentials)
-    : Catalog(db_p), internal_name(internal_name), access_mode(attach_options.access_mode), credentials(std::move(credentials)),
-      schemas(*this) {
+                     UCCredentials credentials, const string &default_schema)
+    : Catalog(db_p), internal_name(internal_name), access_mode(attach_options.access_mode),
+      credentials(std::move(credentials)), schemas(*this), default_schema(default_schema) {
 }
 
 UCCatalog::~UCCatalog() = default;
@@ -43,12 +43,12 @@ void UCCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaCat
 }
 
 optional_ptr<SchemaCatalogEntry> UCCatalog::LookupSchema(CatalogTransaction transaction,
-									 const EntryLookupInfo &schema_lookup,
-									 OnEntryNotFound if_not_found) {
-	if (schema_lookup.GetEntryName() == DEFAULT_SCHEMA) {
+                                                         const EntryLookupInfo &schema_lookup,
+                                                         OnEntryNotFound if_not_found) {
+	if (schema_lookup.GetEntryName() == DEFAULT_SCHEMA && default_schema != DEFAULT_SCHEMA) {
 		if (default_schema.empty()) {
 			throw InvalidInputException("Attempting to fetch the default schema - but no database was "
-						    "provided in the connection string");
+			                            "provided by the catalog");
 		}
 		return GetSchema(transaction, default_schema, if_not_found);
 	}
@@ -67,6 +67,10 @@ string UCCatalog::GetDBPath() {
 	return internal_name;
 }
 
+string UCCatalog::GetDefaultSchema() const {
+	return default_schema;
+}
+
 DatabaseSize UCCatalog::GetDatabaseSize(ClientContext &context) {
 	if (default_schema.empty()) {
 		throw InvalidInputException("Attempting to fetch the database size - but no database was provided "
@@ -81,13 +85,13 @@ void UCCatalog::ClearCache() {
 }
 
 PhysicalOperator &UCCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
-			    LogicalCreateTable &op, PhysicalOperator &plan) {
+                                               LogicalCreateTable &op, PhysicalOperator &plan) {
 	throw NotImplementedException("UCCatalog PlanCreateTableAs");
 }
 
 PhysicalOperator &UCCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
-	     optional_ptr<PhysicalOperator> plan) {
-	auto& table = op.table.Cast<UCTableEntry>();
+                                        optional_ptr<PhysicalOperator> plan) {
+	auto &table = op.table.Cast<UCTableEntry>();
 
 	// LAZY CREATE ATTACHED DB
 	// TODO: move to transaction?
@@ -98,10 +102,7 @@ PhysicalOperator &UCCatalog::PlanInsert(ClientContext &context, PhysicalPlanGene
 		AttachInfo info;
 		info.name = "__uc_catalog_internal_" + internal_name + "_" + table.schema.name + "_" + table.name; // TODO:
 		info.options = {
-			{"type", Value("Delta")},
-			{"child_catalog_mode", Value(true)},
-			{"internal_table_name", Value(table.name)}
-		};
+		    {"type", Value("Delta")}, {"child_catalog_mode", Value(true)}, {"internal_table_name", Value(table.name)}};
 		info.path = table.table_data->storage_location;
 		AttachOptions options(context.db->config.options);
 		options.access_mode = AccessMode::READ_WRITE;
@@ -134,21 +135,21 @@ PhysicalOperator &UCCatalog::PlanInsert(ClientContext &context, PhysicalPlanGene
 		input.type = "s3";
 		input.provider = "config";
 		input.options = {
-			{"key_id", table_credentials.key_id},
-			{"secret", table_credentials.secret},
-			{"session_token", table_credentials.session_token},
-			{"region", credentials.aws_region},
-		    };
+		    {"key_id", table_credentials.key_id},
+		    {"secret", table_credentials.secret},
+		    {"session_token", table_credentials.session_token},
+		    {"region", credentials.aws_region},
+		};
 		input.scope = {table_data->storage_location};
 
 		secret_manager.CreateSecret(context, input);
 	}
 
-    return internal_catalog->PlanInsert(context, planner, op, plan);
+	return internal_catalog->PlanInsert(context, planner, op, plan);
 }
 
 PhysicalOperator &UCCatalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op,
-	     PhysicalOperator &plan) {
+                                        PhysicalOperator &plan) {
 	throw NotImplementedException("UCCatalog PlanDelete");
 }
 
@@ -157,7 +158,7 @@ PhysicalOperator &UCCatalog::PlanDelete(ClientContext &context, PhysicalPlanGene
 }
 
 PhysicalOperator &UCCatalog::PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
-				     PhysicalOperator &plan) {
+                                        PhysicalOperator &plan) {
 	throw NotImplementedException("UCCatalog PlanUpdate");
 }
 

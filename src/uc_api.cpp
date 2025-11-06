@@ -6,7 +6,8 @@
 
 namespace duckdb {
 
-//! We use a global here to store the path that is selected on the UCAPI::InitializeCurl call
+//! We use a global here to store the path that is selected on the
+//! UCAPI::InitializeCurl call
 static string SELECTED_CURL_CERT_PATH = "";
 
 static size_t GetRequestWriteCallback(void *contents, size_t size, size_t nmemb, void *userp) {
@@ -14,25 +15,26 @@ static size_t GetRequestWriteCallback(void *contents, size_t size, size_t nmemb,
 	return size * nmemb;
 }
 
-// we statically compile in libcurl, which means the cert file location of the build machine is the
-// place curl will look. But not every distro has this file in the same location, so we search a
-// number of common locations and use the first one we find.
+// we statically compile in libcurl, which means the cert file location of the
+// build machine is the place curl will look. But not every distro has this file
+// in the same location, so we search a number of common locations and use the
+// first one we find.
 static string certFileLocations[] = {
-        // Arch, Debian-based, Gentoo
-        "/etc/ssl/certs/ca-certificates.crt",
-        // RedHat 7 based
-        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
-        // Redhat 6 based
-        "/etc/pki/tls/certs/ca-bundle.crt",
-        // OpenSUSE
-        "/etc/ssl/ca-bundle.pem",
-        // Alpine
-        "/etc/ssl/cert.pem"
-};
+    // Arch, Debian-based, Gentoo
+    "/etc/ssl/certs/ca-certificates.crt",
+    // RedHat 7 based
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    // Redhat 6 based
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    // OpenSUSE
+    "/etc/ssl/ca-bundle.pem",
+    // Alpine
+    "/etc/ssl/cert.pem"};
 
-// Look through the the above locations and if one of the files exists, set that as the location curl should use.
+// Look through the the above locations and if one of the files exists, set that
+// as the location curl should use.
 static bool SelectCurlCertPath() {
-	for (string& caFile : certFileLocations) {
+	for (string &caFile : certFileLocations) {
 		struct stat buf;
 		if (stat(caFile.c_str(), &buf) == 0) {
 			SELECTED_CURL_CERT_PATH = caFile;
@@ -41,21 +43,22 @@ static bool SelectCurlCertPath() {
 	return false;
 }
 
-static bool SetCurlCAFileInfo(CURL* curl) {
+static bool SetCurlCAFileInfo(CURL *curl) {
 	if (!SELECTED_CURL_CERT_PATH.empty()) {
 		curl_easy_setopt(curl, CURLOPT_CAINFO, SELECTED_CURL_CERT_PATH.c_str());
-        return true;
+		return true;
 	}
-    return false;
+	return false;
 }
 
-// Note: every curl object we use should set this, because without it some linux distro's may not find the CA certificate.
-static void InitializeCurlObject(CURL * curl, const string &token) {
-  	if (!token.empty()) {
+// Note: every curl object we use should set this, because without it some linux
+// distro's may not find the CA certificate.
+static void InitializeCurlObject(CURL *curl, const string &token) {
+	if (!token.empty()) {
 		curl_easy_setopt(curl, CURLOPT_XOAUTH2_BEARER, token.c_str());
 		curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BEARER);
 	}
-    SetCurlCAFileInfo(curl);
+	SetCurlCAFileInfo(curl);
 }
 
 static string GetRequest(const string &url, const string &token = "") {
@@ -109,6 +112,45 @@ static string TryGetStrFromObject(duckdb_yyjson::yyjson_val *obj, const string &
 	                                                                                           fail_on_missing);
 }
 
+namespace {
+
+struct UCAPIError {
+public:
+	UCAPIError() {
+	}
+	UCAPIError(const string &error_code, const string &message) : error_code(error_code), message(message) {
+	}
+
+public:
+	bool HasError() {
+		return !error_code.empty();
+	}
+
+public:
+	void ThrowError(const string &prefix) {
+		D_ASSERT(HasError());
+		throw InvalidInputException("%s. error_code: %s, message: %s", prefix, error_code, message);
+	}
+
+private:
+	string error_code;
+	string message;
+};
+
+} // namespace
+
+static UCAPIError CheckError(duckdb_yyjson::yyjson_val *api_result) {
+	auto error_code = TryGetStrFromObject(api_result, "error_code", false);
+	if (!error_code.empty()) {
+		auto message = TryGetStrFromObject(api_result, "message", false);
+		if (message.empty()) {
+			message = "-";
+		}
+		return UCAPIError(error_code, message);
+	}
+	return UCAPIError();
+}
+
 static string GetCredentialsRequest(const string &url, const string &table_id, const string &token = "") {
 	CURL *curl;
 	CURLcode res;
@@ -117,31 +159,31 @@ static string GetCredentialsRequest(const string &url, const string &table_id, c
 	string body = StringUtil::Format(R"({"table_id" : "%s", "operation" : "READ_WRITE"})", table_id);
 
 	curl = curl_easy_init();
-	if (curl) {
-		curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, GetRequestWriteCallback);
-		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-
-		// Set headers
-		struct curl_slist *headers = curl_slist_append(nullptr, "Content-Type: application/json");
-		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-
-		// Set request body
-		curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-		curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body.length());
-
-        InitializeCurlObject(curl, token);
-
-		res = curl_easy_perform(curl);
-		curl_easy_cleanup(curl);
-
-		if (res != CURLcode::CURLE_OK) {
-			string error = curl_easy_strerror(res);
-			throw IOException("Curl Request to '%s' failed with error: '%s'\n'%s'", url, error, readBuffer);
-		}
-		return readBuffer;
+	if (!curl) {
+		throw InternalException("Failed to initialize curl");
 	}
-	throw InternalException("Failed to initialize curl");
+	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, GetRequestWriteCallback);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+
+	// Set headers
+	struct curl_slist *headers = curl_slist_append(nullptr, "Content-Type: application/json");
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+	// Set request body
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, body.length());
+
+	InitializeCurlObject(curl, token);
+
+	res = curl_easy_perform(curl);
+	curl_easy_cleanup(curl);
+
+	if (res != CURLcode::CURLE_OK) {
+		string error = curl_easy_strerror(res);
+		throw IOException("Curl Request to '%s' failed with error: '%s'\n'%s'", url, error, readBuffer);
+	}
+	return readBuffer;
 }
 
 void UCAPI::InitializeCurl() {
@@ -150,21 +192,76 @@ void UCAPI::InitializeCurl() {
 
 //# list catalogs
 //    echo "List of catalogs"
-//    curl --request GET "https://${DATABRICKS_HOST}/api/2.1/unity-catalog/catalogs" \
+//    curl --request GET
+//    "https://${DATABRICKS_HOST}/api/2.1/unity-catalog/catalogs" \
 // 	--header "Authorization: Bearer ${TOKEN}" | jq .
 //
 //# list short version of all tables
 //    echo "Table Summaries"
-//    curl --request GET "https://${DATABRICKS_HOST}/api/2.1/unity-catalog/table-summaries?catalog_name=workspace" \
+//    curl --request GET
+//    "https://${DATABRICKS_HOST}/api/2.1/unity-catalog/table-summaries?catalog_name=workspace"
+//    \
 // 	--header "Authorization: Bearer ${TOKEN}" | jq .
 //
 //# list tables in `default` schema
 //    echo "Tables in default schema"
 //    curl --request GET
-//    "https://${DATABRICKS_HOST}/api/2.1/unity-catalog/tables?catalog_name=workspace&schema_name=default" \
+//    "https://${DATABRICKS_HOST}/api/2.1/unity-catalog/tables?catalog_name=workspace&schema_name=default"
+//    \
 // 	--header "Authorization: Bearer ${TOKEN}" | jq .
 
-UCAPITableCredentials UCAPI::GetTableCredentials(const string &table_id, UCCredentials credentials) {
+static string GetDefaultSchemaRequest(const UCCredentials &credentials) {
+	CURL *curl;
+	CURLcode res;
+	string readBuffer;
+
+	curl = curl_easy_init();
+	if (!curl) {
+		throw InternalException("Failed to initialize curl");
+	}
+	auto url = credentials.endpoint + "/api/2.0/settings/types/default_namespace_ws/names/default";
+	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, GetRequestWriteCallback);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+
+	// Set headers
+	struct curl_slist *headers = curl_slist_append(nullptr, "Content-Type: application/json");
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+	InitializeCurlObject(curl, credentials.token);
+
+	res = curl_easy_perform(curl);
+	curl_easy_cleanup(curl);
+
+	if (res != CURLcode::CURLE_OK) {
+		string error = curl_easy_strerror(res);
+		throw IOException("Curl Request to '%s' failed with error: '%s'\n'%s'", url, error, readBuffer);
+	}
+	return readBuffer;
+}
+
+string UCAPI::GetDefaultSchema(const UCCredentials &credentials) {
+	auto api_result = GetDefaultSchemaRequest(credentials);
+
+	// Read JSON and get root
+	duckdb_yyjson::yyjson_doc *doc = duckdb_yyjson::yyjson_read(api_result.c_str(), api_result.size(), 0);
+	duckdb_yyjson::yyjson_val *root = yyjson_doc_get_root(doc);
+
+	auto error = CheckError(root);
+	if (error.HasError()) {
+		error.ThrowError("Failed to get default schema of the catalog");
+	}
+
+	auto setting_name = TryGetStrFromObject(root, "setting_name");
+	if (setting_name.empty()) {
+		throw InvalidInputException("Failed to get default schema of the catalog, "
+		                            "API response is invalid!");
+	}
+
+	return setting_name;
+}
+
+UCAPITableCredentials UCAPI::GetTableCredentials(const string &table_id, const UCCredentials &credentials) {
 	UCAPITableCredentials result;
 
 	auto api_result = GetCredentialsRequest(credentials.endpoint + "/api/2.1/unity-catalog/temporary-table-credentials",
@@ -173,6 +270,11 @@ UCAPITableCredentials UCAPI::GetTableCredentials(const string &table_id, UCCrede
 	// Read JSON and get root
 	duckdb_yyjson::yyjson_doc *doc = duckdb_yyjson::yyjson_read(api_result.c_str(), api_result.size(), 0);
 	duckdb_yyjson::yyjson_val *root = yyjson_doc_get_root(doc);
+
+	auto error = CheckError(root);
+	if (error.HasError()) {
+		error.ThrowError(StringUtil::Format("Failed to get table credentials for table_id: %s", table_id));
+	}
 
 	auto *aws_temp_credentials = yyjson_obj_get(root, "aws_temp_credentials");
 	if (aws_temp_credentials) {
@@ -184,7 +286,7 @@ UCAPITableCredentials UCAPI::GetTableCredentials(const string &table_id, UCCrede
 	return result;
 }
 
-vector<string> UCAPI::GetCatalogs(const string &catalog, UCCredentials credentials) {
+vector<string> UCAPI::GetCatalogs(const string &catalog, const UCCredentials &credentials) {
 	throw NotImplementedException("UCAPI::GetCatalogs");
 }
 
@@ -200,7 +302,7 @@ static UCAPIColumnDefinition ParseColumnDefinition(duckdb_yyjson::yyjson_val *co
 	return result;
 }
 
-vector<UCAPITable> UCAPI::GetTables(const string &catalog, const string &schema, UCCredentials credentials) {
+vector<UCAPITable> UCAPI::GetTables(const string &catalog, const string &schema, const UCCredentials &credentials) {
 	vector<UCAPITable> result;
 	auto api_result = GetRequest(credentials.endpoint + "/api/2.1/unity-catalog/tables?catalog_name=" + catalog +
 	                                 "&schema_name=" + schema,
@@ -239,7 +341,7 @@ vector<UCAPITable> UCAPI::GetTables(const string &catalog, const string &schema,
 	return result;
 }
 
-vector<UCAPISchema> UCAPI::GetSchemas(const string &catalog, UCCredentials credentials) {
+vector<UCAPISchema> UCAPI::GetSchemas(const string &catalog, const UCCredentials &credentials) {
 	vector<UCAPISchema> result;
 
 	auto api_result =

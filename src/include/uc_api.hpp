@@ -50,13 +50,15 @@ struct UCAPITableCredentials {
 
 class UCAPI {
 public:
-  	//! WARNING: not thread-safe. To be called once on extension initialization
-  	static void InitializeCurl();
+	//! WARNING: not thread-safe. To be called once on extension initialization
+	static void InitializeCurl();
 
-	static UCAPITableCredentials GetTableCredentials(const string &table_id, UCCredentials credentials);
-	static vector<string> GetCatalogs(const string &catalog, UCCredentials credentials);
-	static vector<UCAPITable> GetTables(const string &catalog, const string &schema, UCCredentials credentials);
-	static vector<UCAPISchema> GetSchemas(const string &catalog, UCCredentials credentials);
-	static vector<UCAPITable> GetTablesInSchema(const string &catalog, const string &schema, UCCredentials credentials);
+	static UCAPITableCredentials GetTableCredentials(const string &table_id, const UCCredentials &credentials);
+	static string GetDefaultSchema(const UCCredentials &credentials);
+	static vector<string> GetCatalogs(const string &catalog, const UCCredentials &credentials);
+	static vector<UCAPITable> GetTables(const string &catalog, const string &schema, const UCCredentials &credentials);
+	static vector<UCAPISchema> GetSchemas(const string &catalog, const UCCredentials &credentials);
+	static vector<UCAPITable> GetTablesInSchema(const string &catalog, const string &schema,
+	                                            const UCCredentials &credentials);
 };
 } // namespace duckdb

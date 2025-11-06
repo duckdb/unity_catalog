@@ -35,7 +35,7 @@ public:
 class UCCatalog : public Catalog {
 public:
 	explicit UCCatalog(AttachedDatabase &db_p, const string &internal_name, AttachOptions &attach_options,
-	                   UCCredentials credentials);
+	                   UCCredentials credentials, const string &default_schema);
 	~UCCatalog();
 
 	string internal_name;
@@ -52,24 +52,23 @@ public:
 
 	void ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) override;
 
-	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction,
-									 const EntryLookupInfo &schema_lookup,
-									 OnEntryNotFound if_not_found) override;
+	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction, const EntryLookupInfo &schema_lookup,
+	                                              OnEntryNotFound if_not_found) override;
 
-
-	PhysicalOperator &PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
-			    LogicalCreateTable &op, PhysicalOperator &plan) override;
+	PhysicalOperator &PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner, LogicalCreateTable &op,
+	                                    PhysicalOperator &plan) override;
 	PhysicalOperator &PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
-		     optional_ptr<PhysicalOperator> plan) override;
+	                             optional_ptr<PhysicalOperator> plan) override;
 	PhysicalOperator &PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op,
-		     PhysicalOperator &plan) override;
-	PhysicalOperator &PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op) override ;
+	                             PhysicalOperator &plan) override;
+	PhysicalOperator &PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op) override;
 	PhysicalOperator &PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
-					     PhysicalOperator &plan) override;
+	                             PhysicalOperator &plan) override;
 	unique_ptr<LogicalOperator> BindCreateIndex(Binder &binder, CreateStatement &stmt, TableCatalogEntry &table,
 	                                            unique_ptr<LogicalOperator> plan) override;
 
 	DatabaseSize GetDatabaseSize(ClientContext &context) override;
+	string GetDefaultSchema() const override;
 
 	//! Whether or not this is an in-memory UC database
 	bool InMemory() override;

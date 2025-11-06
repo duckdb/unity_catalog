@@ -44,7 +44,9 @@ TableFunction UCTableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
 	auto &schema = system_catalog.GetSchema(data, DEFAULT_SCHEMA);
 	auto catalog_entry = schema.GetEntry(data, CatalogType::TABLE_FUNCTION_ENTRY, "delta_scan");
 	if (!catalog_entry) {
-		throw InvalidInputException("Function with name \"%s\" not found in ExtensionLoader::GetTableFunction", name);
+		throw InvalidInputException("Function with name \"%s\" not found in "
+		                            "ExtensionLoader::GetTableFunction",
+		                            name);
 	}
 	auto &delta_function_set = catalog_entry->Cast<TableFunctionCatalogEntry>();
 
@@ -95,6 +97,16 @@ TableFunction UCTableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
 	bind_data = std::move(result);
 
 	return delta_scan_function;
+}
+
+virtual_column_map_t UCTableEntry::GetVirtualColumns() const {
+	//! FIXME: requires changes in core to be able to delegate this
+	return TableCatalogEntry::GetVirtualColumns();
+}
+
+vector<column_t> UCTableEntry::GetRowIdColumns() const {
+	//! FIXME: requires changes in core to be able to delegate this
+	return TableCatalogEntry::GetRowIdColumns();
 }
 
 TableStorageInfo UCTableEntry::GetStorageInfo(ClientContext &context) {

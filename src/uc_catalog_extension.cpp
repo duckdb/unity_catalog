@@ -67,12 +67,15 @@ static unique_ptr<Catalog> UCCatalogAttach(optional_ptr<StorageExtensionInfo> st
 
 	// check if we have a secret provided
 	string secret_name;
+	string default_schema;
 	for (auto &entry : info.options) {
 		auto lower_name = StringUtil::Lower(entry.first);
 		if (lower_name == "type" || lower_name == "read_only") {
 			// already handled
 		} else if (lower_name == "secret") {
 			secret_name = entry.second.ToString();
+		} else if (lower_name == "default_schema") {
+			default_schema = entry.second.ToString();
 		} else {
 			throw BinderException("Unrecognized option for UC attach: %s", entry.first);
 		}
@@ -109,11 +112,16 @@ static unique_ptr<Catalog> UCCatalogAttach(optional_ptr<StorageExtensionInfo> st
 		throw BinderException("Secret with name \"%s\" not found", secret_name);
 	}
 
-	return make_uniq<UCCatalog>(db, info.path, attach_options, credentials);
+	if (default_schema.empty()) {
+		//! No explicit default schema provided, ask the catalog:
+		default_schema = UCAPI::GetDefaultSchema(credentials);
+	}
+
+	return make_uniq<UCCatalog>(db, info.path, attach_options, credentials, default_schema);
 }
 
-static unique_ptr<TransactionManager> CreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info, AttachedDatabase &db,
-                                                               Catalog &catalog) {
+static unique_ptr<TransactionManager> CreateTransactionManager(optional_ptr<StorageExtensionInfo> storage_info,
+                                                               AttachedDatabase &db, Catalog &catalog) {
 	auto &uc_catalog = catalog.Cast<UCCatalog>();
 	return make_uniq<UCTransactionManager>(db, uc_catalog);
 }
@@ -133,7 +141,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	secret_type.name = "uc";
 	secret_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
 	secret_type.default_provider = "config";
-
 
 	loader.RegisterSecretType(secret_type);
 
@@ -159,5 +166,4 @@ extern "C" {
 DUCKDB_CPP_EXTENSION_ENTRY(uc_catalog, loader) {
 	duckdb::LoadInternal(loader);
 }
-
 }
