@@ -681,7 +681,7 @@ jobs:
             build/${{ inputs.build_type }}/repository/**/*.duckdb_extension
 
       - name: Print Rust logs
-        if: ${{ inputs.rust_logs && (inputs.enable_rust || contains(format(';{0};', inputs.extra_toolchains), ';rust;')) }}
+
         run: |
           for filename in build/${{ inputs.build_type }}/rust/src/*/*build-*.log; do
             echo Printing logs for file $filename
