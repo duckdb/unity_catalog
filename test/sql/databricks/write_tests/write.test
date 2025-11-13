@@ -31,24 +31,23 @@ CREATE SECRET (
 
 # Attach to databricks through the unity catalog API
 statement ok
-ATTACH '${DATABRICKS_WRITE_TEST_CATALOG}' (TYPE UC_CATALOG, DEFAULT_SCHEMA '${DATABRICKS_WRITE_TEST_SCHEMA}');
+ATTACH '${DATABRICKS_WRITE_TEST_CATALOG}' as databricks_catalog (TYPE UC_CATALOG, DEFAULT_SCHEMA '${DATABRICKS_WRITE_TEST_SCHEMA}');
 
 statement ok
-USE ${DATABRICKS_WRITE_TEST_CATALOG}
+USE databricks_catalog;
 
-# Can query a table
-statement ok
-from test_table;
-
-# TODO: fix and setup write tests
-mode skip
-
-# TODO: make a function to fetch a delta path instead of this hardcoding
-statement ok
-COPY (select 1 as a) to "s3://duckdb-databricks-testing-2/test_schema/test_table/test2.parquet"
+query I
+select sum(l_orderkey) from lineitem
+----
+1802759573
 
 statement ok
-INSERT INTO duckdb_test_4.test_schema.test_table VALUES (7, 'd');
+FROM lineitem limit 5
 
 statement ok
-FROM duckdb_test_4.test_schema.test_table
+INSERT INTO lineitem VALUES (1, 241, 23, 5, 24.00, 27389.76, 0.10, 0.04, 'N', 'O', '1996-03-30', '1996-03-14', '1996-04-01', NULL, 'FOB', 'the regular, regular pa');
+
+query I
+select sum(l_orderkey) from lineitem
+----
+1802759574

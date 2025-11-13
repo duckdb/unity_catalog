@@ -17,7 +17,7 @@ jobs:
       GEN: ninja
       DUCKDB_PLATFORM: linux_amd64
       BUILD_EXTENSION_TEST_DEPS: full
-#      DATABRICKS_WRITE_TEST_CATALOG: duckdb_write_testing
+      DATABRICKS_WRITE_TEST_CATALOG: duckdb_write_testing
 
     steps:
       - name: Install required ubuntu packages
@@ -66,17 +66,18 @@ jobs:
 
       - name: Create Databricks config
         run: |
-          echo "[ DEFAULT ]" > ~/.databrickscfg
+          echo "[DEFAULT]" > ~/.databrickscfg
           echo "host = $DATABRICKS_ENDPOINT" >> ~/.databrickscfg
           echo "token = $DATABRICKS_TOKEN" >> ~/.databrickscfg
+          cat ~/.databrickscfg
 
-#      - name: Generate random schema name
-#        run: |
-#          echo "DATABRICKS_WRITE_TEST_SCHEMA=test_schema_$(uuidgen | tr '[:upper:]' '[:lower:]' | tr '-' '_')" >> $GITHUB_ENV
+      - name: Generate random schema name
+        run: |
+          echo "DATABRICKS_WRITE_TEST_SCHEMA=test_schema_$(uuidgen | tr '[:upper:]' '[:lower:]' | tr '-' '_')" >> $GITHUB_ENV
 
-#      - name: Load write test data
-#        run: |
-#          ./venv/bin/python3 scripts/copy_write_test_data.py $DATABRICKS_WRITE_TEST_CATALOG.source $DATABRICKS_WRITE_TEST_CATALOG.$DATABRICKS_WRITE_TEST_SCHEMA
+      - name: Prepare write tests
+        run: |
+          make write_tests_prepare
 
       - name: Build extension
         run: |
@@ -84,9 +85,9 @@ jobs:
 
       - name: Run tests
         run: |
-          make test_release
+          make write_tests_run
 
-#      - name: Clean up test data
-#        if: always()
-#        run: |
-#          ./venv/bin/python3 scripts/clean_test_data.py duckdb_write_testing.$DATABRICKS_WRITE_TEST_SCHEMA
+      - name: Clean up test data
+        if: always()
+        run: |
+          make write_tests_cleanup
