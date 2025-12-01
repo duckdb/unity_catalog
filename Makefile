@@ -5,9 +5,7 @@ EXT_NAME=uc_catalog
 EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 
 # Core extensions that we need for crucial testing
-#DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs;delta
-
-DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs
+DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs;delta
 #FULL_TEST_EXTENSION_DEPS=tpcds;tpch TODO: add
 
 # Include the Makefile from extension-ci-tools
