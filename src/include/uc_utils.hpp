@@ -62,6 +62,9 @@ private:
 	// Track secret expiration times per table_id (Unix epoch timestamp in milliseconds)
 	unordered_map<string, int64_t> secret_expiration_times;
 
+	// Secret name prefix for internal Unity Catalog table credentials
+	static constexpr const char* SECRET_NAME_PREFIX = "_internal_unity_catalog_";
+
 	// Safety margin for credential refresh (5 minutes in milliseconds)
 	static constexpr int64_t REFRESH_SAFETY_MARGIN_MS = 300000;
 };
