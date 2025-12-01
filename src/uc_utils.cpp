@@ -200,18 +200,14 @@ void UCTableCredentialManager::EnsureTableCredentials(ClientContext &context, co
                                                       const string &storage_location,
                                                       const UCCredentials &credentials) {
 	auto &secret_manager = SecretManager::Get(context);
-	string secret_name = "__internal_uc_" + table_id;
+	string secret_name = string(SECRET_NAME_PREFIX) + table_id;
 
 	// Get or create mutex for this specific table_id to prevent concurrent secret creation
 	mutex *table_mutex;
 	{
 		lock_guard<mutex> map_lock(mutex_map_mutex);
-		auto it = table_secret_mutexes.find(table_id);
-		if (it == table_secret_mutexes.end()) {
-			table_secret_mutexes.emplace(table_id, make_uniq<mutex>());
-			it = table_secret_mutexes.find(table_id);
-		}
-		table_mutex = it->second.get();
+		auto emplace_result = table_secret_mutexes.emplace(table_id, make_uniq<mutex>());
+		table_mutex = emplace_result.first->second.get();
 	}
 
 	// Lock this specific table's secret creation to prevent concurrent writes
