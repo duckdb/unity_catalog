@@ -2,6 +2,8 @@
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "storage/uc_schema_entry.hpp"
 #include "storage/uc_transaction.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
+#include "uc_api.hpp"
 
 #include <iostream>
 
@@ -187,6 +189,85 @@ LogicalType UCUtils::ToUCType(const LogicalType &input) {
 	default:
 		return LogicalType::VARCHAR;
 	}
+}
+
+UCTableCredentialManager &UCTableCredentialManager::GetInstance() {
+	static UCTableCredentialManager instance;
+	return instance;
+}
+
+void UCTableCredentialManager::EnsureTableCredentials(ClientContext &context, const string &table_id,
+                                                      const string &storage_location,
+                                                      const UCCredentials &credentials) {
+	auto &secret_manager = SecretManager::Get(context);
+	string secret_name = "__internal_uc_" + table_id;
+
+	// Get or create mutex for this specific table_id to prevent concurrent secret creation
+	mutex *table_mutex;
+	{
+		lock_guard<mutex> map_lock(mutex_map_mutex);
+		auto it = table_secret_mutexes.find(table_id);
+		if (it == table_secret_mutexes.end()) {
+			table_secret_mutexes.emplace(table_id, make_uniq<mutex>());
+			it = table_secret_mutexes.find(table_id);
+		}
+		table_mutex = it->second.get();
+	}
+
+	// Lock this specific table's secret creation to prevent concurrent writes
+	lock_guard<mutex> secret_lock(*table_mutex);
+
+	// Check if secret exists and is still valid (not expired)
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	auto existing_secret = secret_manager.GetSecretByName(transaction, secret_name, "memory");
+
+	bool needs_refresh = true;
+	if (existing_secret) {
+		// Check expiration time if we have it cached
+		auto it = secret_expiration_times.find(table_id);
+		if (it != secret_expiration_times.end() && it->second > 0) {
+			// Get current time in milliseconds (Unix epoch timestamp)
+			auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+			    std::chrono::system_clock::now().time_since_epoch())
+			                  .count();
+
+			// Calculate time remaining until expiration (in milliseconds)
+			int64_t time_remaining_ms = it->second - now_ms;
+
+			// Refresh if expired or within safety margin of expiration
+			if (time_remaining_ms > REFRESH_SAFETY_MARGIN_MS) {
+				needs_refresh = false;
+			}
+		}
+	}
+
+	if (needs_refresh) {
+		// Get fresh credentials from UCAPI (includes expiration_time)
+		auto table_credentials = UCAPI::GetTableCredentials(context, table_id, credentials);
+
+		// Cache expiration time for future checks
+		if (table_credentials.expiration_time > 0) {
+			secret_expiration_times[table_id] = table_credentials.expiration_time;
+		}
+
+		// Inject secret into secret manager scoped to this path
+		CreateSecretInput input;
+		input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
+		input.persist_type = SecretPersistType::TEMPORARY;
+		input.name = secret_name;
+		input.type = "s3";
+		input.provider = "config";
+		input.options = {
+		    {"key_id", table_credentials.key_id},
+		    {"secret", table_credentials.secret},
+		    {"session_token", table_credentials.session_token},
+		    {"region", credentials.aws_region},
+		};
+		input.scope = {storage_location};
+
+		secret_manager.CreateSecret(context, input);
+	}
+	// If secret exists and not expired, use cached secret
 }
 
 } // namespace duckdb
