@@ -18,6 +18,7 @@ jobs:
       VCPKG_TARGET_TRIPLET: 'x64-linux'
       GEN: ninja
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      USE_MERGED_VCPKG_MANIFEST: 1
       UC_TEST_SERVER_RUNNING: 1
       BUILD_EXTENSION_TEST_DEPS: full
 

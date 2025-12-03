@@ -17,6 +17,7 @@ jobs:
     env:
       VCPKG_TARGET_TRIPLET: x64-linux
       VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      USE_MERGED_VCPKG_MANIFEST: 1g
       GEN: ninja
       DUCKDB_PLATFORM: linux_amd64
       BUILD_EXTENSION_TEST_DEPS: full
