@@ -33,10 +33,10 @@ struct UCType {
  */
 class UCTableCredentialManager {
 public:
-	/**
-	 * Get the singleton instance of the credential manager.
-	 */
-	static UCTableCredentialManager &GetInstance();
+	UCTableCredentialManager() = default;
+	~UCTableCredentialManager() = default;
+	UCTableCredentialManager(const UCTableCredentialManager &) = delete;
+	UCTableCredentialManager &operator=(const UCTableCredentialManager &) = delete;
 
 	/**
 	 * Ensure that valid AWS credentials are cached for the given table.
@@ -51,11 +51,6 @@ public:
 	                            const UCCredentials &credentials);
 
 private:
-	UCTableCredentialManager() = default;
-	~UCTableCredentialManager() = default;
-	UCTableCredentialManager(const UCTableCredentialManager &) = delete;
-	UCTableCredentialManager &operator=(const UCTableCredentialManager &) = delete;
-
 	// Mutex map to synchronize secret creation per table_id
 	unordered_map<string, unique_ptr<mutex>> table_secret_mutexes;
 	mutex mutex_map_mutex;
@@ -65,8 +60,8 @@ private:
 	// Secret name prefix for internal Unity Catalog table credentials
 	static constexpr const char* SECRET_NAME_PREFIX = "_internal_unity_catalog_";
 
-	// Safety margin for credential refresh (5 minutes in milliseconds)
-	static constexpr int64_t REFRESH_SAFETY_MARGIN_MS = 300000;
+	// Safety margin for credential refresh (15 minutes in milliseconds)
+	static constexpr int64_t REFRESH_SAFETY_MARGIN_MS = 900000;
 };
 
 class UCUtils {

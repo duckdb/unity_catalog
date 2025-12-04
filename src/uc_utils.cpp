@@ -191,11 +191,6 @@ LogicalType UCUtils::ToUCType(const LogicalType &input) {
 	}
 }
 
-UCTableCredentialManager &UCTableCredentialManager::GetInstance() {
-	static UCTableCredentialManager instance;
-	return instance;
-}
-
 void UCTableCredentialManager::EnsureTableCredentials(ClientContext &context, const string &table_id,
                                                       const string &storage_location,
                                                       const UCCredentials &credentials) {
