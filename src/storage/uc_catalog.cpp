@@ -14,7 +14,8 @@ namespace duckdb {
 UCCatalog::UCCatalog(AttachedDatabase &db_p, const string &internal_name, AttachOptions &attach_options,
                      UCCredentials credentials, const string &default_schema, string catalog_name_p)
     : Catalog(db_p), internal_name(internal_name), access_mode(attach_options.access_mode),
-      credentials(std::move(credentials)), schemas(*this), default_schema(default_schema), catalog_name(std::move(catalog_name_p)) {
+      credentials(std::move(credentials)), schemas(*this), default_schema(default_schema),
+      catalog_name(std::move(catalog_name_p)), credential_manager(make_uniq<UCTableCredentialManager>()) {
 }
 
 UCCatalog::~UCCatalog() = default;
@@ -125,8 +126,7 @@ PhysicalOperator &UCCatalog::PlanInsert(ClientContext &context, PhysicalPlanGene
 	// CREATE TMP CREDENTIALS
 	auto &table_data = table.table_data;
 	if (table_data->storage_location.find("file://") != 0) {
-		auto &credential_manager = UCTableCredentialManager::GetInstance();
-		credential_manager.EnsureTableCredentials(context, table_data->table_id, table_data->storage_location,
+		credential_manager->EnsureTableCredentials(context, table_data->table_id, table_data->storage_location,
 		                                          credentials);
 	}
 

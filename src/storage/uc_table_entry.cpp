@@ -65,8 +65,7 @@ TableFunction UCTableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
 	vector<Value> inputs = {table_data->storage_location};
 
 	if (table_data->storage_location.find("file://") != 0) {
-		auto &credential_manager = UCTableCredentialManager::GetInstance();
-		credential_manager.EnsureTableCredentials(context, table_data->table_id, table_data->storage_location,
+		uc_catalog.credential_manager->EnsureTableCredentials(context, table_data->table_id, table_data->storage_location,
 		                                          uc_catalog.credentials);
 	}
 	named_parameter_map_t param_map;
