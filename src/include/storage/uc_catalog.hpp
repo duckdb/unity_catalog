@@ -16,6 +16,7 @@
 
 namespace duckdb {
 class UCSchemaEntry;
+class UCTableCredentialManager;
 
 struct UCCredentials {
 	string endpoint;
@@ -41,6 +42,8 @@ public:
 	string internal_name;
 	AccessMode access_mode;
 	UCCredentials credentials;
+
+	unique_ptr<UCTableCredentialManager> credential_manager;
 
 	string catalog_name;
 

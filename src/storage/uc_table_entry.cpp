@@ -5,10 +5,12 @@
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "uc_api.hpp"
+#include "uc_utils.hpp"
+#include <unordered_map>
+#include <chrono>
 
 namespace duckdb {
 
@@ -63,26 +65,8 @@ TableFunction UCTableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
 	vector<Value> inputs = {table_data->storage_location};
 
 	if (table_data->storage_location.find("file://") != 0) {
-		auto &secret_manager = SecretManager::Get(context);
-		// Get Credentials from UCAPI
-		auto table_credentials = UCAPI::GetTableCredentials(context, table_data->table_id, uc_catalog.credentials);
-
-		// Inject secret into secret manager scoped to this path
-		CreateSecretInput input;
-		input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
-		input.persist_type = SecretPersistType::TEMPORARY;
-		input.name = "__internal_uc_" + table_data->table_id;
-		input.type = "s3";
-		input.provider = "config";
-		input.options = {
-		    {"key_id", table_credentials.key_id},
-		    {"secret", table_credentials.secret},
-		    {"session_token", table_credentials.session_token},
-		    {"region", uc_catalog.credentials.aws_region},
-		};
-		input.scope = {table_data->storage_location};
-
-		secret_manager.CreateSecret(context, input);
+		uc_catalog.credential_manager->EnsureTableCredentials(context, table_data->table_id, table_data->storage_location,
+		                                          uc_catalog.credentials);
 	}
 	named_parameter_map_t param_map;
 	vector<LogicalType> return_types;

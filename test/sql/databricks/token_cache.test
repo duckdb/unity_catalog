@@ -1,0 +1,52 @@
+# name: test/sql/databricks/token_cache.test
+# description: test token cache
+# group: [databricks]
+
+# Require statement will ensure this test is run with this extension loaded
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN '${DATABRICKS_TOKEN}',
+    ENDPOINT '${DATABRICKS_ENDPOINT}',
+    AWS_REGION '${DATABRICKS_REGION}'
+);
+
+# Attach to databricks through the unity catalog API
+statement ok
+ATTACH 'duckdblabs_testing' (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'main');
+
+statement ok
+CALL enable_logging('HTTP')
+
+# Can query a table
+query I nosort expected_res
+from duckdblabs_testing.main.simple_table;
+
+query I
+select request.type from duckdb_logs_parsed('HTTP') where request.url like '%.cloud.databricks.com/api/2.1/unity-catalog/temporary-table-credentials';
+----
+POST
+
+# Can query a table again
+query I nosort expected_res
+from duckdblabs_testing.main.simple_table;
+
+# Still 1 token request: the token is now cached
+query I
+select request.type from duckdb_logs_parsed('HTTP') where request.url like '%.cloud.databricks.com/api/2.1/unity-catalog/temporary-table-credentials';
+----
+POST
