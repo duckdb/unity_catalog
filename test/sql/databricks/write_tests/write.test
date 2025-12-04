@@ -36,18 +36,24 @@ ATTACH '${DATABRICKS_WRITE_TEST_CATALOG}' as databricks_catalog (TYPE UNITY_CATA
 statement ok
 USE databricks_catalog;
 
-query I
-select sum(l_orderkey) from lineitem
+query II
+SELECT * FROM simple_table ORDER BY id
 ----
-1802759573
+0	value-0
+1	value-1
+2	value-2
+3	value-3
+4	value-4
 
 statement ok
-FROM lineitem limit 5
+INSERT INTO simple_table VALUES (5, 'value-5');
 
-statement ok
-INSERT INTO lineitem VALUES (1, 241, 23, 5, 24.00, 27389.76, 0.10, 0.04, 'N', 'O', '1996-03-30', '1996-03-14', '1996-04-01', NULL, 'FOB', 'the regular, regular pa');
-
-query I
-select sum(l_orderkey) from lineitem
+query II
+SELECT * FROM simple_table ORDER BY id
 ----
-1802759574
+0	value-0
+1	value-1
+2	value-2
+3	value-3
+4	value-4
+5	value-5
