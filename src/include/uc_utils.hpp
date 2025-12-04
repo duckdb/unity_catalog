@@ -27,41 +27,37 @@ struct UCType {
 	vector<UCType> children;
 };
 
+struct UCTableCredentialCacheEntry {
+	UCTableCredentialCacheEntry() : expiration_time(0){
+	};
+	mutex lock;
+	int64_t expiration_time;
+};
+
 /**
  * Manages AWS temporary credentials caching for Unity Catalog tables.
  * Provides thread-safe credential caching with expiration checking.
  */
 class UCTableCredentialManager {
 public:
+	// Secret name prefix for internal Unity Catalog table credentials
+	static constexpr const char* SECRET_NAME_PREFIX = "_internal_unity_catalog_";
+	// Safety margin for credential refresh (15 minutes in milliseconds)
+	static constexpr int64_t REFRESH_SAFETY_MARGIN_MS = 900000;
+
 	UCTableCredentialManager() = default;
 	~UCTableCredentialManager() = default;
 	UCTableCredentialManager(const UCTableCredentialManager &) = delete;
 	UCTableCredentialManager &operator=(const UCTableCredentialManager &) = delete;
 
-	/**
-	 * Ensure that valid AWS credentials are cached for the given table.
-	 * This method handles mutex locking, expiration checking, and credential refresh.
-	 *
-	 * @param context The client context
-	 * @param table_id The Unity Catalog table ID
-	 * @param storage_location The storage location path
-	 * @param credentials The Unity Catalog credentials
-	 */
+	// Ensure that valid AWS credentials are cached for the given table.
+	// this method handles mutex locking, expiration checking, and credential refresh.
 	void EnsureTableCredentials(ClientContext &context, const string &table_id, const string &storage_location,
 	                            const UCCredentials &credentials);
 
 private:
-	// Mutex map to synchronize secret creation per table_id
-	unordered_map<string, unique_ptr<mutex>> table_secret_mutexes;
-	mutex mutex_map_mutex;
-	// Track secret expiration times per table_id (Unix epoch timestamp in milliseconds)
-	unordered_map<string, int64_t> secret_expiration_times;
-
-	// Secret name prefix for internal Unity Catalog table credentials
-	static constexpr const char* SECRET_NAME_PREFIX = "_internal_unity_catalog_";
-
-	// Safety margin for credential refresh (15 minutes in milliseconds)
-	static constexpr int64_t REFRESH_SAFETY_MARGIN_MS = 900000;
+	unordered_map<string, unique_ptr<UCTableCredentialCacheEntry>> entries;
+	mutex lock;
 };
 
 class UCUtils {

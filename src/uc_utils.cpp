@@ -197,16 +197,18 @@ void UCTableCredentialManager::EnsureTableCredentials(ClientContext &context, co
 	auto &secret_manager = SecretManager::Get(context);
 	string secret_name = string(SECRET_NAME_PREFIX) + table_id;
 
-	// Get or create mutex for this specific table_id to prevent concurrent secret creation
-	mutex *table_mutex;
+	optional_ptr<UCTableCredentialCacheEntry> credential_cache_entry;
+	idx_t current_expiration_time;
 	{
-		lock_guard<mutex> map_lock(mutex_map_mutex);
-		auto emplace_result = table_secret_mutexes.emplace(table_id, make_uniq<mutex>());
-		table_mutex = emplace_result.first->second.get();
+		lock_guard<mutex> lck(lock);
+		auto res = entries.find(table_id);
+		if (res == entries.end()) {
+			entries[table_id] = make_uniq<UCTableCredentialCacheEntry>();
+		}
+		credential_cache_entry = entries[table_id];
+		lock_guard<mutex> lck_table(credential_cache_entry->lock);
+		current_expiration_time = credential_cache_entry->expiration_time;
 	}
-
-	// Lock this specific table's secret creation to prevent concurrent writes
-	lock_guard<mutex> secret_lock(*table_mutex);
 
 	// Check if secret exists and is still valid (not expired)
 	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
@@ -214,16 +216,13 @@ void UCTableCredentialManager::EnsureTableCredentials(ClientContext &context, co
 
 	bool needs_refresh = true;
 	if (existing_secret) {
-		// Check expiration time if we have it cached
-		auto it = secret_expiration_times.find(table_id);
-		if (it != secret_expiration_times.end() && it->second > 0) {
-			// Get current time in milliseconds (Unix epoch timestamp)
+		if (current_expiration_time) {
 			auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
 			    std::chrono::system_clock::now().time_since_epoch())
 			                  .count();
 
 			// Calculate time remaining until expiration (in milliseconds)
-			int64_t time_remaining_ms = it->second - now_ms;
+			int64_t time_remaining_ms = current_expiration_time - now_ms;
 
 			// Refresh if expired or within safety margin of expiration
 			if (time_remaining_ms > REFRESH_SAFETY_MARGIN_MS) {
@@ -238,7 +237,10 @@ void UCTableCredentialManager::EnsureTableCredentials(ClientContext &context, co
 
 		// Cache expiration time for future checks
 		if (table_credentials.expiration_time > 0) {
-			secret_expiration_times[table_id] = table_credentials.expiration_time;
+			{
+				lock_guard<mutex> lck(credential_cache_entry->lock);
+				credential_cache_entry->expiration_time = table_credentials.expiration_time;
+			}
 		}
 
 		// Inject secret into secret manager scoped to this path
