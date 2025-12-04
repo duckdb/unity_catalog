@@ -47,6 +47,7 @@ struct UCAPITableCredentials {
 	string key_id;
 	string secret;
 	string session_token;
+	int64_t expiration_time = 0; // Unix epoch timestamp in milliseconds, 0 if not provided
 };
 
 class UCAPI {
