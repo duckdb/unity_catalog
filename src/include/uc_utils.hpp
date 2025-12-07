@@ -31,6 +31,7 @@ struct UCTableCredentialCacheEntry {
 	UCTableCredentialCacheEntry() : expiration_time(0){
 	};
 	mutex lock;
+	bool read_only;
 	int64_t expiration_time;
 };
 
@@ -53,7 +54,7 @@ public:
 	// Ensure that valid AWS credentials are cached for the given table.
 	// this method handles mutex locking, expiration checking, and credential refresh.
 	void EnsureTableCredentials(ClientContext &context, const string &table_id, const string &storage_location,
-	                            const UCCredentials &credentials);
+	                            const bool read_only, const UCCredentials &credentials);
 
 private:
 	unordered_map<string, unique_ptr<UCTableCredentialCacheEntry>> entries;

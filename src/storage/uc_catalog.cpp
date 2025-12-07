@@ -126,8 +126,8 @@ PhysicalOperator &UCCatalog::PlanInsert(ClientContext &context, PhysicalPlanGene
 	// CREATE TMP CREDENTIALS
 	auto &table_data = table.table_data;
 	if (table_data->storage_location.find("file://") != 0) {
-		credential_manager->EnsureTableCredentials(context, table_data->table_id, table_data->storage_location,
-		                                          credentials);
+		credential_manager->EnsureTableCredentials(context, table_data->table_id, table_data->storage_location, false,
+		                                           credentials);
 	}
 
 	return internal_catalog->PlanInsert(context, planner, op, plan);

@@ -114,13 +114,14 @@ static UCAPIError CheckError(duckdb_yyjson::yyjson_val *api_result) {
 	return UCAPIError();
 }
 
-static string GetCredentialsRequest(ClientContext &ctx, const string &url, const string &table_id,
+static string GetCredentialsRequest(ClientContext &ctx, const string &url, const string &table_id, const bool read_only,
                                     const string &token = "") {
 	auto db = ctx.db;
 	auto &http_util = HTTPUtil::Get(*db);
 	auto params = http_util.InitializeParameters(*db, url);
 
-	string body = StringUtil::Format(R"({"table_id" : "%s", "operation" : "READ_WRITE"})", table_id);
+	string op = read_only ? "READ" : "READ_WRITE";
+	string body = StringUtil::Format(R"({"table_id" : "%s", "operation" : "%s"})", table_id, op);
 	HTTPHeaders hdrs(*db);
 	hdrs.Insert("Content-Type", "application/json");
 	AuthenticateViaBearerToken(hdrs, token);
@@ -178,12 +179,12 @@ string UCAPI::GetDefaultSchema(ClientContext &ctx, const UCCredentials &credenti
 	return setting_name;
 }
 
-UCAPITableCredentials UCAPI::GetTableCredentials(ClientContext &ctx, const string &table_id,
+UCAPITableCredentials UCAPI::GetTableCredentials(ClientContext &ctx, const string &table_id, const bool read_only,
                                                  const UCCredentials &credentials) {
 	UCAPITableCredentials result;
 
 	auto url = credentials.endpoint + "/api/2.1/unity-catalog/temporary-table-credentials";
-	auto api_result = GetCredentialsRequest(ctx, url, table_id, credentials.token);
+	auto api_result = GetCredentialsRequest(ctx, url, table_id, read_only, credentials.token);
 
 	// Read JSON and get root
 	duckdb_yyjson::yyjson_doc *doc = duckdb_yyjson::yyjson_read(api_result.c_str(), api_result.size(), 0);

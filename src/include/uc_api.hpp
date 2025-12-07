@@ -52,7 +52,7 @@ struct UCAPITableCredentials {
 
 class UCAPI {
 public:
-	static UCAPITableCredentials GetTableCredentials(ClientContext &ctx, const string &table_id,
+	static UCAPITableCredentials GetTableCredentials(ClientContext &ctx, const string &table_id, const bool read_only,
 	                                                 const UCCredentials &credentials);
 	static string GetDefaultSchema(ClientContext &ctx, const UCCredentials &credentials);
 	static vector<string> GetCatalogs(ClientContext &ctx, Catalog &catalog, const UCCredentials &credentials);

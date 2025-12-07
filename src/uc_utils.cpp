@@ -192,13 +192,14 @@ LogicalType UCUtils::ToUCType(const LogicalType &input) {
 }
 
 void UCTableCredentialManager::EnsureTableCredentials(ClientContext &context, const string &table_id,
-                                                      const string &storage_location,
+                                                      const string &storage_location, const bool read_only,
                                                       const UCCredentials &credentials) {
 	auto &secret_manager = SecretManager::Get(context);
 	string secret_name = string(SECRET_NAME_PREFIX) + table_id;
 
 	optional_ptr<UCTableCredentialCacheEntry> credential_cache_entry;
 	idx_t current_expiration_time;
+	bool read_only_cred;
 	{
 		lock_guard<mutex> lck(lock);
 		auto res = entries.find(table_id);
@@ -207,6 +208,7 @@ void UCTableCredentialManager::EnsureTableCredentials(ClientContext &context, co
 		}
 		credential_cache_entry = entries[table_id];
 		lock_guard<mutex> lck_table(credential_cache_entry->lock);
+		read_only_cred = credential_cache_entry->read_only;
 		current_expiration_time = credential_cache_entry->expiration_time;
 	}
 
@@ -225,7 +227,8 @@ void UCTableCredentialManager::EnsureTableCredentials(ClientContext &context, co
 			int64_t time_remaining_ms = current_expiration_time - now_ms;
 
 			// Refresh if expired or within safety margin of expiration
-			if (time_remaining_ms > REFRESH_SAFETY_MARGIN_MS) {
+			// or the cached credential is read only and we need a write credential
+			if (time_remaining_ms > REFRESH_SAFETY_MARGIN_MS && read_only_cred <= read_only) {
 				needs_refresh = false;
 			}
 		}
@@ -233,13 +236,14 @@ void UCTableCredentialManager::EnsureTableCredentials(ClientContext &context, co
 
 	if (needs_refresh) {
 		// Get fresh credentials from UCAPI (includes expiration_time)
-		auto table_credentials = UCAPI::GetTableCredentials(context, table_id, credentials);
+		auto table_credentials = UCAPI::GetTableCredentials(context, table_id, read_only, credentials);
 
 		// Cache expiration time for future checks
 		if (table_credentials.expiration_time > 0) {
 			{
 				lock_guard<mutex> lck(credential_cache_entry->lock);
 				credential_cache_entry->expiration_time = table_credentials.expiration_time;
+				credential_cache_entry->read_only = read_only;
 			}
 		}
 

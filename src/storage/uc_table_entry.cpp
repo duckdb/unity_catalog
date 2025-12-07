@@ -65,8 +65,9 @@ TableFunction UCTableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
 	vector<Value> inputs = {table_data->storage_location};
 
 	if (table_data->storage_location.find("file://") != 0) {
-		uc_catalog.credential_manager->EnsureTableCredentials(context, table_data->table_id, table_data->storage_location,
-		                                          uc_catalog.credentials);
+		uc_catalog.credential_manager->EnsureTableCredentials(
+		    context, table_data->table_id, table_data->storage_location,
+		    uc_catalog.access_mode == AccessMode::READ_ONLY, uc_catalog.credentials);
 	}
 	named_parameter_map_t param_map;
 	vector<LogicalType> return_types;
