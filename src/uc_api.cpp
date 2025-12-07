@@ -201,7 +201,11 @@ UCAPITableCredentials UCAPI::GetTableCredentials(ClientContext &ctx, const strin
 		result.secret = TryGetStrFromObject(aws_temp_credentials, "secret_access_key");
 		result.session_token = TryGetStrFromObject(aws_temp_credentials, "session_token");
 	}
-	
+	auto *azure_sas = yyjson_obj_get(root, "azure_user_delegation_sas");
+	if (azure_sas) {
+		result.session_token = TryGetStrFromObject(azure_sas, "sas_token");
+	}
+
 	// Parse expiration_time if available (works for AWS credentials)
 	// API returns expiration_time as Unix epoch timestamp in milliseconds
 	uint64_t expiration_ms = TryGetNumFromObject(root, "expiration_time", false, 0);

@@ -252,15 +252,26 @@ void UCTableCredentialManager::EnsureTableCredentials(ClientContext &context, co
 		input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
 		input.persist_type = SecretPersistType::TEMPORARY;
 		input.name = secret_name;
-		input.type = "s3";
 		input.provider = "config";
-		input.options = {
-		    {"key_id", table_credentials.key_id},
-		    {"secret", table_credentials.secret},
-		    {"session_token", table_credentials.session_token},
-		    {"region", credentials.aws_region},
-		};
 		input.scope = {storage_location};
+		// Starts with abfss: this is an azure blob storage location
+		if (storage_location.find("abfss://") == 0) {
+			// parse storage account name from location (abfss://catalog@account-name.dfs.windows.net/path-to-blob)
+			auto storage_name_start = storage_location.find('@') + 1;
+			auto storage_name_len = storage_location.find('.', storage_name_start) - storage_name_start;
+			string storage_name = storage_location.substr(storage_name_start, storage_name_len);
+			auto conn_str = "AccountName=" + storage_name + ";SharedAccessSignature=" + table_credentials.session_token;
+			input.type = "azure";
+			input.options = {{"connection_string", conn_str}};
+		} else {
+			input.type = "s3";
+			input.options = {
+			    {"key_id", table_credentials.key_id},
+			    {"secret", table_credentials.secret},
+			    {"session_token", table_credentials.session_token},
+			    {"region", credentials.aws_region},
+			};
+		}
 
 		secret_manager.CreateSecret(context, input);
 	}
