@@ -47,11 +47,12 @@ struct UCAPITableCredentials {
 	string key_id;
 	string secret;
 	string session_token;
+	int64_t expiration_time = 0; // Unix epoch timestamp in milliseconds, 0 if not provided
 };
 
 class UCAPI {
 public:
-	static UCAPITableCredentials GetTableCredentials(ClientContext &ctx, const string &table_id,
+	static UCAPITableCredentials GetTableCredentials(ClientContext &ctx, const string &table_id, const bool read_only,
 	                                                 const UCCredentials &credentials);
 	static string GetDefaultSchema(ClientContext &ctx, const UCCredentials &credentials);
 	static vector<string> GetCatalogs(ClientContext &ctx, Catalog &catalog, const UCCredentials &credentials);

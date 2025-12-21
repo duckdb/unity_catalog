@@ -7,14 +7,15 @@
 #include "duckdb/storage/database_size.hpp"
 #include "storage/uc_schema_entry.hpp"
 #include "storage/uc_transaction.hpp"
-#include "duckdb/main/secret/secret_manager.hpp"
+#include "uc_utils.hpp"
 
 namespace duckdb {
 
 UCCatalog::UCCatalog(AttachedDatabase &db_p, const string &internal_name, AttachOptions &attach_options,
                      UCCredentials credentials, const string &default_schema, string catalog_name_p)
     : Catalog(db_p), internal_name(internal_name), access_mode(attach_options.access_mode),
-      credentials(std::move(credentials)), schemas(*this), default_schema(default_schema), catalog_name(std::move(catalog_name_p)) {
+      credentials(std::move(credentials)), schemas(*this), default_schema(default_schema),
+      catalog_name(std::move(catalog_name_p)), credential_manager(make_uniq<UCTableCredentialManager>()) {
 }
 
 UCCatalog::~UCCatalog() = default;
@@ -122,29 +123,11 @@ PhysicalOperator &UCCatalog::PlanInsert(ClientContext &context, PhysicalPlanGene
 	// LOAD THE INTERNAL TABLE ENTRY
 	auto internal_catalog = table.GetInternalCatalog();
 
-	// CREATE TMP CREDENTIALS TODO: dedup with getScanFunction
+	// CREATE TMP CREDENTIALS
 	auto &table_data = table.table_data;
 	if (table_data->storage_location.find("file://") != 0) {
-		auto &secret_manager = SecretManager::Get(context);
-		// Get Credentials from UCAPI
-		auto table_credentials = UCAPI::GetTableCredentials(context, table_data->table_id, credentials);
-
-		// Inject secret into secret manager sc oped to this path TODO:
-		CreateSecretInput input;
-		input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
-		input.persist_type = SecretPersistType::TEMPORARY;
-		input.name = "_internal_unity_catalog_" + table_data->table_id;
-		input.type = "s3";
-		input.provider = "config";
-		input.options = {
-		    {"key_id", table_credentials.key_id},
-		    {"secret", table_credentials.secret},
-		    {"session_token", table_credentials.session_token},
-		    {"region", credentials.aws_region},
-		};
-		input.scope = {table_data->storage_location};
-
-		secret_manager.CreateSecret(context, input);
+		credential_manager->EnsureTableCredentials(context, table_data->table_id, table_data->storage_location, false,
+		                                           credentials);
 	}
 
 	return internal_catalog->PlanInsert(context, planner, op, plan);

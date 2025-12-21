@@ -2,6 +2,8 @@
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "storage/uc_schema_entry.hpp"
 #include "storage/uc_transaction.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
+#include "uc_api.hpp"
 
 #include <iostream>
 
@@ -187,6 +189,93 @@ LogicalType UCUtils::ToUCType(const LogicalType &input) {
 	default:
 		return LogicalType::VARCHAR;
 	}
+}
+
+void UCTableCredentialManager::EnsureTableCredentials(ClientContext &context, const string &table_id,
+                                                      const string &storage_location, const bool read_only,
+                                                      const UCCredentials &credentials) {
+	auto &secret_manager = SecretManager::Get(context);
+	string secret_name = string(SECRET_NAME_PREFIX) + table_id;
+
+	optional_ptr<UCTableCredentialCacheEntry> credential_cache_entry;
+	idx_t current_expiration_time;
+	bool read_only_cred;
+	{
+		lock_guard<mutex> lck(lock);
+		auto res = entries.find(table_id);
+		if (res == entries.end()) {
+			entries[table_id] = make_uniq<UCTableCredentialCacheEntry>();
+		}
+		credential_cache_entry = entries[table_id];
+		lock_guard<mutex> lck_table(credential_cache_entry->lock);
+		read_only_cred = credential_cache_entry->read_only;
+		current_expiration_time = credential_cache_entry->expiration_time;
+	}
+
+	// Check if secret exists and is still valid (not expired)
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	auto existing_secret = secret_manager.GetSecretByName(transaction, secret_name, "memory");
+
+	bool needs_refresh = true;
+	if (existing_secret) {
+		if (current_expiration_time) {
+			auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+			    std::chrono::system_clock::now().time_since_epoch())
+			                  .count();
+
+			// Calculate time remaining until expiration (in milliseconds)
+			int64_t time_remaining_ms = current_expiration_time - now_ms;
+
+			// Refresh if expired or within safety margin of expiration
+			// or the cached credential is read only and we need a write credential
+			if (time_remaining_ms > REFRESH_SAFETY_MARGIN_MS && read_only_cred <= read_only) {
+				needs_refresh = false;
+			}
+		}
+	}
+
+	if (needs_refresh) {
+		// Get fresh credentials from UCAPI (includes expiration_time)
+		auto table_credentials = UCAPI::GetTableCredentials(context, table_id, read_only, credentials);
+
+		// Cache expiration time for future checks
+		if (table_credentials.expiration_time > 0) {
+			{
+				lock_guard<mutex> lck(credential_cache_entry->lock);
+				credential_cache_entry->expiration_time = table_credentials.expiration_time;
+				credential_cache_entry->read_only = read_only;
+			}
+		}
+
+		// Inject secret into secret manager scoped to this path
+		CreateSecretInput input;
+		input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
+		input.persist_type = SecretPersistType::TEMPORARY;
+		input.name = secret_name;
+		input.provider = "config";
+		input.scope = {storage_location};
+		// Starts with abfss: this is an azure blob storage location
+		if (storage_location.find("abfss://") == 0) {
+			// parse storage account name from location (abfss://catalog@account-name.dfs.windows.net/path-to-blob)
+			auto storage_name_start = storage_location.find('@') + 1;
+			auto storage_name_len = storage_location.find('.', storage_name_start) - storage_name_start;
+			string storage_name = storage_location.substr(storage_name_start, storage_name_len);
+			auto conn_str = "AccountName=" + storage_name + ";SharedAccessSignature=" + table_credentials.session_token;
+			input.type = "azure";
+			input.options = {{"connection_string", conn_str}};
+		} else {
+			input.type = "s3";
+			input.options = {
+			    {"key_id", table_credentials.key_id},
+			    {"secret", table_credentials.secret},
+			    {"session_token", table_credentials.session_token},
+			    {"region", credentials.aws_region},
+			};
+		}
+
+		secret_manager.CreateSecret(context, input);
+	}
+	// If secret exists and not expired, use cached secret
 }
 
 } // namespace duckdb
