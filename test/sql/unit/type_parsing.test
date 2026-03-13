@@ -42,7 +42,24 @@ SELECT products[1].bid_price FROM test_nested;
 1.500000000000000000
 
 statement ok
+CREATE TABLE test_array_decimal AS
+SELECT [1.5::DECIMAL(38,18), 2.0::DECIMAL(38,18)] AS prices;
+
+query I
+SELECT prices[1] FROM test_array_decimal;
+----
+1.500000000000000000
+
+query I
+SELECT prices[2] FROM test_array_decimal;
+----
+2.000000000000000000
+
+statement ok
 DROP TABLE test_struct_decimal;
 
 statement ok
 DROP TABLE test_nested;
+
+statement ok
+DROP TABLE test_array_decimal;
