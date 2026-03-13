@@ -56,6 +56,20 @@ SELECT prices[2] FROM test_array_decimal;
 2.000000000000000000
 
 statement ok
+CREATE TABLE test_map_decimal AS
+SELECT MAP {'item_a': 1.5::DECIMAL(38,18), 'item_b': 2.0::DECIMAL(38,18)} AS prices;
+
+query I
+SELECT prices['item_a'] FROM test_map_decimal;
+----
+1.500000000000000000
+
+query I
+SELECT prices['item_b'] FROM test_map_decimal;
+----
+2.000000000000000000
+
+statement ok
 DROP TABLE test_struct_decimal;
 
 statement ok
@@ -63,3 +77,6 @@ DROP TABLE test_nested;
 
 statement ok
 DROP TABLE test_array_decimal;
+
+statement ok
+DROP TABLE test_map_decimal;
