@@ -138,6 +138,16 @@ void UCSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 
 optional_ptr<CatalogEntry> UCSchemaEntry::LookupEntry(CatalogTransaction transaction,
                                                       const EntryLookupInfo &lookup_info) {
+	auto catalog_type = lookup_info.GetCatalogType();
+	auto &entry_name = lookup_info.GetEntryName();
+
+	if (catalog_type == CatalogType::TABLE_FUNCTION_ENTRY) {
+		auto entry = TryLoadBuiltInFunction(entry_name);
+		if (entry) {
+			return entry;
+		}
+	}
+
 	if (!CatalogTypeIsSupported(lookup_info.GetCatalogType())) {
 		return nullptr;
 	}

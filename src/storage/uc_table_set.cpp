@@ -39,29 +39,42 @@ static ColumnDefinition CreateColumnDefinition(ClientContext &context, UCAPIColu
 }
 
 optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, const EntryLookupInfo &lookup_info) {
-	lock_guard<mutex> l(entry_lock);
 	auto at = lookup_info.GetAtClause();
 	if (!at) {
 		//! No version provided, just return the dummy entry (should represent latest version)
+		lock_guard<mutex> l(entry_lock);
 		return dummy.get();
 	}
 
 	auto version = ParseDeltaVersionFromAtClause(*at);
-	auto it = schema_versions.find(version);
-	if (it == schema_versions.end()) {
-		InternalAttach(context);
-		auto &delta_catalog = *GetInternalCatalog();
-		RefreshCredentials(context);
-		auto &schema = delta_catalog.GetSchema(context, table_data->schema_name);
-		auto transaction = schema.GetCatalogTransaction(context);
-		auto table_entry = schema.LookupEntry(transaction, lookup_info);
-		auto create_info = table_entry->GetInfo();
-		auto res = schema_versions.emplace(
-		    version, make_uniq<UCTableEntry>(catalog, schema, *this, create_info->Cast<CreateTableInfo>()));
-		return res.first->second.get();
+
+	// Fast path: already cached
+	{
+		lock_guard<mutex> l(entry_lock);
+		auto it = schema_versions.find(version);
+		if (it != schema_versions.end()) {
+			return it->second.get();
+		}
 	}
-	auto &entry = it->second;
-	return entry.get();
+
+	// Not cached: attach and fetch schema — done outside entry_lock since it may block on I/O
+	InternalAttach(context);
+	RefreshCredentials(context);
+	auto &delta_catalog = *GetInternalCatalog();
+	auto &schema = delta_catalog.GetSchema(context, table_data->schema_name);
+	auto transaction = schema.GetCatalogTransaction(context);
+	auto table_entry = schema.LookupEntry(transaction, lookup_info);
+	auto create_info = table_entry->GetInfo();
+
+	lock_guard<mutex> l(entry_lock);
+	// Re-check under lock in case another thread raced us here
+	auto it = schema_versions.find(version);
+	if (it != schema_versions.end()) {
+		return it->second.get();
+	}
+	auto res = schema_versions.emplace(
+	    version, make_uniq<UCTableEntry>(catalog, schema, *this, create_info->Cast<CreateTableInfo>()));
+	return res.first->second.get();
 };
 
 optional_ptr<Catalog> TableInformation::GetInternalCatalog() {
@@ -75,7 +88,7 @@ void TableInformation::RefreshCredentials(ClientContext &context) {
 	}
 	auto &secret_manager = SecretManager::Get(context);
 	// Get Credentials from UCAPI
-	auto table_credentials = UCAPI::GetTableCredentials(context, table_data->table_id, catalog.credentials);
+	auto table_credentials = UCAPI::GetTableCredentials(context, table_data->table_id, !(catalog.access_mode == AccessMode::READ_ONLY), catalog.credentials);
 
 	// Inject secret into secret manager scoped to this path
 	CreateSecretInput input;
@@ -109,23 +122,79 @@ void TableInformation::InternalDetach(ClientContext &context) {
 	auto &db_manager = DatabaseManager::Get(context);
 	auto name = AttachedCatalogName();
 	db_manager.DetachDatabase(context, name, OnEntryNotFound::THROW_EXCEPTION);
+	internal_attached_database = nullptr;
+}
+
+void TableInformation::MarkDirty() {
+	lock_guard<mutex> l(attach_lock);
+	is_dirty = true;
+}
+
+bool TableInformation::IsCCV2() const {
+	// Check for the preview setting
+	auto it = table_data->properties.find("delta.feature.catalogOwned-preview");
+	if (it != table_data->properties.end() && it->second == "supported") {
+		return true;
+	}
+
+	// Check for the GA setting
+	it = table_data->properties.find("delta.feature.catalogManaged");
+	return it != table_data->properties.end() && it->second == "supported";
+}
+
+Value TableInformation::BuildLogTail(ClientContext &context) {
+	auto &uc_catalog = catalog.Cast<UnityCatalog>();
+	auto commits = UCAPI::GetCommits(context, table_data->table_id, table_data->storage_location, uc_catalog.credentials);
+
+	vector<Value> commit_values;
+	for (const auto &commit : commits.commits) {
+		child_list_t<Value> commit_struct;
+		commit_struct.push_back(make_pair("version", Value::BIGINT(commit.version)));
+		commit_struct.push_back(make_pair("timestamp", Value::BIGINT(commit.timestamp)));
+		commit_struct.push_back(make_pair("file_name", Value(table_data->storage_location + "/_delta_log/_staged_commits/" + commit.file_name)));
+		commit_struct.push_back(make_pair("file_size", Value::BIGINT(commit.file_size)));
+		commit_struct.push_back(make_pair("file_modification_timestamp", Value::BIGINT(commit.file_modification_timestamp)));
+		commit_values.push_back(Value::STRUCT(std::move(commit_struct)));
+	}
+
+	return Value::LIST(LogicalType::STRUCT({
+		make_pair("version", LogicalType::BIGINT),
+		make_pair("timestamp", LogicalType::BIGINT),
+		make_pair("file_name", LogicalType::VARCHAR),
+		make_pair("file_size", LogicalType::BIGINT),
+		make_pair("file_modification_timestamp", LogicalType::BIGINT)
+	}), commit_values);
 }
 
 void TableInformation::InternalAttach(ClientContext &context) {
+	lock_guard<mutex> l(attach_lock);
+	if (is_dirty) {
+		InternalDetach(context);
+		is_dirty = false;
+	}
 	if (internal_attached_database) {
 		return;
 	}
 	auto &db_manager = DatabaseManager::Get(context);
-	auto &schema_name = table_data->schema_name;
-	auto &catalog_name = table_data->catalog_name;
 	auto &name = table_data->name;
 
 	// Create the attach info for the table
 	AttachInfo info;
 	info.name = AttachedCatalogName();
 	info.options = {
-	    {"type", Value("Delta")}, {"child_catalog_mode", Value(true)}, {"internal_table_name", Value(name)}};
+		{"type", Value("Delta")}, {"child_catalog_mode", Value(true)}, {"internal_table_name", Value(name)}, {"unity_table_id", Value(table_data->table_id)}};
 	info.path = table_data->storage_location;
+
+	if (IsCCV2()) {
+		auto log_tail = BuildLogTail(context);
+		info.options["parent_catalog"] = Value(catalog.GetName());
+		info.options["parent_catalog_schema"] = Value(schema.name);
+		info.options["parent_commit"] = Value(true);
+		if (!log_tail.IsNull()) {
+			info.options["log_tail"] = log_tail;
+		}
+	}
+
 	AttachOptions options(context.db->config.options);
 	options.access_mode = AccessMode::READ_WRITE;
 	options.db_type = "delta";

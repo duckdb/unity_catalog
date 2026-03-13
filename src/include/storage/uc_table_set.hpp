@@ -27,9 +27,12 @@ public:
 	void RefreshCredentials(ClientContext &context);
 	void InternalAttach(ClientContext &context);
 	void InternalDetach(ClientContext &context);
-
+	bool IsCCV2() const;
+	Value BuildLogTail(ClientContext &context);
+	void MarkDirty();
 private:
 	string AttachedCatalogName() const;
+	bool is_dirty = false;
 
 public:
 	UnityCatalog &catalog;
@@ -38,7 +41,10 @@ public:
 	shared_ptr<AttachedDatabase> internal_attached_database;
 	optional_ptr<Transaction> active_transaction;
 
+	//! Guards schema_versions and dummy
 	mutex entry_lock;
+	//! Guards is_dirty and internal_attached_database
+	mutex attach_lock;
 	//! Map of delta version to TableCatalogEntry for the table
 	unordered_map<idx_t, unique_ptr<CatalogEntry>> schema_versions;
 	//! Dummy entry created from the "List tables" API result, presumably the latest schema version

@@ -105,30 +105,11 @@ PhysicalOperator &UnityCatalog::PlanInsert(ClientContext &context, PhysicalPlanG
                                            optional_ptr<PhysicalOperator> plan) {
 	auto &table_entry = op.table.Cast<UCTableEntry>();
 	auto &table = table_entry.table;
-	// LAZY CREATE ATTACHED DB
-	// TODO: move to transaction?
-	if (!table.internal_attached_database) {
-		auto &db_manager = DatabaseManager::Get(context);
 
-		// Create the attach info for the table
-		AttachInfo info;
-		info.name =
-		    "__unity_catalog_internal_" + internal_name + "_" + table.schema.name + "_" + table_entry.name; // TODO:
-		info.options = {{"type", Value("Delta")},
-		                {"child_catalog_mode", Value(true)},
-		                {"internal_table_name", Value(table_entry.name)}};
-		info.path = table.table_data->storage_location;
-		AttachOptions options(context.db->config.options);
-		options.access_mode = AccessMode::READ_WRITE;
-		options.db_type = "delta";
-		auto &internal_db = table.internal_attached_database;
-
-		internal_db = db_manager.AttachDatabase(context, info, options);
-	}
-
-	// LOAD THE INTERNAL TABLE ENTRY
-	auto internal_catalog = table.GetInternalCatalog();
+	table.InternalAttach(context);
 	table.RefreshCredentials(context);
+
+	auto internal_catalog = table.GetInternalCatalog();
 	return internal_catalog->PlanInsert(context, planner, op, plan);
 }
 

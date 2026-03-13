@@ -6,9 +6,6 @@
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
-#include "duckdb/parser/tableref/table_function_ref.hpp"
-#include "uc_api.hpp"
 
 namespace duckdb {
 
@@ -38,11 +35,11 @@ TableFunction UCTableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
 		throw NotImplementedException("Table '%s' is of unsupported format '%s', ", table_data->name,
 		                              table_data->data_source_format);
 	}
+
 	table.RefreshCredentials(context);
 	table.InternalAttach(context);
 
 	auto &delta_catalog = *table.GetInternalCatalog();
-	//! NOTE: This has to be DEFAULT_SCHEMA, we can't use the table_data->schema
 	auto &schema = delta_catalog.GetSchema(context, DEFAULT_SCHEMA);
 	auto transaction = schema.GetCatalogTransaction(context);
 	auto table_entry = schema.LookupEntry(transaction, lookup_info);

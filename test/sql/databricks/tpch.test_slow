@@ -31,26 +31,17 @@ CREATE SECRET (
 
 # Attach to databricks through the unity catalog API
 statement ok
-ATTACH 'duckdblabs_testing' (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'main');
-
-# Register tpch views
-foreach table customer lineitem nation orders part partsupp region supplier
+ATTACH 'duckdb_testing' (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'tpch_sf0_01');
 
 statement ok
-create view ${table}_delta as from duckdblabs_testing.main.tpch_sf1_${table};
-
-# NOTE: switch this to _parquet to easily compare plans while debugging
-statement ok
-create view ${table} as from ${table}_delta
-
-endloop
+USE duckdb_testing
 
 loop i 1 9
 
 query I
 PRAGMA tpch(${i})
 ----
-<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q0${i}.csv
+<FILE>:duckdb/extension/tpch/dbgen/answers/sf0.01/q0${i}.csv
 
 endloop
 
@@ -59,17 +50,6 @@ loop i 10 23
 query I
 PRAGMA tpch(${i})
 ----
-<FILE>:duckdb/extension/tpch/dbgen/answers/sf1/q${i}.csv
-
-endloop
-
-foreach table customer lineitem nation orders part partsupp region supplier
-
-# Cleanup
-statement ok
-DROP VIEW ${table}
-
-statement ok
-DROP VIEW ${table}_delta
+<FILE>:duckdb/extension/tpch/dbgen/answers/sf0.01/q${i}.csv
 
 endloop

@@ -41,8 +41,14 @@ ATTACH '${DATABRICKS_WRITE_TEST_CATALOG}' as databricks_catalog (TYPE UNITY_CATA
 statement ok
 USE databricks_catalog;
 
+statement ok
+call enable_logging(level='debug');
+
+statement ok
+SET VARIABLE table_path = (FROM databricks_catalog.table_data_path('simple_table_catalog_managed'));
+
 query II
-SELECT * FROM simple_table ORDER BY col1
+SELECT * FROM simple_table_catalog_managed ORDER BY col1
 ----
 0	value-0
 1	value-1
@@ -51,10 +57,13 @@ SELECT * FROM simple_table ORDER BY col1
 4	value-4
 
 statement ok
-INSERT INTO simple_table VALUES (5, 'value-5');
+INSERT INTO simple_table_catalog_managed VALUES (5, 'value-5');
+
+statement ok
+INSERT INTO simple_table_catalog_managed VALUES (6, 'value-6');
 
 query II
-SELECT * FROM simple_table ORDER BY col1
+SELECT * FROM simple_table_catalog_managed ORDER BY col1
 ----
 0	value-0
 1	value-1
@@ -62,3 +71,11 @@ SELECT * FROM simple_table ORDER BY col1
 3	value-3
 4	value-4
 5	value-5
+6	value-6
+
+# List the staged commits to the table
+query I
+SELECT parse_filename(file)[0:21] as f FROM GLOB(getvariable('table_path') || '/_delta_log/_staged_commits/**/*') order by f;
+----
+00000000000000000001.
+00000000000000000002.

@@ -24,6 +24,7 @@ jobs:
       DUCKDB_PLATFORM: linux_amd64
       BUILD_EXTENSION_TEST_DEPS: full
       DATABRICKS_WRITE_TEST_CATALOG: duckdb_write_testing
+      RUN_WRITE_TESTS: 1
 
     steps:
       - name: Install required ubuntu packages
@@ -66,9 +67,9 @@ jobs:
           export-env: true
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          DATABRICKS_TOKEN: 'op://testing-rw/databricks_free/token'
-          DATABRICKS_ENDPOINT: 'op://testing-rw/databricks_free/endpoint'
-          DATABRICKS_REGION: 'op://testing-rw/databricks_free/aws_region'
+          DATABRICKS_TOKEN: 'op://testing-rw/databricks_ccv2/token'
+          DATABRICKS_ENDPOINT: 'op://testing-rw/databricks_ccv2/endpoint'
+          DATABRICKS_REGION: 'op://testing-rw/databricks_ccv2/aws_region'
 
       - name: Create Databricks config
         run: |

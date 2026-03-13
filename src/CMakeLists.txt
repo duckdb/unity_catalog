@@ -1,5 +1,6 @@
 include_directories(include)
 
+add_subdirectory(functions)
 add_subdirectory(storage)
 
 add_library(uc_ext_library OBJECT unity_catalog_extension.cpp uc_api.cpp

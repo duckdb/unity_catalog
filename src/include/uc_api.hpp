@@ -36,6 +36,7 @@ struct UCAPITable {
 	string delta_last_update_version;
 
 	vector<UCAPIColumnDefinition> columns;
+	unordered_map<string, string> properties;
 };
 
 struct UCAPISchema {
@@ -49,15 +50,30 @@ struct UCAPITableCredentials {
 	string session_token;
 };
 
+struct UCAPICommit {
+	int64_t version;
+	int64_t timestamp;
+	string file_name;
+	int64_t file_size;
+	int64_t file_modification_timestamp;
+};
+
+struct UCAPICommitsResult {
+	vector<UCAPICommit> commits;
+	int64_t latest_table_version;
+};
+
 class UCAPI {
 public:
-	static UCAPITableCredentials GetTableCredentials(ClientContext &ctx, const string &table_id,
+	static UCAPITableCredentials GetTableCredentials(ClientContext &ctx, const string &table_id, bool write,
 	                                                 const UCCredentials &credentials);
 	static string GetDefaultSchema(ClientContext &ctx, const UCCredentials &credentials);
 	static vector<string> GetCatalogs(ClientContext &ctx, Catalog &catalog, const UCCredentials &credentials);
 	static vector<UCAPITable> GetTables(ClientContext &ctx, Catalog &catalog, const string &schema,
 	                                    const UCCredentials &credentials);
 	static vector<UCAPISchema> GetSchemas(ClientContext &ctx, Catalog &catalog, const UCCredentials &credentials);
+	static UCAPICommitsResult GetCommits(ClientContext &ctx, const string &table_id, const string &table_uri, const UCCredentials &credentials);
+	static bool PostCommit(ClientContext &ctx, const string &table_id, const string &table_uri, const UCCredentials &credentials, idx_t version, idx_t timestamp, const string &file_name, idx_t file_size, idx_t file_modification_timestamp);
 };
 
 } // namespace duckdb

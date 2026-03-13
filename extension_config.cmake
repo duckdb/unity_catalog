@@ -6,8 +6,9 @@ duckdb_extension_load(unity_catalog
     LOAD_TESTS
 )
 
+# TODO: restore to duckdb/duckdb
 duckdb_extension_load(delta
-    GIT_URL https://github.com/duckdb/duckdb-delta
-    GIT_TAG 0e8892c8708329dddb618306e4f35eac0b0764bf
+    GIT_URL https://github.com/samansmink/duckdb-delta
+    GIT_TAG 2898f907078c805a2972382ffc7a99026f6f60f6
     SUBMODULES extension-ci-tools
 )

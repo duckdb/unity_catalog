@@ -25,28 +25,31 @@ CREATE SECRET (
     AWS_REGION '${DATABRICKS_REGION}'
 );
 
+statement ok
+set threads=2;
+
 # Attach to databricks through the unity catalog API
 statement ok
-ATTACH 'duckdblabs_testing' (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'main');
+ATTACH 'duckdb_testing' (TYPE UNITY_CATALOG, READ_ONLY, DEFAULT_SCHEMA 'main');
 
 query I
-select * from duckdblabs_testing.main.evolution_simple_id_mode AT (VERSION => 0)
+select * from duckdb_testing.main.evolution_simple_id_mode AT (VERSION => 0)
 ----
 1
 
 query II
-select * from duckdblabs_testing.main.evolution_simple_id_mode AT (VERSION => 1)
+select * from duckdb_testing.main.evolution_simple_id_mode AT (VERSION => 1)
 ----
 1	NULL
 
 query II
-select * from duckdblabs_testing.main.evolution_simple_id_mode AT (VERSION => 2)
+select * from duckdb_testing.main.evolution_simple_id_mode AT (VERSION => 2)
 ----
 2	2
 1	NULL
 
 query II
-select * from duckdblabs_testing.main.evolution_simple_id_mode
+select * from duckdb_testing.main.evolution_simple_id_mode
 ----
 2	2
 1	NULL

@@ -14,6 +14,7 @@
 
 namespace duckdb {
 class UCTransaction;
+struct DefaultTableMacro;
 
 class UCSchemaEntry : public SchemaCatalogEntry {
 public:
@@ -46,8 +47,13 @@ public:
 private:
 	UCTableSet &GetCatalogSet(CatalogType type);
 
+	optional_ptr<CatalogEntry> TryLoadBuiltInFunction(const string &entry_name);
+	optional_ptr<CatalogEntry> LoadBuiltInFunction(DefaultTableMacro macro);
 public:
 	UCTableSet tables;
+
+	mutex default_function_lock;
+	case_insensitive_map_t<unique_ptr<CatalogEntry>> default_function_map;
 };
 
 } // namespace duckdb

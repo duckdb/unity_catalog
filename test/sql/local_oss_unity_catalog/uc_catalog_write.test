@@ -1,0 +1,39 @@
+# name: test/sql/local_oss_unity_catalog/uc_catalog_write.test
+# description: test uc_catalog extension with writes
+# group: [local_oss_unity_catalog]
+
+# Require statement will ensure this test is run with this extension loaded
+require parquet
+
+require uc_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_SERVER_RUNNING
+
+# require-env UC_TEST_SERVER_WRITE_TESTS
+
+statement ok
+CREATE SECRET (
+    TYPE UC,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+# Catalog Secret
+statement ok
+ATTACH 'unity' AS my_catalog (TYPE UC_CATALOG, DEFAULT_SCHEMA 'default');
+
+# We can switch to a specific schema
+statement ok
+USE my_catalog.default;
+
+# We can now query the tables in the schema!
+statement ok
+FROM marksheet;
+
+statement ok
+INSERT INTO marksheet VALUES(1, 'blabla', 1337);

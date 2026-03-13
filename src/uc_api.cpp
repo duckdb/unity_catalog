@@ -12,6 +12,26 @@
 
 namespace duckdb {
 
+// RAII wrapper for yyjson_doc* to ensure yyjson_doc_free is called even when exceptions are thrown
+struct YYJsonDoc {
+	explicit YYJsonDoc(const string &json)
+	    : doc(duckdb_yyjson::yyjson_read(json.c_str(), json.size(), 0)) {
+	}
+	~YYJsonDoc() {
+		if (doc) {
+			duckdb_yyjson::yyjson_doc_free(doc);
+		}
+	}
+	duckdb_yyjson::yyjson_val *Root() const {
+		return duckdb_yyjson::yyjson_doc_get_root(doc);
+	}
+	// non-copyable
+	YYJsonDoc(const YYJsonDoc &) = delete;
+	YYJsonDoc &operator=(const YYJsonDoc &) = delete;
+
+	duckdb_yyjson::yyjson_doc *doc;
+};
+
 static void AuthenticateViaBearerToken(HTTPHeaders &hdrs, const string &token) {
 	if (!token.empty()) {
 		hdrs.Insert("Authorization", "Bearer " + token);
@@ -30,19 +50,28 @@ static void EnsureHttpfsExtension(shared_ptr<DatabaseInstance> db) {
 	}
 }
 
-static string GetRequest(ClientContext &ctx, const string &url, const string &token = "") {
+static string MakeRequest(ClientContext &ctx, const string &url, const string &token = "", const string &body = "", bool send_as_get = false) {
 	auto db = ctx.db;
 	EnsureHttpfsExtension(db);
 	auto &http_util = HTTPUtil::Get(*db);
 	auto params = http_util.InitializeParameters(*db, url);
 	params->logger = ctx.logger;
+
 	HTTPHeaders hdrs(*ctx.db);
 	AuthenticateViaBearerToken(hdrs, token);
-	GetRequestInfo req(url, hdrs, *params, nullptr, nullptr);
-	auto resp = http_util.Request(req);
+
+	unique_ptr<HTTPResponse> resp;
+	if (body.empty()) {
+		GetRequestInfo req(url, hdrs, *params, nullptr, nullptr);
+		resp = http_util.Request(req);
+	} else {
+		PostRequestInfo req(url, hdrs, *params, const_data_ptr_cast(body.data()), body.size());
+		req.send_post_as_get_request = send_as_get;
+		resp = http_util.Request(req);
+	}
 
 	if (!resp->Success()) {
-		throw IOException("GET Request to '%s' failed: '%s'", url, resp->GetError());
+		throw IOException("Request to '%s' failed: '%s'", url, resp->GetError());
 	}
 	return std::move(resp->body);
 }
@@ -92,7 +121,7 @@ public:
 public:
 	void ThrowError(const string &prefix) {
 		D_ASSERT(HasError());
-		throw InvalidInputException("%s. error_code: %s, message: %s", prefix, error_code, message);
+		throw IOException("%s. error_code: %s, message: %s", prefix, error_code, message);
 	}
 
 private:
@@ -114,13 +143,14 @@ static UCAPIError CheckError(duckdb_yyjson::yyjson_val *api_result) {
 	return UCAPIError();
 }
 
-static string GetCredentialsRequest(ClientContext &ctx, const string &url, const string &table_id,
+static string GetCredentialsRequest(ClientContext &ctx, const string &url, const string &table_id, bool write = false,
                                     const string &token = "") {
 	auto db = ctx.db;
 	auto &http_util = HTTPUtil::Get(*db);
 	auto params = http_util.InitializeParameters(*db, url);
 
-	string body = StringUtil::Format(R"({"table_id" : "%s", "operation" : "READ_WRITE"})", table_id);
+	string access_type = write ? "READ_WRITE" : "READ";
+	string body = StringUtil::Format(R"({"table_id" : "%s", "operation" : "%s"})", table_id, access_type);
 	HTTPHeaders hdrs(*db);
 	hdrs.Insert("Content-Type", "application/json");
 	AuthenticateViaBearerToken(hdrs, token);
@@ -158,11 +188,10 @@ static string GetCredentialsRequest(ClientContext &ctx, const string &url, const
 
 string UCAPI::GetDefaultSchema(ClientContext &ctx, const UCCredentials &credentials) {
 	auto url = credentials.endpoint + "/api/2.0/settings/types/default_namespace_ws/names/default";
-	auto resp = GetRequest(ctx, url, credentials.token);
+	auto resp = MakeRequest(ctx, url, credentials.token);
 
-	// Read JSON and get root
-	duckdb_yyjson::yyjson_doc *doc = duckdb_yyjson::yyjson_read(resp.c_str(), resp.size(), 0);
-	duckdb_yyjson::yyjson_val *root = yyjson_doc_get_root(doc);
+	YYJsonDoc doc(resp);
+	auto *root = doc.Root();
 
 	auto error = CheckError(root);
 	if (error.HasError()) {
@@ -178,16 +207,64 @@ string UCAPI::GetDefaultSchema(ClientContext &ctx, const UCCredentials &credenti
 	return setting_name;
 }
 
-UCAPITableCredentials UCAPI::GetTableCredentials(ClientContext &ctx, const string &table_id,
+UCAPICommitsResult UCAPI::GetCommits(ClientContext &ctx, const string &table_id, const string &table_uri, const UCCredentials &credentials) {
+	UCAPICommitsResult result;
+	string body =
+	    StringUtil::Format("{\"start_version\": 0, \"table_id\": \"%s\", \"table_uri\": \"%s\"}", table_id.c_str(), table_uri.c_str());
+	string url = credentials.endpoint + "/api/2.1/unity-catalog/delta/preview/commits";
+	auto api_result = MakeRequest(ctx, url, credentials.token, body, true);
+
+	YYJsonDoc doc(api_result);
+	auto *root = doc.Root();
+
+	auto error = CheckError(root);
+	if (error.HasError()) {
+		error.ThrowError(StringUtil::Format("Failed to get commits for %s", table_id));
+	}
+
+	result.latest_table_version = TryGetNumFromObject(root, "latest_table_version", true);
+
+	auto *commits = yyjson_obj_get(root, "commits");
+	size_t idx, max;
+	duckdb_yyjson::yyjson_val *commit;
+	yyjson_arr_foreach(commits, idx, max, commit) {
+		UCAPICommit commit_result;
+		commit_result.version = TryGetNumFromObject(commit, "version", true);
+		commit_result.timestamp = TryGetNumFromObject(commit, "timestamp", true);
+		commit_result.file_name = TryGetStrFromObject(commit, "file_name", true);
+		commit_result.file_size = TryGetNumFromObject(commit, "file_size", true);
+		commit_result.file_modification_timestamp = TryGetNumFromObject(commit, "file_modification_timestamp", true);
+		result.commits.push_back(commit_result);
+	}
+
+	return result;
+}
+
+bool UCAPI::PostCommit(ClientContext &ctx, const string &table_id, const string &table_uri, const UCCredentials &credentials, idx_t version, idx_t timestamp, const string &file_name, idx_t file_size, idx_t file_modification_timestamp) {
+	string body = StringUtil::Format(R"({"table_id": "%s", "table_uri": "%s/", "commit_info": {"version": %ld, "timestamp": %ld, "file_name": "%s", "file_size": %ld, "file_modification_timestamp": %ld}})", table_id.c_str(), table_uri.c_str(), version, timestamp, file_name.c_str(), file_size, file_modification_timestamp);
+	string url = credentials.endpoint + "/api/2.1/unity-catalog/delta/preview/commits";
+	auto api_result = MakeRequest(ctx, url, credentials.token, body);
+
+	YYJsonDoc doc(api_result);
+	auto *root = doc.Root();
+
+	auto error = CheckError(root);
+	if (error.HasError()) {
+		error.ThrowError(StringUtil::Format("Failed to commit to %s", table_id));
+	}
+
+	return true;
+}
+
+UCAPITableCredentials UCAPI::GetTableCredentials(ClientContext &ctx, const string &table_id, bool write,
                                                  const UCCredentials &credentials) {
 	UCAPITableCredentials result;
 
 	auto url = credentials.endpoint + "/api/2.1/unity-catalog/temporary-table-credentials";
-	auto api_result = GetCredentialsRequest(ctx, url, table_id, credentials.token);
+	auto api_result = GetCredentialsRequest(ctx, url, table_id, write, credentials.token);
 
-	// Read JSON and get root
-	duckdb_yyjson::yyjson_doc *doc = duckdb_yyjson::yyjson_read(api_result.c_str(), api_result.size(), 0);
-	duckdb_yyjson::yyjson_val *root = yyjson_doc_get_root(doc);
+	YYJsonDoc doc(api_result);
+	auto *root = doc.Root();
 
 	auto error = CheckError(root);
 	if (error.HasError()) {
@@ -225,11 +302,10 @@ vector<UCAPITable> UCAPI::GetTables(ClientContext &ctx, Catalog &catalog, const 
 	vector<UCAPITable> result;
 	auto url = credentials.endpoint + "/api/2.1/unity-catalog/tables?catalog_name=" + catalog.GetDBPath() +
 	           "&schema_name=" + schema;
-	auto api_result = GetRequest(ctx, url, credentials.token);
+	auto api_result = MakeRequest(ctx, url, credentials.token);
 
-	// Read JSON and get root
-	duckdb_yyjson::yyjson_doc *doc = duckdb_yyjson::yyjson_read(api_result.c_str(), api_result.size(), 0);
-	duckdb_yyjson::yyjson_val *root = yyjson_doc_get_root(doc);
+	YYJsonDoc doc(api_result);
+	auto *root = doc.Root();
 
 	// Get root["hits"], iterate over the array
 	auto *tables = yyjson_obj_get(root, "tables");
@@ -254,6 +330,13 @@ vector<UCAPITable> UCAPI::GetTables(ClientContext &ctx, Catalog &catalog, const 
 			table_result.columns.push_back(column_definition);
 		}
 
+		auto *properties = yyjson_obj_get(table, "properties");
+		duckdb_yyjson::yyjson_val *key, *val;
+		size_t prop_idx, prop_max;
+		yyjson_obj_foreach(properties, prop_idx, prop_max, key, val) {
+			table_result.properties[duckdb_yyjson::yyjson_get_str(key)] = duckdb_yyjson::yyjson_get_str(val);
+		}
+
 		result.push_back(table_result);
 	}
 
@@ -263,11 +346,10 @@ vector<UCAPITable> UCAPI::GetTables(ClientContext &ctx, Catalog &catalog, const 
 vector<UCAPISchema> UCAPI::GetSchemas(ClientContext &ctx, Catalog &catalog, const UCCredentials &credentials) {
 	vector<UCAPISchema> result;
 	auto url = credentials.endpoint + "/api/2.1/unity-catalog/schemas?catalog_name=" + catalog.GetDBPath();
-	auto api_result = GetRequest(ctx, url, credentials.token);
+	auto api_result = MakeRequest(ctx, url, credentials.token);
 
-	// Read JSON and get root
-	duckdb_yyjson::yyjson_doc *doc = duckdb_yyjson::yyjson_read(api_result.c_str(), api_result.size(), 0);
-	duckdb_yyjson::yyjson_val *root = yyjson_doc_get_root(doc);
+	YYJsonDoc doc(api_result);
+	auto *root = doc.Root();
 
 	// Get root["hits"], iterate over the array
 	auto *schemas = yyjson_obj_get(root, "schemas");
