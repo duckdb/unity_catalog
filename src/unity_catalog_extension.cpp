@@ -1,5 +1,6 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
@@ -8,6 +9,7 @@
 
 #include "storage/unity_catalog.hpp"
 #include "storage/uc_transaction_manager.hpp"
+#include "functions/uc_checkpoint.hpp"
 #include "uc_api.hpp"
 #include "unity_catalog_extension.hpp"
 
@@ -189,6 +191,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	StorageExtension::Register(config, "unity_catalog", extension);
 	// Also register the (deprecated) alias
 	StorageExtension::Register(config, "uc_catalog", extension);
+
+	// Register table checkpoint function
+	loader.RegisterFunction(UCCheckpointTableFunction());
 }
 
 void UnityCatalogExtension::Load(ExtensionLoader &loader) {

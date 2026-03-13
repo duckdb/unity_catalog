@@ -116,8 +116,6 @@ void TableInformation::InternalAttach(ClientContext &context) {
 		return;
 	}
 	auto &db_manager = DatabaseManager::Get(context);
-	auto &schema_name = table_data->schema_name;
-	auto &catalog_name = table_data->catalog_name;
 	auto &name = table_data->name;
 
 	// Create the attach info for the table
@@ -141,9 +139,41 @@ void UCTableSet::OnDetach(ClientContext &context) {
 	}
 }
 
-void UCTableSet::LoadEntries(ClientContext &context) {
-	auto &transaction = UCTransaction::Get(context, catalog);
+void TableInformation::InternalCheckpoint(ClientContext &context, bool force) {
+	// attach and call down to Delta's table specific checkpoint
+	D_ASSERT(table_data);
+	RefreshCredentials(context);
+	InternalAttach(context);
+	internal_attached_database->GetTransactionManager().Checkpoint(context, force);
+}
 
+void UCTableSet::CheckpointTable(ClientContext &context, const string &table_name, bool force) {
+	if (!is_loaded) {
+		LoadEntries(context);
+		is_loaded = true;
+	}
+	auto it = tables.find(table_name);
+	if (it == tables.end()) {
+		throw InvalidInputException("Table '%s' not found", table_name);
+	}
+	it->second.InternalCheckpoint(context, force);
+}
+
+// TODO: remove or update syntax from DuckDB perspective; left here as ready-to-go
+// code for possible additional conditional checkpoint scan/act logic
+#if 0
+void UCTableSet::Checkpoint(ClientContext &context, bool force) {
+	if (!is_loaded) {
+		LoadEntries(context);
+		is_loaded = true;
+	}
+	for (auto &entry : tables) {
+		entry.second.InternalCheckpoint(context, force);
+	}
+}
+#endif
+
+void UCTableSet::LoadEntries(ClientContext &context) {
 	auto &unity_catalog = catalog.Cast<UnityCatalog>();
 	auto get_tables_result = UCAPI::GetTables(context, catalog, schema.name, unity_catalog.credentials);
 

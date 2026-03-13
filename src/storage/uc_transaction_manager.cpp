@@ -1,4 +1,6 @@
 #include "storage/uc_transaction_manager.hpp"
+#include "duckdb/common/exception.hpp"
+#include "storage/uc_schema_entry.hpp"
 #include "duckdb/main/attached_database.hpp"
 
 namespace duckdb {
@@ -32,9 +34,16 @@ void UCTransactionManager::RollbackTransaction(Transaction &transaction) {
 }
 
 void UCTransactionManager::Checkpoint(ClientContext &context, bool force) {
-	// auto &transaction = UCTransaction::Get(context, db.GetCatalog());
-	//	auto &db = transaction.GetConnection();
-	//	db.Execute("CHECKPOINT");
+	// TODO: remove or update syntax from DuckDB perspective
+#if 0
+	unity_catalog.ScanSchemas(context, [&](SchemaCatalogEntry &entry) {
+		auto &schema = entry.Cast<UCSchemaEntry>();
+		schema.tables.Checkpoint(context, force);
+	});
+#else
+	throw NotImplementedException("Unsupported: CHECKPOINT <catalog> unsupported in unity_catalog; please use "
+	                              "function unity_catalog_checkpoint_table() for per-table checkpoints.");
+#endif
 }
 
 } // namespace duckdb

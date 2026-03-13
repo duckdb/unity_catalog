@@ -1,0 +1,107 @@
+# name: test/sql/local_oss_unity_catalog/checkpoint.test
+# description: test CHECKPOINT forwarding through UC to attached delta catalogs
+# group: [local_oss_unity_catalog]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_SERVER_RUNNING
+
+require-env UC_TEST_DATA
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH 'unity' AS my_catalog (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'default');
+
+# query to trigger attach
+query III
+FROM my_catalog.default.marksheet;
+----
+1	nWYHawtqUw	930
+2	uvOzzthsLV	166
+3	WIAehuXWkv	170
+4	wYCSvnJKTo	709
+5	VsslXsUIDZ	993
+6	ZLsACYYTFy	813
+7	BtDDvLeBpK	52
+8	YISVtrPfGr	8
+9	PBPJHDFjjC	45
+10	qbDuUJzJMO	756
+11	EjqqWoaLJn	712
+12	jpZLMdKXpn	847
+13	acpjQXpJCp	649
+14	nOKqHhRwao	133
+15	kxUUZEUoKv	398
+
+# -----------------------------------------------------------------------------
+# first validate some error cases before introducing a USE
+#
+
+# validate error cases: don't support CHECKPOINT syntax
+statement error
+CHECKPOINT my_catalog;
+----
+Unsupported
+
+# singleton in namespace assumed to be table with CATALOG and SCHEMA defaults, but we have none
+statement error
+CALL unity_catalog_checkpoint_table('marksheet');
+----
+No catalog specified
+
+# singleton in namespace assumed to be table with CATALOG and SCHEMA defaults, but we have none
+statement error
+CALL unity_catalog_checkpoint_table('default.marksheet');
+----
+No catalog specified
+
+# -----------------------------------------------------------------------------
+# now working variations, including FQ and USE-qualified
+#
+
+# yes, fully qualified $TABLE
+statement ok
+CALL unity_catalog_checkpoint_table('my_catalog.default.marksheet');
+
+# and yes via USE $CATALOG + remainder qualified
+statement ok
+USE my_catalog; CALL unity_catalog_checkpoint_table('default.marksheet_uniform');
+
+# also works for USE $CATALOG + .$DEFAULT_SCHEMA + named
+statement ok
+CALL unity_catalog_checkpoint_table('numbers');
+
+# and yes via USE $CATALOG.$SCHEMA
+statement ok
+USE my_catalog.default; CALL unity_catalog_checkpoint_table('user_countries');
+
+# Confirm all checkpoints via presence of checkpoint files
+query II rowsort
+SELECT parse_path(file)[-3], parse_path(file)[-1] FROM glob('${UC_TEST_DATA}/**/*checkpoint*');
+----
+marksheet	00000000000000000001.checkpoint.parquet
+marksheet	_last_checkpoint
+marksheet_uniform	00000000000000000001.checkpoint.parquet
+marksheet_uniform	_last_checkpoint
+numbers	00000000000000000000.checkpoint.parquet
+numbers	_last_checkpoint
+user_countries	00000000000000000000.checkpoint.parquet
+user_countries	_last_checkpoint
+
+# but fail with USE qualified empty table
+statement error
+CALL unity_catalog_checkpoint_table('');
+----
+empty
