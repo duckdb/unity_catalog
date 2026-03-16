@@ -24,7 +24,7 @@ static void ClearUCCaches(ClientContext &context) {
 	for (auto &db_ref : databases) {
 		auto db = db_ref.get();
 		auto &catalog = db->GetCatalog();
-		if (catalog.GetCatalogType() != "uc" && catalog.GetCatalogType() != "unity_catalog") {
+		if (!UnityCatalog::IsUnityCatalog(catalog)) {
 			continue;
 		}
 		catalog.Cast<UnityCatalog>().ClearCache();

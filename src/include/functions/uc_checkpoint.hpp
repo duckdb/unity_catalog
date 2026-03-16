@@ -9,4 +9,9 @@ public:
 	UCCheckpointTableFunction();
 };
 
+class UCForceCheckpointTableFunction : public TableFunction {
+public:
+	UCForceCheckpointTableFunction();
+};
+
 } // namespace duckdb

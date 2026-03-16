@@ -192,8 +192,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Also register the (deprecated) alias
 	StorageExtension::Register(config, "uc_catalog", extension);
 
-	// Register table checkpoint function
+	// Register table checkpoint functions
 	loader.RegisterFunction(UCCheckpointTableFunction());
+	loader.RegisterFunction(UCForceCheckpointTableFunction());
 }
 
 void UnityCatalogExtension::Load(ExtensionLoader &loader) {
