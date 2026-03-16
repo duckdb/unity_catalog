@@ -33,11 +33,11 @@ SELECT price.list_price FROM test_struct_decimal;
 2.000000000
 
 statement ok
-CREATE TABLE test_nested AS
+CREATE TABLE test_array_struct_decimal AS
 SELECT [{'bid_price': 1.5::DECIMAL(38,18), 'clear_price': 2.0::DECIMAL(38,18), 'ad_id': 'x'}] AS products;
 
 query I
-SELECT products[1].bid_price FROM test_nested;
+SELECT products[1].bid_price FROM test_array_struct_decimal;
 ----
 1.500000000000000000
 
@@ -73,7 +73,7 @@ statement ok
 DROP TABLE test_struct_decimal;
 
 statement ok
-DROP TABLE test_nested;
+DROP TABLE test_array_struct_decimal;
 
 statement ok
 DROP TABLE test_array_decimal;
