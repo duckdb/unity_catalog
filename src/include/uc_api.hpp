@@ -72,8 +72,11 @@ public:
 	static vector<UCAPITable> GetTables(ClientContext &ctx, Catalog &catalog, const string &schema,
 	                                    const UCCredentials &credentials);
 	static vector<UCAPISchema> GetSchemas(ClientContext &ctx, Catalog &catalog, const UCCredentials &credentials);
-	static UCAPICommitsResult GetCommits(ClientContext &ctx, const string &table_id, const string &table_uri, const UCCredentials &credentials);
-	static bool PostCommit(ClientContext &ctx, const string &table_id, const string &table_uri, const UCCredentials &credentials, idx_t version, idx_t timestamp, const string &file_name, idx_t file_size, idx_t file_modification_timestamp);
+	static UCAPICommitsResult GetCommits(ClientContext &ctx, const string &table_id, const string &table_uri,
+	                                     const UCCredentials &credentials);
+	static bool PostCommit(ClientContext &ctx, const string &table_id, const string &table_uri,
+	                       const UCCredentials &credentials, idx_t version, idx_t timestamp, const string &file_name,
+	                       idx_t file_size, idx_t file_modification_timestamp);
 };
 
 } // namespace duckdb

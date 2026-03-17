@@ -88,7 +88,8 @@ void TableInformation::RefreshCredentials(ClientContext &context) {
 	}
 	auto &secret_manager = SecretManager::Get(context);
 	// Get Credentials from UCAPI
-	auto table_credentials = UCAPI::GetTableCredentials(context, table_data->table_id, !(catalog.access_mode == AccessMode::READ_ONLY), catalog.credentials);
+	auto table_credentials = UCAPI::GetTableCredentials(
+	    context, table_data->table_id, !(catalog.access_mode == AccessMode::READ_ONLY), catalog.credentials);
 
 	// Inject secret into secret manager scoped to this path
 	CreateSecretInput input;
@@ -144,26 +145,27 @@ bool TableInformation::IsCCV2() const {
 
 Value TableInformation::BuildLogTail(ClientContext &context) {
 	auto &uc_catalog = catalog.Cast<UnityCatalog>();
-	auto commits = UCAPI::GetCommits(context, table_data->table_id, table_data->storage_location, uc_catalog.credentials);
+	auto commits =
+	    UCAPI::GetCommits(context, table_data->table_id, table_data->storage_location, uc_catalog.credentials);
 
 	vector<Value> commit_values;
 	for (const auto &commit : commits.commits) {
 		child_list_t<Value> commit_struct;
 		commit_struct.push_back(make_pair("version", Value::BIGINT(commit.version)));
 		commit_struct.push_back(make_pair("timestamp", Value::BIGINT(commit.timestamp)));
-		commit_struct.push_back(make_pair("file_name", Value(table_data->storage_location + "/_delta_log/_staged_commits/" + commit.file_name)));
+		commit_struct.push_back(make_pair(
+		    "file_name", Value(table_data->storage_location + "/_delta_log/_staged_commits/" + commit.file_name)));
 		commit_struct.push_back(make_pair("file_size", Value::BIGINT(commit.file_size)));
-		commit_struct.push_back(make_pair("file_modification_timestamp", Value::BIGINT(commit.file_modification_timestamp)));
+		commit_struct.push_back(
+		    make_pair("file_modification_timestamp", Value::BIGINT(commit.file_modification_timestamp)));
 		commit_values.push_back(Value::STRUCT(std::move(commit_struct)));
 	}
 
-	return Value::LIST(LogicalType::STRUCT({
-		make_pair("version", LogicalType::BIGINT),
-		make_pair("timestamp", LogicalType::BIGINT),
-		make_pair("file_name", LogicalType::VARCHAR),
-		make_pair("file_size", LogicalType::BIGINT),
-		make_pair("file_modification_timestamp", LogicalType::BIGINT)
-	}), commit_values);
+	return Value::LIST(
+	    LogicalType::STRUCT({make_pair("version", LogicalType::BIGINT), make_pair("timestamp", LogicalType::BIGINT),
+	                         make_pair("file_name", LogicalType::VARCHAR), make_pair("file_size", LogicalType::BIGINT),
+	                         make_pair("file_modification_timestamp", LogicalType::BIGINT)}),
+	    commit_values);
 }
 
 void TableInformation::InternalAttach(ClientContext &context) {
@@ -181,8 +183,10 @@ void TableInformation::InternalAttach(ClientContext &context) {
 	// Create the attach info for the table
 	AttachInfo info;
 	info.name = AttachedCatalogName();
-	info.options = {
-		{"type", Value("Delta")}, {"child_catalog_mode", Value(true)}, {"internal_table_name", Value(name)}, {"unity_table_id", Value(table_data->table_id)}};
+	info.options = {{"type", Value("Delta")},
+	                {"child_catalog_mode", Value(true)},
+	                {"internal_table_name", Value(name)},
+	                {"unity_table_id", Value(table_data->table_id)}};
 	info.path = table_data->storage_location;
 
 	if (IsCCV2()) {

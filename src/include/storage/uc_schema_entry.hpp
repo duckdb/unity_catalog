@@ -49,6 +49,7 @@ private:
 
 	optional_ptr<CatalogEntry> TryLoadBuiltInFunction(const string &entry_name);
 	optional_ptr<CatalogEntry> LoadBuiltInFunction(DefaultTableMacro macro);
+
 public:
 	UCTableSet tables;
 

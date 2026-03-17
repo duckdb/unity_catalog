@@ -14,8 +14,7 @@ namespace duckdb {
 
 // RAII wrapper for yyjson_doc* to ensure yyjson_doc_free is called even when exceptions are thrown
 struct YYJsonDoc {
-	explicit YYJsonDoc(const string &json)
-	    : doc(duckdb_yyjson::yyjson_read(json.c_str(), json.size(), 0)) {
+	explicit YYJsonDoc(const string &json) : doc(duckdb_yyjson::yyjson_read(json.c_str(), json.size(), 0)) {
 	}
 	~YYJsonDoc() {
 		if (doc) {
@@ -50,7 +49,8 @@ static void EnsureHttpfsExtension(shared_ptr<DatabaseInstance> db) {
 	}
 }
 
-static string MakeRequest(ClientContext &ctx, const string &url, const string &token = "", const string &body = "", bool send_as_get = false) {
+static string MakeRequest(ClientContext &ctx, const string &url, const string &token = "", const string &body = "",
+                          bool send_as_get = false) {
 	auto db = ctx.db;
 	EnsureHttpfsExtension(db);
 	auto &http_util = HTTPUtil::Get(*db);
@@ -207,10 +207,11 @@ string UCAPI::GetDefaultSchema(ClientContext &ctx, const UCCredentials &credenti
 	return setting_name;
 }
 
-UCAPICommitsResult UCAPI::GetCommits(ClientContext &ctx, const string &table_id, const string &table_uri, const UCCredentials &credentials) {
+UCAPICommitsResult UCAPI::GetCommits(ClientContext &ctx, const string &table_id, const string &table_uri,
+                                     const UCCredentials &credentials) {
 	UCAPICommitsResult result;
-	string body =
-	    StringUtil::Format("{\"start_version\": 0, \"table_id\": \"%s\", \"table_uri\": \"%s\"}", table_id.c_str(), table_uri.c_str());
+	string body = StringUtil::Format("{\"start_version\": 0, \"table_id\": \"%s\", \"table_uri\": \"%s\"}",
+	                                 table_id.c_str(), table_uri.c_str());
 	string url = credentials.endpoint + "/api/2.1/unity-catalog/delta/preview/commits";
 	auto api_result = MakeRequest(ctx, url, credentials.token, body, true);
 
@@ -240,8 +241,13 @@ UCAPICommitsResult UCAPI::GetCommits(ClientContext &ctx, const string &table_id,
 	return result;
 }
 
-bool UCAPI::PostCommit(ClientContext &ctx, const string &table_id, const string &table_uri, const UCCredentials &credentials, idx_t version, idx_t timestamp, const string &file_name, idx_t file_size, idx_t file_modification_timestamp) {
-	string body = StringUtil::Format(R"({"table_id": "%s", "table_uri": "%s/", "commit_info": {"version": %ld, "timestamp": %ld, "file_name": "%s", "file_size": %ld, "file_modification_timestamp": %ld}})", table_id.c_str(), table_uri.c_str(), version, timestamp, file_name.c_str(), file_size, file_modification_timestamp);
+bool UCAPI::PostCommit(ClientContext &ctx, const string &table_id, const string &table_uri,
+                       const UCCredentials &credentials, idx_t version, idx_t timestamp, const string &file_name,
+                       idx_t file_size, idx_t file_modification_timestamp) {
+	string body = StringUtil::Format(
+	    R"({"table_id": "%s", "table_uri": "%s/", "commit_info": {"version": %ld, "timestamp": %ld, "file_name": "%s", "file_size": %ld, "file_modification_timestamp": %ld}})",
+	    table_id.c_str(), table_uri.c_str(), version, timestamp, file_name.c_str(), file_size,
+	    file_modification_timestamp);
 	string url = credentials.endpoint + "/api/2.1/unity-catalog/delta/preview/commits";
 	auto api_result = MakeRequest(ctx, url, credentials.token, body);
 

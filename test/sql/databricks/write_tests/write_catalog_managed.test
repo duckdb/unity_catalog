@@ -1,4 +1,4 @@
-# name: test/sql/databricks/write_tests/write.test
+# name: test/sql/databricks/write_tests/write_catalog_managed.test
 # description: test
 # group: [write_tests]
 

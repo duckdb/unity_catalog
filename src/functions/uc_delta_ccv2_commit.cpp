@@ -11,20 +11,21 @@ struct UCDeltaCCV2CommitState final : public GlobalTableFunctionState {
 	}
 };
 
-unique_ptr<GlobalTableFunctionState> UCDeltaCCV2CommitInit(ClientContext &context,
-                                                                  TableFunctionInitInput &input) {
+unique_ptr<GlobalTableFunctionState> UCDeltaCCV2CommitInit(ClientContext &context, TableFunctionInitInput &input) {
 	return make_uniq<UCDeltaCCV2CommitState>();
 }
 
 static unique_ptr<FunctionData> UCDeltaCCV2CommitBind(ClientContext &context, TableFunctionBindInput &input,
-                                                             vector<LogicalType> &return_types, vector<string> &names) {
-	throw InternalException("__internal_delta_ccv2_commit_staged is only for internal use and should not be called directly");
+                                                      vector<LogicalType> &return_types, vector<string> &names) {
+	throw InternalException(
+	    "__internal_delta_ccv2_commit_staged is only for internal use and should not be called directly");
 }
 
-// Note: This is a quirky function ONLY for internal use, it should not be called directly. It will be called by the delta extension
+// Note: This is a quirky function ONLY for internal use, it should not be called directly. It will be called by the
+// delta extension
 //       manually where it will place the special value in the output chunk on row 0 and expect the output on row 1
 void UCDeltaCCV2CommitExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto val = output.GetValue(0,0);
+	auto val = output.GetValue(0, 0);
 
 	auto res = StructValue::GetChildren(val);
 
@@ -40,22 +41,23 @@ void UCDeltaCCV2CommitExecute(ClientContext &context, TableFunctionInput &data_p
 	string table_id = table_entry->table.table_data->table_id;
 	string table_location = table_entry->table.table_data->storage_location;
 
-	UCCredentials & credentials = table_entry->table.catalog.Cast<UnityCatalog>().credentials;
+	UCCredentials &credentials = table_entry->table.catalog.Cast<UnityCatalog>().credentials;
 
 	// Get relative path
 	string commit_file_name = commit_file_path.substr(commit_file_path.find_last_of("/\\") + 1);
 
-	UCAPI::PostCommit(context, table_id, table_location, credentials, version, commit_timestamp, commit_file_name, commit_file_size, file_modification_timestamp);
+	UCAPI::PostCommit(context, table_id, table_location, credentials, version, commit_timestamp, commit_file_name,
+	                  commit_file_size, file_modification_timestamp);
 
 	// Mark dirty after a successful commit so the next read re-attaches with a fresh log tail
 	table_entry->table.MarkDirty();
 
 	output.SetCardinality(1);
-	output.SetValue(1,0, Value::BOOLEAN(true));
+	output.SetValue(1, 0, Value::BOOLEAN(true));
 }
 
 UCDeltaCCV2Commit::UCDeltaCCV2Commit()
-    : TableFunction("__internal_delta_ccv2_commit_staged", {LogicalType::VARCHAR}, UCDeltaCCV2CommitExecute, UCDeltaCCV2CommitBind, UCDeltaCCV2CommitInit) {
-
+    : TableFunction("__internal_delta_ccv2_commit_staged", {LogicalType::VARCHAR}, UCDeltaCCV2CommitExecute,
+                    UCDeltaCCV2CommitBind, UCDeltaCCV2CommitInit) {
 }
 } // namespace duckdb
