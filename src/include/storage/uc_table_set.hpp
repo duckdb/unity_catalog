@@ -27,6 +27,7 @@ public:
 	void RefreshCredentials(ClientContext &context);
 	void InternalAttach(ClientContext &context);
 	void InternalDetach(ClientContext &context);
+	void InternalCheckpoint(ClientContext &context, bool force);
 	bool IsCCV2() const;
 	Value BuildLogTail(ClientContext &context);
 	void MarkDirty();
@@ -66,6 +67,8 @@ public:
 	void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);
 	void ClearEntries();
 	void OnDetach(ClientContext &context);
+	// void Checkpoint(ClientContext &context, bool force); TODO: remove/update (see definition)
+	void CheckpointTable(ClientContext &context, const string &table_name, bool force = false);
 
 protected:
 	void LoadEntries(ClientContext &context);

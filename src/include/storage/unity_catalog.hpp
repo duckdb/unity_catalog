@@ -47,9 +47,16 @@ public:
 
 public:
 	void Initialize(bool load_builtin) override;
+
 	string GetCatalogType() override {
 		return catalog_name;
 	}
+	static bool IsUnityCatalog(Catalog &cat) {
+		const auto &t = cat.GetCatalogType();
+		// be paranoid, support old aliases
+		return (t == "unity_catalog" || t == "uc_catalog" || t == "uc");
+	}
+
 	bool SupportsTimeTravel() const override {
 		return true;
 	}
