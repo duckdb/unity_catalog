@@ -3,7 +3,6 @@
 
 #include "storage/unity_catalog.hpp"
 #include "storage/uc_table_set.hpp"
-#include "storage/uc_transaction.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/parser/constraints/unique_constraint.hpp"
@@ -215,8 +214,6 @@ void UCTableSet::OnDetach(ClientContext &context) {
 }
 
 void UCTableSet::LoadEntries(ClientContext &context) {
-	auto &transaction = UCTransaction::Get(context, catalog);
-
 	auto &unity_catalog = catalog.Cast<UnityCatalog>();
 	auto get_tables_result = UCAPI::GetTables(context, catalog, schema.name, unity_catalog.credentials);
 
@@ -248,6 +245,14 @@ void UCTableSet::LoadEntries(ClientContext &context) {
 	}
 }
 
+void UCTableSet::EnsureLoaded(ClientContext &context) {
+	lock_guard<mutex> l(load_lock);
+	if (!is_loaded) {
+		LoadEntries(context); // acquires entry_lock internally; fine, load_lock != entry_lock
+		is_loaded = true;     // set only after LoadEntries succeeds
+	}
+}
+
 optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, BoundCreateTableInfo &info) {
 	throw NotImplementedException("UCTableSet::CreateTable");
 }
@@ -273,10 +278,7 @@ void UCTableSet::AlterTable(ClientContext &context, AlterTableInfo &alter) {
 }
 
 optional_ptr<CatalogEntry> UCTableSet::GetEntry(ClientContext &context, const EntryLookupInfo &lookup) {
-	if (!is_loaded) {
-		is_loaded = true;
-		LoadEntries(context);
-	}
+	EnsureLoaded(context);
 	lock_guard<mutex> l(entry_lock);
 	auto &name = lookup.GetEntryName();
 	auto entry = tables.find(name);
@@ -288,6 +290,8 @@ optional_ptr<CatalogEntry> UCTableSet::GetEntry(ClientContext &context, const En
 }
 
 void UCTableSet::ClearEntries() {
+	lock_guard<mutex> ll(load_lock);
+	lock_guard<mutex> le(entry_lock);
 	tables.clear();
 	is_loaded = false;
 }
@@ -297,10 +301,7 @@ void UCTableSet::DropEntry(ClientContext &context, DropInfo &info) {
 }
 
 void UCTableSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
-	if (!is_loaded) {
-		is_loaded = true;
-		LoadEntries(context);
-	}
+	EnsureLoaded(context);
 	lock_guard<mutex> l(entry_lock);
 	for (auto &table : tables) {
 		callback(*table.second.dummy);

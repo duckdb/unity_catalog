@@ -14,11 +14,11 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5.0
     with:
       extension_name: &ext_name unity_catalog
-      duckdb_version: &duckdb_ref v1.5.0
-      ci_tools_version: &ci_tools_ref main
+      duckdb_version: &duckdb_ref 911a837cd6daddd75cd0ccf7e5a9855eb920f50c
+      ci_tools_version: &ci_tools_ref v1.5.0
       exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;windows_amd64_mingw;windows_amd64;linux_arm64;linux_amd64_musl'
       enable_rust: true
       rust_logs: true
@@ -28,7 +28,7 @@ jobs:
   duckdb-stable-deploy:
     name: Deploy extension binaries
     needs: duckdb-stable-build
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@v1.5.0
     secrets: inherit
     with:
       extension_name: *ext_name
@@ -40,7 +40,7 @@ jobs:
 
   code-quality-check:
     name: Code Quality Check
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5.0
     with:
       extension_name: *ext_name
       duckdb_version: *duckdb_ref

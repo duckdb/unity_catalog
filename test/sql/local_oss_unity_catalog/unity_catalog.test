@@ -104,12 +104,8 @@ FROM marksheet;
 14	nOKqHhRwao	133
 15	kxUUZEUoKv	398
 
-# FIXME: requires fix for file:// urls
-#statement ok
-#FROM unity.default.marksheet_uniform;
-
-# FIXME: table changed?
-mode skip
+statement ok
+FROM my_catalog.default.marksheet_uniform;
 
 query II
 FROM my_catalog.default.numbers;

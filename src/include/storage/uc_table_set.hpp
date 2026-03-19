@@ -76,8 +76,12 @@ protected:
 	void AlterTable(ClientContext &context, RemoveColumnInfo &info);
 
 private:
+	// Ensure tables are loaded exactly once, must be done before entry_lock.
+	void EnsureLoaded(ClientContext &context);
+
 	UnityCatalog &catalog;
 	UCSchemaEntry &schema;
+	mutex load_lock; // Guard is_loaded
 	mutex entry_lock;
 	case_insensitive_map_t<TableInformation> tables;
 	bool is_loaded = false;

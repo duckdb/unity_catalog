@@ -14,4 +14,4 @@ schema_rand="$(uuidgen | tr '[:upper:]' '[:lower:]' | tr '-' '_' | cut -b1-6)"
 export DATABRICKS_WRITE_TEST_CATALOG=duckdb_write_testing
 export DATABRICKS_WRITE_TEST_SCHEMA="test_schema_$schema_rand"
 
-exec "$@"
+exec env "$@"

@@ -9,6 +9,8 @@ DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs;tpch;tpcds
 
 #FULL_TEST_EXTENSION_DEPS=tpcds;tpch TODO: add
 
+ENV_DATABRICKS_CMD ?= scripts/run_databricks_env
+
 # Include the Makefile from extension-ci-tools
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
@@ -32,8 +34,7 @@ test_data_prepare: venv
 
 # Runs the regular databricks tests (non-write) with credentials from 1password
 run_databricks_tests:
-	. scripts/databricks_data_gen/run_databricks_env && \
-	./build/debug/test/unittest "test/sql/databricks/*"
+	${ENV_DATABRICKS_CMD} ./build/debug/test/unittest "test/sql/databricks/*"
 
 ################################################
 # Databricks Write Tests
@@ -45,7 +46,7 @@ run_databricks_tests:
 # TODO: test data in `source` schema is currently hand generated, this should be cleaned up
 
 # Before running this, ensure your env is configured:
-#    >   . scripts/databricks_data_gen/run_databricks_env
+#    >   . scripts/run_databricks_env
 
 # Prepare the main write test files by copying the tables from the `source` schema to the `{DATABRICKS_WRITE_TEST_SCHEMA}` schema
 write_tests_prepare: venv
@@ -66,5 +67,4 @@ write_tests_cleanup:
 # - cleans up data
 # NOTE: may leave some data around on s3, needs investigation!
 run_write_tests: venv
-	RUN_WRITE_TESTS=1  . scripts/databricks_data_gen/run_databricks_env && \
-	( $(MAKE) write_tests_prepare && $(MAKE) write_tests_run; EXIT=$$?; $(MAKE) write_tests_cleanup; exit $$EXIT )
+	RUN_WRITE_TESTS=1 ${ENV_DATABRICKS_CMD} $(MAKE) -k write_tests_prepare write_tests_run write_tests_cleanup
