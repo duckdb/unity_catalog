@@ -68,6 +68,8 @@ jobs:
         # confirm UC test server up
         cat unitycatalog/uc.log
         unitycatalog/bin/uc catalog list
+        # some tests require manual inspection of files whose location incorrectly recorded (prob for docker)
+        env -C /tmp ln -sf ~/src/unitycatalog/etc/data/external/unity/default/tables/marksheet_uniform
         make test_release
 
     - name: Move ssl certificate to ensure we still find it
