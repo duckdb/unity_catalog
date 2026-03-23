@@ -340,7 +340,10 @@ vector<UCAPITable> UCAPI::GetTables(ClientContext &ctx, Catalog &catalog, const 
 		duckdb_yyjson::yyjson_val *key, *val;
 		size_t prop_idx, prop_max;
 		yyjson_obj_foreach(properties, prop_idx, prop_max, key, val) {
-			table_result.properties[duckdb_yyjson::yyjson_get_str(key)] = duckdb_yyjson::yyjson_get_str(val);
+			auto val_cstr = duckdb_yyjson::yyjson_get_str(val);
+			if (val_cstr) {
+				table_result.properties[duckdb_yyjson::yyjson_get_str(key)] = val_cstr;
+			}
 		}
 
 		result.push_back(table_result);

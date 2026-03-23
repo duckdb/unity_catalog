@@ -115,7 +115,7 @@ string TableInformation::AttachedCatalogName() const {
 	return "__unity_catalog_internal_" + catalog_name + "_" + schema_name + "_" + name;
 }
 
-void TableInformation::InternalDetach(ClientContext &context) {
+void TableInformation::InternalDetach(ClientContext &context, const lock_guard<mutex> &_attach_lock) {
 	if (!internal_attached_database) {
 		return;
 	}
@@ -170,7 +170,7 @@ Value TableInformation::BuildLogTail(ClientContext &context) {
 void TableInformation::InternalAttach(ClientContext &context) {
 	lock_guard<mutex> l(attach_lock);
 	if (is_dirty) {
-		InternalDetach(context);
+		InternalDetach(context, l);
 		is_dirty = false;
 	}
 	if (internal_attached_database) {
@@ -209,7 +209,8 @@ void TableInformation::InternalAttach(ClientContext &context) {
 void UCTableSet::OnDetach(ClientContext &context) {
 	for (auto &entry : tables) {
 		auto &table = entry.second;
-		table.InternalDetach(context);
+		lock_guard<mutex> l(table.attach_lock);
+		table.InternalDetach(context, l);
 	}
 }
 
@@ -222,10 +223,7 @@ void TableInformation::InternalCheckpoint(ClientContext &context, bool force) {
 }
 
 void UCTableSet::CheckpointTable(ClientContext &context, const string &table_name, bool force) {
-	if (!is_loaded) {
-		LoadEntries(context);
-		is_loaded = true;
-	}
+	EnsureLoaded(context);
 	auto it = tables.find(table_name);
 	if (it == tables.end()) {
 		throw InvalidInputException("Table '%s' not found", table_name);
@@ -247,7 +245,7 @@ void UCTableSet::Checkpoint(ClientContext &context, bool force) {
 }
 #endif
 
-void UCTableSet::LoadEntries(ClientContext &context) {
+void UCTableSet::LoadEntries(ClientContext &context, const lock_guard<mutex> &_entry_lock) {
 	auto &unity_catalog = catalog.Cast<UnityCatalog>();
 	auto get_tables_result = UCAPI::GetTables(context, catalog, schema.name, unity_catalog.credentials);
 
@@ -282,8 +280,8 @@ void UCTableSet::LoadEntries(ClientContext &context) {
 void UCTableSet::EnsureLoaded(ClientContext &context) {
 	lock_guard<mutex> l(load_lock);
 	if (!is_loaded) {
-		LoadEntries(context); // acquires entry_lock internally; fine, load_lock != entry_lock
-		is_loaded = true;     // set only after LoadEntries succeeds
+		LoadEntries(context, l); // acquires entry_lock internally; fine, load_lock != entry_lock
+		is_loaded = true;        // set only after LoadEntries succeeds
 	}
 }
 

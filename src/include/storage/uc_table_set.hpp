@@ -26,7 +26,7 @@ public:
 	optional_ptr<Catalog> GetInternalCatalog();
 	void RefreshCredentials(ClientContext &context);
 	void InternalAttach(ClientContext &context);
-	void InternalDetach(ClientContext &context);
+	void InternalDetach(ClientContext &context, const lock_guard<mutex> &_attach_lock);
 	void InternalCheckpoint(ClientContext &context, bool force);
 	bool IsCCV2() const;
 	Value BuildLogTail(ClientContext &context);
@@ -71,7 +71,7 @@ public:
 	void CheckpointTable(ClientContext &context, const string &table_name, bool force = false);
 
 protected:
-	void LoadEntries(ClientContext &context);
+	void LoadEntries(ClientContext &context, const lock_guard<mutex> &_entry_lock);
 
 	void AlterTable(ClientContext &context, RenameTableInfo &info);
 	void AlterTable(ClientContext &context, RenameColumnInfo &info);
