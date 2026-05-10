@@ -80,15 +80,14 @@ optional_ptr<Catalog> TableInformation::GetInternalCatalog() {
 	return internal_attached_database->GetCatalog();
 }
 
-void TableInformation::RefreshCredentials(ClientContext &context) {
+void TableInformation::RefreshCredentials(ClientContext &context, bool write) {
 	D_ASSERT(table_data);
 	if (table_data->storage_location.find("file://") == 0) {
 		return;
 	}
 	auto &secret_manager = SecretManager::Get(context);
 	// Get Credentials from UCAPI
-	auto table_credentials = UCAPI::GetTableCredentials(
-	    context, table_data->table_id, !(catalog.access_mode == AccessMode::READ_ONLY), catalog.credentials);
+	auto table_credentials = UCAPI::GetTableCredentials(context, table_data->table_id, write, catalog.credentials);
 
 	// Inject secret into secret manager scoped to this path
 	CreateSecretInput input;
@@ -217,7 +216,7 @@ void UCTableSet::OnDetach(ClientContext &context) {
 void TableInformation::InternalCheckpoint(ClientContext &context, bool force) {
 	// attach and call down to Delta's table specific checkpoint
 	D_ASSERT(table_data);
-	RefreshCredentials(context);
+	RefreshCredentials(context, true);
 	InternalAttach(context);
 	internal_attached_database->GetTransactionManager().Checkpoint(context, force);
 }
