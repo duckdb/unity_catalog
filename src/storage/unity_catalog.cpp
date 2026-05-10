@@ -106,8 +106,12 @@ PhysicalOperator &UnityCatalog::PlanInsert(ClientContext &context, PhysicalPlanG
 	auto &table_entry = op.table.Cast<UCTableEntry>();
 	auto &table = table_entry.table;
 
+	if (access_mode == AccessMode::READ_ONLY) {
+		throw InvalidInputException("Cannot insert into read-only Unity Catalog '%s'", GetName());
+	}
+
 	table.InternalAttach(context);
-	table.RefreshCredentials(context);
+	table.RefreshCredentials(context, true);
 
 	auto internal_catalog = table.GetInternalCatalog();
 	return internal_catalog->PlanInsert(context, planner, op, plan);

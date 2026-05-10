@@ -24,7 +24,7 @@ public:
 public:
 	optional_ptr<CatalogEntry> GetVersion(ClientContext &context, const EntryLookupInfo &lookup);
 	optional_ptr<Catalog> GetInternalCatalog();
-	void RefreshCredentials(ClientContext &context);
+	void RefreshCredentials(ClientContext &context, bool write = false);
 	void InternalAttach(ClientContext &context);
 	void InternalDetach(ClientContext &context, const lock_guard<mutex> &_attach_lock);
 	void InternalCheckpoint(ClientContext &context, bool force);

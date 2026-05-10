@@ -123,7 +123,7 @@ static unique_ptr<Catalog> UnityCatalogAttach(optional_ptr<StorageExtensionInfo>
 		StringUtil::RTrim(credentials.endpoint, "/");
 
 		Value aws_region_val = kv_secret.TryGetValue("aws_region");
-		credentials.aws_region = endpoint_val.IsNull() ? "" : aws_region_val.ToString();
+		credentials.aws_region = aws_region_val.IsNull() ? "" : aws_region_val.ToString();
 
 	} else if (explicit_secret) {
 		// secret not found and one was explicitly provided - throw an error
