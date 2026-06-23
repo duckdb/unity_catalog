@@ -25,9 +25,10 @@ CREATE SECRET (
 statement ok
 ATTACH 'unity' AS my_catalog (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'default');
 
-# query to trigger attach
+# query to trigger attach;
+# backport NOTE: < 1000 avoids writer pollution, fixed in v1.5-variegata
 query III
-FROM my_catalog.default.marksheet;
+FROM my_catalog.default.marksheet WHERE id < 1000;
 ----
 1	nWYHawtqUw	930
 2	uvOzzthsLV	166
@@ -88,11 +89,10 @@ statement ok
 USE my_catalog.default; CALL unity_catalog_checkpoint_table('user_countries');
 
 # Confirm all checkpoints via presence of checkpoint files
+# backport NOTE: skip marksheet because of writer pollution, fixed in v1.5-variegata
 query II rowsort
-SELECT parse_path(file)[-3], parse_path(file)[-1] FROM glob('${UC_TEST_DATA}/**/*checkpoint*');
+SELECT parse_path(file)[-3], parse_path(file)[-1] FROM glob('${UC_TEST_DATA}/**/*checkpoint*') WHERE file NOT LIKE '%/marksheet/%';
 ----
-marksheet	00000000000000000001.checkpoint.parquet
-marksheet	_last_checkpoint
 marksheet_uniform	00000000000000000001.checkpoint.parquet
 marksheet_uniform	_last_checkpoint
 numbers	00000000000000000000.checkpoint.parquet

@@ -7,6 +7,7 @@
 #include "duckdb/main/extension_helper.hpp"
 
 #include "uc_api.hpp"
+#include "uc_logging.hpp"
 #include "storage/unity_catalog.hpp"
 #include "yyjson.hpp"
 
@@ -187,6 +188,7 @@ static string GetCredentialsRequest(ClientContext &ctx, const string &url, const
 //  	--header "Authorization: Bearer ${TOKEN}" | jq .
 
 string UCAPI::GetDefaultSchema(ClientContext &ctx, const UCCredentials &credentials) {
+	UC_LOG_DEBUG(ctx, "uc-api.GetDefaultSchema endpoint=%s", credentials.endpoint);
 	auto url = credentials.endpoint + "/api/2.0/settings/types/default_namespace_ws/names/default";
 	auto resp = MakeRequest(ctx, url, credentials.token);
 
@@ -210,6 +212,7 @@ string UCAPI::GetDefaultSchema(ClientContext &ctx, const UCCredentials &credenti
 UCAPICommitsResult UCAPI::GetCommits(ClientContext &ctx, const string &table_id, const string &table_uri,
                                      const UCCredentials &credentials) {
 	UCAPICommitsResult result;
+	UC_LOG_DEBUG(ctx, "uc-api.GetCommits table_id=%s", table_id);
 	string body = StringUtil::Format("{\"start_version\": 0, \"table_id\": \"%s\", \"table_uri\": \"%s\"}",
 	                                 table_id.c_str(), table_uri.c_str());
 	string url = credentials.endpoint + "/api/2.1/unity-catalog/delta/preview/commits";
@@ -238,6 +241,8 @@ UCAPICommitsResult UCAPI::GetCommits(ClientContext &ctx, const string &table_id,
 		result.commits.push_back(commit_result);
 	}
 
+	UC_LOG_DEBUG(ctx, "uc-api.GetCommits table_id=%s -> commits=%zu latest_version=%lld", table_id,
+	             result.commits.size(), (long long)result.latest_table_version);
 	return result;
 }
 
@@ -245,9 +250,13 @@ bool UCAPI::PostCommit(ClientContext &ctx, const string &table_id, const string 
                        const UCCredentials &credentials, idx_t version, idx_t timestamp, const string &file_name,
                        idx_t file_size, idx_t file_modification_timestamp, int64_t latest_backfilled_version) {
 	string backfill_field;
+	string backfill_log("(none)");
 	if (latest_backfilled_version >= 0) {
 		backfill_field = StringUtil::Format(R"("latest_backfilled_version": %lld,)", latest_backfilled_version);
+		backfill_log = to_string((int64_t)latest_backfilled_version);
 	}
+	UC_LOG_DEBUG(ctx, "uc-api.PostCommit table_id=%s version=%lld backfill_version=%s", table_id, (long long)version,
+	             backfill_log);
 	string body = StringUtil::Format(
 	    R"({"table_id": "%s", "table_uri": "%s/", %s "commit_info": {"version": %ld, "timestamp": %ld, "file_name": "%s", "file_size": %ld, "file_modification_timestamp": %ld}})",
 	    table_id.c_str(), table_uri.c_str(), backfill_field.c_str(), version, timestamp, file_name.c_str(), file_size,
@@ -263,12 +272,14 @@ bool UCAPI::PostCommit(ClientContext &ctx, const string &table_id, const string 
 		error.ThrowError(StringUtil::Format("Failed to commit to %s", table_id));
 	}
 
+	UC_LOG_DEBUG(ctx, "uc-api.PostCommit table_id=%s version=%lld -> ok", table_id, (long long)version);
 	return true;
 }
 
 UCAPITableCredentials UCAPI::GetTableCredentials(ClientContext &ctx, const string &table_id, bool write,
                                                  const UCCredentials &credentials) {
 	UCAPITableCredentials result;
+	UC_LOG_DEBUG(ctx, "uc-api.GetTableCredentials table_id=%s op=%s", table_id, write ? "READ_WRITE" : "READ");
 
 	auto url = credentials.endpoint + "/api/2.1/unity-catalog/temporary-table-credentials";
 	auto api_result = GetCredentialsRequest(ctx, url, table_id, write, credentials.token);
@@ -310,6 +321,7 @@ static UCAPIColumnDefinition ParseColumnDefinition(duckdb_yyjson::yyjson_val *co
 vector<UCAPITable> UCAPI::GetTables(ClientContext &ctx, Catalog &catalog, const string &schema,
                                     const UCCredentials &credentials) {
 	vector<UCAPITable> result;
+	UC_LOG_DEBUG(ctx, "uc-api.GetTables catalog=%s schema=%s", catalog.GetDBPath(), schema);
 	auto url = credentials.endpoint + "/api/2.1/unity-catalog/tables?catalog_name=" + catalog.GetDBPath() +
 	           "&schema_name=" + schema;
 	auto api_result = MakeRequest(ctx, url, credentials.token);
@@ -353,11 +365,14 @@ vector<UCAPITable> UCAPI::GetTables(ClientContext &ctx, Catalog &catalog, const 
 		result.push_back(table_result);
 	}
 
+	UC_LOG_DEBUG(ctx, "uc-api.GetTables catalog=%s schema=%s -> tables=%zu", catalog.GetDBPath(), schema,
+	             result.size());
 	return result;
 }
 
 vector<UCAPISchema> UCAPI::GetSchemas(ClientContext &ctx, Catalog &catalog, const UCCredentials &credentials) {
 	vector<UCAPISchema> result;
+	UC_LOG_DEBUG(ctx, "uc-api.GetSchemas catalog=%s", catalog.GetDBPath());
 	auto url = credentials.endpoint + "/api/2.1/unity-catalog/schemas?catalog_name=" + catalog.GetDBPath();
 	auto api_result = MakeRequest(ctx, url, credentials.token);
 
@@ -380,6 +395,7 @@ vector<UCAPISchema> UCAPI::GetSchemas(ClientContext &ctx, Catalog &catalog, cons
 		result.push_back(schema_result);
 	}
 
+	UC_LOG_DEBUG(ctx, "uc-api.GetSchemas catalog=%s -> schemas=%zu", catalog.GetDBPath(), result.size());
 	return result;
 }
 

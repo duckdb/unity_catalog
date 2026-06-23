@@ -1,4 +1,5 @@
 #include "uc_api.hpp"
+#include "uc_logging.hpp"
 #include "uc_utils.hpp"
 
 #include "storage/unity_catalog.hpp"
@@ -131,8 +132,12 @@ static bool CopyStagedCommitToDeltaLog(ClientContext &context, const string &src
 	constexpr idx_t BUFFER_SIZE = 8ULL * 1024 * 1024;
 	auto &fs = FileSystem::GetFileSystem(context);
 	auto src_file = fs.OpenFile(src, FileOpenFlags::FILE_FLAGS_READ);
-	auto dst_file = fs.OpenFile(dst, FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE_NEW |
-	                                     FileOpenFlags::FILE_FLAGS_NULL_IF_EXISTS);
+	// Exclusive create + null-if-exists: skip (return null) if another session already backfilled
+	// this version, rather than clobbering it. NULL_IF_EXISTS is only valid with EXCLUSIVE_CREATE
+	// (asserted in debug builds); EXCLUSIVE_CREATE in turn requires a base FILE_CREATE.
+	auto dst_flags = FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE |
+	                 FileOpenFlags::FILE_FLAGS_EXCLUSIVE_CREATE | FileOpenFlags::FILE_FLAGS_NULL_IF_EXISTS;
+	auto dst_file = fs.OpenFile(dst, dst_flags);
 	if (dst_file) {
 		auto buf = make_unsafe_uniq_array<char>(BUFFER_SIZE);
 		int64_t n;
@@ -169,8 +174,12 @@ void TableInformation::BackfillCommitList(ClientContext &context, const vector<U
 				// false = dst already exists; another session beat us — still update backfill version
 			}
 			backfilled_through = commit.version;
-		} catch (...) {
-			// Real failure — stop to avoid advancing backfilled_through past a gap.
+		} catch (std::exception &e) {
+			// Real failure — stop to avoid advancing backfilled_through past a gap. Surface it: a
+			// silently-swallowed backfill failure lets staged commits accumulate until the server
+			// rejects further commits (HTTP 429, "too many un-backfilled commits").
+			UC_LOG_WARNING(context, "uc.BackfillCommitList version=%lld src=%s dst=%s failed: %s",
+			               (long long)commit.version, src.c_str(), dst.c_str(), e.what());
 			break;
 		}
 	}

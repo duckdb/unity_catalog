@@ -28,8 +28,9 @@ statement ok
 ATTACH 'unity' AS my_catalog (TYPE unity_catalog);
 
 # We can now query the tables in the schema!
+# backport NOTE: < 1000 avoids writer pollution, fixed in v1.5-variegata
 query I
-SELECT count(*) FROM my_catalog.default.marksheet;
+SELECT count(*) FROM my_catalog.default.marksheet WHERE id < 1000;
 ----
 15
 

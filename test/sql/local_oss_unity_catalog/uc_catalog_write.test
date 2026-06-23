@@ -5,11 +5,11 @@
 # Require statement will ensure this test is run with this extension loaded
 require parquet
 
-require uc_catalog
+require httpfs
 
 require delta
 
-require httpfs
+require unity_catalog
 
 require-env UC_TEST_SERVER_RUNNING
 
@@ -36,15 +36,15 @@ statement ok
 FROM marksheet;
 
 statement ok
-INSERT INTO marksheet VALUES(1, 'blabla', 1337);
+INSERT INTO marksheet VALUES(1001, 'blabla', 1337);
 
 # Second insert verifies PlanInsert credential ordering (RefreshCredentials before InternalAttach).
 # marksheet is not catalog-managed (no delta.feature.catalogManaged property), so no backfill applies here.
 statement ok
-INSERT INTO marksheet VALUES(2, 'blabla2', 1338);
+INSERT INTO marksheet VALUES(1002, 'blabla2', 1338);
 
 query III
-SELECT id, name, marks FROM marksheet WHERE id IN (1, 2) ORDER BY id;
+SELECT id, name, marks FROM marksheet WHERE id IN (1001, 1002) ORDER BY id;
 ----
-1	blabla	1337
-2	blabla2	1338
+1001	blabla	1337
+1002	blabla2	1338
