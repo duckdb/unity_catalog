@@ -43,8 +43,11 @@ INSERT INTO marksheet VALUES(1001, 'blabla', 1337);
 statement ok
 INSERT INTO marksheet VALUES(1002, 'blabla2', 1338);
 
+# backport NOTE: DISTINCT keeps this idempotent on a persistent local server — re-runs
+# re-INSERT 1001/1002, and DISTINCT collapses the duplicates back to two rows. HEAD writes to
+# a dedicated _rw table instead.
 query III
-SELECT id, name, marks FROM marksheet WHERE id IN (1001, 1002) ORDER BY id;
+SELECT DISTINCT id, name, marks FROM marksheet WHERE id IN (1001, 1002) ORDER BY id;
 ----
 1001	blabla	1337
 1002	blabla2	1338

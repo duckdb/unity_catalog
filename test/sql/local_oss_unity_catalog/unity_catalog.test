@@ -36,8 +36,9 @@ statement ok
 USE my_catalog.default;
 
 # We can now query the tables in the schema!
+# backport NOTE: < 1000 avoids writer pollution, fixed in v1.5-variegata
 query III
-FROM marksheet;
+FROM marksheet WHERE id < 1000;
 ----
 1	nWYHawtqUw	930
 2	uvOzzthsLV	166
@@ -85,8 +86,9 @@ my_catalog	default	user_countries
 #mode output_result
 
 # Use the default schema
+# backport NOTE: < 1000 avoids writer pollution, fixed in v1.5-variegata
 query III
-FROM marksheet;
+FROM marksheet WHERE id < 1000;
 ----
 1	nWYHawtqUw	930
 2	uvOzzthsLV	166
