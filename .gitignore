@@ -10,3 +10,4 @@ scripts/uc-script.sh
 unitycatalogga
 test/sql/tmp.test
 venv
+.cache/
