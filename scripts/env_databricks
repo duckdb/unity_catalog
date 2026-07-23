@@ -1,20 +1,16 @@
 #!/usr/bin/env bash
+# Inject the Databricks test credentials, then exec env "$@". Used for both dev and CI.
+set -euo pipefail
 
-eval $(op read op://testing-rw/databricks_ccv2/_env | op inject)
+if ! creds="$(op read op://testing-rw/databricks_ccv2/_env | op inject)"; then
+	echo "env_databricks: could not read Databricks creds from 1Password" \
+		"(sign in with \`op\`, or export OP_SERVICE_ACCOUNT_TOKEN)." >&2
+	exit 1
+fi
 
-# Create Databricks config
-cat >~/.databrickscfg <<EOF
-[DEFAULT]
-host = $DATABRICKS_ENDPOINT
-token = $DATABRICKS_TOKEN
-EOF
-
-export UC_TEST_CATALOG=duckdb_write_testing
-
-# The SQL warehouse that databricks_gen (SDK Statement Execution) runs table-management
-# SQL on. Its value comes from the 1Password _env above; re-export so the child inherits
-# it even if _env set it unexported. Required by the write/provision path (read tests are
-# ro and never touch the SDK).
-export DATABRICKS_WAREHOUSE_ID
+# set -a auto-exports every assignment from the bundle
+set -a
+eval "$creds"
+set +a
 
 exec env "$@"

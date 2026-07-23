@@ -1,0 +1,6 @@
+# Allow YAML anchors/aliases in workflows -- actionlint doesn't resolve alias nodes and errors
+# ("... but found alias node ..."); ignore just that family so &anchors / *refs are usable.
+paths:
+  "**/*.{yml,yaml}":
+    ignore:
+      - "but found alias node"
