@@ -1,15 +1,8 @@
-# Integration tests for the unity_catalog extension: build ONE relassert binary, then run it against
-# a Local (OSS Unity Catalog container) and a Cloud (live Databricks) target.
-#
-#   Build  -> compiles build/relassert once (extension + duckdb + unittest, assertions on) and uploads
-#             the test bits as an artifact.
-#   Local  -> downloads the artifact, boots the OSS UC image, runs the oss_local suite. Every trigger.
-#   Cloud  -> downloads the artifact, runs the databricks suite via scripts/env_databricks. Gated by the
-#             `cloud` environment (required reviewer) so only an admin can release the secrets -- even
-#             on a PR. Never exposes creds to an unapproved run.
-#
-# The driver is resolved from its git pin in pyproject.toml (no side-by-side checkout). MainDistribution
-# builds the shipping binary separately -- this is the only test binary.
+# Integration tests for the unity_catalog extension: build ONE test binary (BUILD_KIND, default
+# release), then run it against a Local (OSS Unity Catalog container) and a Cloud (live Databricks)
+# target. Cloud is gated by the `cloud` environment (required reviewer) -- a PR can request it, but
+# only an admin releases the secrets. The driver comes from its git pin in pyproject.toml (no
+# side-by-side checkout); MainDistribution builds the shipping binary separately.
 
 name: Integration Tests
 
@@ -29,13 +22,18 @@ defaults:
 
 env:
   VCPKG_COMMIT_ID: 84bab45d415d22042bd0b9081aea57f362da3f35
+  # Flip release <-> relassert here. Threaded below as $BUILD_KIND in run: and ${{ env.BUILD_KIND }}
+  # in with:. (GH quirk: env isn't usable in a job `name:` or job-level `env:`, so job names stay
+  # generic and BUILD_DIR is set inline in the run.) NB: relassert is a non-Release build -> it also
+  # turns ASAN+UBSAN on; add DISABLE_SANITIZER: "1" if you flip to it and don't want a sanitizer run.
+  BUILD_KIND: release
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Build the ONE relassert binary + extensions; hand them to Local/Cloud as an artifact.
+  # Build ONE binary + extensions; hand them to Local/Cloud as an artifact.
   # ---------------------------------------------------------------------------
   build:
-    name: Build (relassert)
+    name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -46,7 +44,8 @@ jobs:
       BUILD_EXTENSION_TEST_DEPS: full
       RUSTC_WRAPPER: sccache # caches both C++ && Rust
       SCCACHE_GHA_ENABLED: "true"
-      CARGO_INCREMENTAL: "0"
+      CARGO_INCREMENTAL: 0
+      DUCKDB_LINKER: mold # use the fast linker (installed below); Release doesn't auto-select it
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,13 +55,13 @@ jobs:
       - name: Configure OpenSSL for Rust
         run: |
           cat >> "$GITHUB_ENV" <<EOF
-          OPENSSL_ROOT_DIR=$PWD/build/relassert/vcpkg_installed/x64-linux
-          OPENSSL_DIR=$PWD/build/relassert/vcpkg_installed/x64-linux
+          OPENSSL_ROOT_DIR=$PWD/build/$BUILD_KIND/vcpkg_installed/x64-linux
+          OPENSSL_DIR=$PWD/build/$BUILD_KIND/vcpkg_installed/x64-linux
           OPENSSL_USE_STATIC_LIBS=true
           EOF
 
-      - name: Install Ninja
-        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
+      - name: Install Ninja + mold
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build mold
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -75,26 +74,26 @@ jobs:
       - name: Cache vcpkg built packages
         uses: actions/cache@v4
         with:
-          path: build/relassert/vcpkg_installed
+          path: build/${{ env.BUILD_KIND }}/vcpkg_installed
           # duckdb/vcpkg.json: USE_MERGED_VCPKG_MANIFEST folds duckdb's own vcpkg deps into the manifest.
           key: vcpkg-x64-linux-${{ env.VCPKG_COMMIT_ID }}-${{ hashFiles('vcpkg.json', 'extension_config.cmake', 'duckdb/vcpkg.json') }}
           restore-keys: |
             vcpkg-x64-linux-${{ env.VCPKG_COMMIT_ID }}-
             vcpkg-x64-linux-
 
-      - name: Build (relassert)
+      - name: Build
         run: |
-          make relassert
+          make $BUILD_KIND
           sccache --show-stats || true
 
       - name: Upload test binary + extensions
         uses: actions/upload-artifact@v4
         with:
-          name: relassert
+          name: ${{ env.BUILD_KIND }}
           path: |
-            build/relassert/test/unittest
-            build/relassert/duckdb
-            build/relassert/extension/**/*.duckdb_extension
+            build/${{ env.BUILD_KIND }}/test/unittest
+            build/${{ env.BUILD_KIND }}/duckdb
+            build/${{ env.BUILD_KIND }}/extension/**/*.duckdb_extension
           if-no-files-found: error
           retention-days: 3
 
@@ -107,20 +106,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      BUILD_DIR: build/relassert
       DUCKTEST_UC_IMAGE: ghcr.io/benfleis/ducktest-unitycatalog:ci
     steps:
       - uses: actions/checkout@v4 # test files + pyproject + scripts; binary comes from the artifact
 
-      - name: Download the relassert binary
+      - name: Download the test binary
         uses: actions/download-artifact@v4
         with:
-          name: relassert
-          path: build/relassert
+          name: ${{ env.BUILD_KIND }}
+          path: build/${{ env.BUILD_KIND }}
 
       # upload-artifact drops the executable bit; restore it on the two binaries (extensions are LOADed, not run).
       - name: Restore exec bits
-        run: chmod +x build/relassert/test/unittest build/relassert/duckdb
+        run: chmod +x build/$BUILD_KIND/test/unittest build/$BUILD_KIND/duckdb
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
@@ -132,7 +130,7 @@ jobs:
         run: docker pull "$DUCKTEST_UC_IMAGE"
 
       - name: Local suite (-m oss_local)
-        run: uv run pytest -m oss_local -n0 -s
+        run: BUILD_DIR=build/$BUILD_KIND uv run pytest -m oss_local -n0 -s
 
   # ---------------------------------------------------------------------------
   # Cloud: live Databricks. `environment: cloud` (required reviewer) gates each run -- an admin must
@@ -145,19 +143,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: cloud
-    env:
-      BUILD_DIR: build/relassert
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download the relassert binary
+      - name: Download the test binary
         uses: actions/download-artifact@v4
         with:
-          name: relassert
-          path: build/relassert
+          name: ${{ env.BUILD_KIND }}
+          path: build/${{ env.BUILD_KIND }}
 
       - name: Restore exec bits
-        run: chmod +x build/relassert/test/unittest build/relassert/duckdb
+        run: chmod +x build/$BUILD_KIND/test/unittest build/$BUILD_KIND/duckdb
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
@@ -170,4 +166,4 @@ jobs:
       - name: Cloud suite (-m databricks)
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-        run: scripts/env_databricks uv run pytest -m databricks -n0 -s
+        run: BUILD_DIR=build/$BUILD_KIND scripts/env_databricks uv run pytest -m databricks -n0 -s
