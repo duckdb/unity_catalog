@@ -94,6 +94,7 @@ jobs:
             build/${{ env.BUILD_KIND }}/test/unittest
             build/${{ env.BUILD_KIND }}/duckdb
             build/${{ env.BUILD_KIND }}/extension/**/*.duckdb_extension
+            build/${{ env.BUILD_KIND }}/src/libduckdb.so
           if-no-files-found: error
           retention-days: 3
 
