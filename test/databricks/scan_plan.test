@@ -1,6 +1,7 @@
 # name: test/databricks/scan_plan.test
 # description: IRC scan-plan API (server-side filter pushdown) against Databricks Unity Catalog.
 # group: [databricks]
+
 #
 # Table (test/databricks/data/scan_plan_days_managed.sql): id INT, day VARCHAR, 5 files
 # one-per-day, 10 rows/file, ids 1-50 -- catalog-managed (staged commits; only readable via

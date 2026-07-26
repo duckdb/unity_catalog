@@ -98,7 +98,6 @@ void UnityCatalog::ClearCache() {
 	schemas.ClearEntries();
 }
 
-
 PhysicalOperator &UnityCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
                                                   LogicalCreateTable &op, PhysicalOperator &plan) {
 	throw NotImplementedException("UnityCatalog PlanCreateTableAs");

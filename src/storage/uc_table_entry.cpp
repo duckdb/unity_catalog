@@ -86,8 +86,8 @@ static void UCScanPlanPushdownFilter(ClientContext &context, LogicalGet &get, Fu
 					CreateSecretInput sec;
 					sec.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
 					sec.persist_type = SecretPersistType::TEMPORARY;
-					sec.name = Identifier("__internal_uc_scanplan__" + bd.catalog_name + "__" + bd.schema_name +
-					                     "__" + bd.table_name + "__" + to_string(i));
+					sec.name = Identifier("__internal_uc_scanplan__" + bd.catalog_name + "__" + bd.schema_name + "__" +
+					                      bd.table_name + "__" + to_string(i));
 					sec.type = "s3";
 					sec.provider = "config";
 					sec.options = {

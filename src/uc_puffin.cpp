@@ -213,7 +213,8 @@ static bool TryParseBlobMetadata(yyjson_val *blob_val, idx_t blob_section_end, c
 	}
 	blob.offset = NumericCast<idx_t>(raw_offset);
 	blob.length = NumericCast<idx_t>(raw_length);
-	if (blob.offset < PUFFIN_MAGIC_SIZE || blob.length > blob_section_end || blob.offset > blob_section_end - blob.length) {
+	if (blob.offset < PUFFIN_MAGIC_SIZE || blob.length > blob_section_end ||
+	    blob.offset > blob_section_end - blob.length) {
 		throw InvalidInputException("Puffin file \"%s\" is corrupt - blob offset/length out of range", path);
 	}
 	return true;

@@ -38,9 +38,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def _dispatch(self, method):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode() if length else ""
-        self.server.requests.append(
-            {"method": method, "path": self.path, "body": body, "t": time.monotonic()}
-        )
+        self.server.requests.append({"method": method, "path": self.path, "body": body, "t": time.monotonic()})
         status, headers, payload = self.server.script(method, self.path, self.server.requests)
         self.send_response(status)
         for key, value in headers.items():
@@ -94,9 +92,7 @@ def _run_plan_scan(endpoint, *, filter_json=None, pre="", timeout=30):
     if filter_json is not None:
         args += f", filter => '{filter_json}'"
     sql = f"LOAD unity_catalog; LOAD httpfs; {pre} SELECT * FROM __internal_uc_plan_table_scan({args});"
-    return subprocess.run(
-        [_duckdb_bin(), "-unsigned", "-c", sql], capture_output=True, text=True, timeout=timeout
-    )
+    return subprocess.run([_duckdb_bin(), "-unsigned", "-c", sql], capture_output=True, text=True, timeout=timeout)
 
 
 def _resp(status_str, plan_id="p1", retry_after=None):
@@ -107,6 +103,7 @@ def _resp(status_str, plan_id="p1", retry_after=None):
 # -----------------------------------------------------------------------------
 # Poll behavior
 #
+
 
 def test_poll_submitted_then_completed():
     def script(method, path, requests):
@@ -156,6 +153,7 @@ def test_failed_status_surfaces():
 # Retry-After pacing
 #
 
+
 def test_retry_after_is_honored():
     def script(method, path, requests):
         if method == "POST" and path.endswith("/plan"):
@@ -177,6 +175,7 @@ def test_retry_after_is_honored():
 # Cancellation -> best-effort plan DELETE
 #
 
+
 def test_timeout_cancel_issues_plan_delete():
     def script(method, path, requests):
         if method == "POST" and path.endswith("/plan"):
@@ -197,6 +196,7 @@ def test_timeout_cancel_issues_plan_delete():
 # -----------------------------------------------------------------------------
 # Request body: the filter JSON is wrapped into the plan request
 #
+
 
 def test_filter_is_sent_in_plan_body():
     def script(method, path, requests):

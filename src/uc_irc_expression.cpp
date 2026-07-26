@@ -94,7 +94,8 @@ static string ExprToIRCJson(const Expression &expr) {
 			return "";
 		}
 
-		ExpressionType effective_type = flipped ? FlipComparisonExpression(expr.GetExpressionType()) : expr.GetExpressionType();
+		ExpressionType effective_type =
+		    flipped ? FlipComparisonExpression(expr.GetExpressionType()) : expr.GetExpressionType();
 		const char *irc_type = nullptr;
 		switch (effective_type) {
 		case ExpressionType::COMPARE_EQUAL:

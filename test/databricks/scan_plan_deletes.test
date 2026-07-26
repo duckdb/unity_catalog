@@ -1,5 +1,7 @@
 # name: test/databricks/scan_plan_deletes.test
 # description: scan-plan delete-file resolution (BuildUCDeleteFilter) against a table with actual deletes.
+# group: [databricks]
+
 #
 # Live-verified. scan_plan_days_deletes is 5 files, one row per file deleted after a
 # deletion-vector-enabling DELETE. Databricks surfaces these as `deletion-vector-v1` puffin blobs,

@@ -766,10 +766,10 @@ UCScanPlanResult UCAPI::FetchPlanningResult(ClientContext &ctx, const string &ca
 	}
 	auto result = ParseScanPlanResponse(resp->body);
 	UC_LOG_DEBUG(ctx, "scan-plan.FetchPlanningResult plan_id=%s -> status=%s inline=%zu plan_tasks=%zu delete=%zu%s%s",
-	                 plan_id, UCScanPlanStatusToString(result.status), result.file_scan_tasks.size(),
-	                 result.plan_tasks.size(), result.delete_files.size(),
-	                 result.status == UCScanPlanStatus::FAILED ? " error=" : "",
-	                 result.status == UCScanPlanStatus::FAILED ? result.error_message.c_str() : "");
+	             plan_id, UCScanPlanStatusToString(result.status), result.file_scan_tasks.size(),
+	             result.plan_tasks.size(), result.delete_files.size(),
+	             result.status == UCScanPlanStatus::FAILED ? " error=" : "",
+	             result.status == UCScanPlanStatus::FAILED ? result.error_message.c_str() : "");
 	return result;
 }
 
@@ -782,16 +782,16 @@ UCScanPlanResult UCAPI::PlanTableScan(ClientContext &ctx, const string &catalog_
 	string body = filter_json.empty() ? "{\"case-sensitive\":false}"
 	                                  : "{\"case-sensitive\":false,\"filter\":" + filter_json + "}";
 	UC_LOG_DEBUG(ctx, "scan-plan.PlanTableScan %s.%s.%s filter=%s", catalog_name, schema_name, table_name,
-	                 filter_json.empty() ? "(none)" : filter_json);
+	             filter_json.empty() ? "(none)" : filter_json);
 	auto resp = MakeRequestResp(ctx, url, credentials.token, body);
 	int64_t retry_after_ms = ParseRetryAfterMs(*resp);
 	auto result = ParseScanPlanResponse(resp->body);
-	UC_LOG_DEBUG(ctx, "scan-plan.PlanTableScan %s.%s.%s -> status=%s plan_id=%s inline=%zu plan_tasks=%zu delete=%zu%s%s",
-	                 catalog_name, schema_name, table_name, UCScanPlanStatusToString(result.status),
-	                 result.plan_id.c_str(), result.file_scan_tasks.size(), result.plan_tasks.size(),
-	                 result.delete_files.size(),
-	                 result.status == UCScanPlanStatus::FAILED ? " error=" : "",
-	                 result.status == UCScanPlanStatus::FAILED ? result.error_message.c_str() : "");
+	UC_LOG_DEBUG(ctx,
+	             "scan-plan.PlanTableScan %s.%s.%s -> status=%s plan_id=%s inline=%zu plan_tasks=%zu delete=%zu%s%s",
+	             catalog_name, schema_name, table_name, UCScanPlanStatusToString(result.status), result.plan_id.c_str(),
+	             result.file_scan_tasks.size(), result.plan_tasks.size(), result.delete_files.size(),
+	             result.status == UCScanPlanStatus::FAILED ? " error=" : "",
+	             result.status == UCScanPlanStatus::FAILED ? result.error_message.c_str() : "");
 
 	// Poll fetchPlanningResult until a terminal status (completed/failed/cancelled). No fixed
 	// iteration cap — a legitimately slow server-side plan must not be cut off (the old
@@ -848,8 +848,7 @@ UCScanPlanResult UCAPI::FetchScanTasks(ClientContext &ctx, const string &catalog
 		escaped += c;
 	}
 	string body = "{\"plan-task\":\"" + escaped + "\"}";
-	UC_LOG_DEBUG(ctx, "scan-plan.FetchScanTasks %s.%s.%s token=%s", catalog_name, schema_name, table_name,
-	                 plan_task);
+	UC_LOG_DEBUG(ctx, "scan-plan.FetchScanTasks %s.%s.%s token=%s", catalog_name, schema_name, table_name, plan_task);
 	auto resp = MakeRequest(ctx, url, credentials.token, body);
 
 	// FetchScanTasksResult is a bare ScanTasks object — no status field.
@@ -862,8 +861,8 @@ UCScanPlanResult UCAPI::FetchScanTasks(ClientContext &ctx, const string &catalog
 	result.status = UCScanPlanStatus::COMPLETED;
 	ParseScanTasksPayload(root, result);
 	UC_LOG_DEBUG(ctx, "scan-plan.FetchScanTasks %s.%s.%s token=%s -> inline=%zu plan_tasks=%zu delete=%zu",
-	                 catalog_name, schema_name, table_name, plan_task, result.file_scan_tasks.size(),
-	                 result.plan_tasks.size(), result.delete_files.size());
+	             catalog_name, schema_name, table_name, plan_task, result.file_scan_tasks.size(),
+	             result.plan_tasks.size(), result.delete_files.size());
 	return result;
 }
 
