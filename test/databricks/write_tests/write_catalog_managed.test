@@ -130,13 +130,13 @@ WHERE f >= '00000000000000000001.' ORDER BY f;
 
 # -----------------------------------------------------------------------------
 # v1 add-commit protocol -- assert-table-uuid + set-latest-backfilled-version. These ride in
-# the UpdateTable POST body and surface only in the enriched uc-api.UpdateTable debug log line.
+# the UpdateTable POST body and surface only in the enriched api.UpdateTable debug log line.
 #
 
 # Every add-commit carries the table UUID (assert-table-uuid requirement).
 query I
 SELECT count(*) > 0 FROM duckdb_logs()
-WHERE message LIKE 'uc-api.UpdateTable %id_name %table_id=%'
+WHERE message LIKE 'api.UpdateTable %id_name %table_id=%'
   AND message NOT LIKE '%table_id=(none)%';
 ----
 true
@@ -145,7 +145,7 @@ true
 # set-latest-backfilled-version (numeric backfill_version, not "(none)").
 query I
 SELECT count(*) > 0 FROM duckdb_logs()
-WHERE message LIKE 'uc-api.UpdateTable %id_name %backfill_version=%'
+WHERE message LIKE 'api.UpdateTable %id_name %backfill_version=%'
   AND message NOT LIKE '%backfill_version=(none)%';
 ----
 true

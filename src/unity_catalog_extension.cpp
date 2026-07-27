@@ -145,7 +145,7 @@ static unique_ptr<Catalog> UnityCatalogAttach(optional_ptr<StorageExtensionInfo>
 		try {
 			default_schema = UCAPI::GetDefaultSchema(context, credentials);
 		} catch (Exception &e) {
-			UC_LOG_ERROR(context, "Failed to fetch default schema: %s", e.what());
+			UC_LOG_ERROR(context, "api.GetDefaultSchema failed: %s", e.what());
 		}
 	}
 

@@ -1,0 +1,165 @@
+# name: test/oss_local/dv_decode.test
+# description: Server-free unit coverage of the deletion-vector blob decoder (UCDeletionVectorData::FromBlob,
+# src/uc_puffin.cpp) via uc_read_deletion_vector. The paired driver dv_decode.py crafts blob files and passes
+# their paths + sizes as env vars, declared require-env below and referenced as {DV_*}. The content_offset/
+# content_size form drives FromBlob directly (where the guards live); one bare call covers the whole-file
+# UCPuffinReader path. Pins the valid decode AND every reject-guard the live #1204 suite skipped.
+# group: [functions]
+
+require parquet
+
+require unity_catalog
+
+require-env DV_EMPTY
+
+require-env DV_EMPTY_SIZE
+
+require-env DV_POS
+
+require-env DV_POS_SIZE
+
+require-env DV_MULTI
+
+require-env DV_MULTI_SIZE
+
+require-env DV_OFFSET_FILE
+
+require-env DV_OFFSET
+
+require-env DV_OFFSET_BLOBSIZE
+
+require-env DV_SMALL
+
+require-env DV_SMALL_SIZE
+
+require-env DV_MAGIC
+
+require-env DV_MAGIC_SIZE
+
+require-env DV_BADCOUNT
+
+require-env DV_BADCOUNT_SIZE
+
+require-env DV_BADPAYLOAD
+
+require-env DV_BADPAYLOAD_SIZE
+
+require-env DV_OOB
+
+require-env DV_OOB_SIZE
+
+require-env DV_CRC
+
+require-env DV_CRC_SIZE
+
+require-env DV_TRAILING
+
+require-env DV_TRAILING_SIZE
+
+# -----------------------------------------------------------------------------
+# Valid decode -- content form drives FromBlob directly
+#
+
+# Empty blob (0 bitmaps): a legal 20-byte blob, decodes to no deleted positions.
+query I
+SELECT count(*) FROM uc_read_deletion_vector('{DV_EMPTY}', content_offset=>0, content_size=>{DV_EMPTY_SIZE});
+----
+0
+
+# One array container: exact positions round-trip.
+query I
+SELECT pos FROM uc_read_deletion_vector('{DV_POS}', content_offset=>0, content_size=>{DV_POS_SIZE}) ORDER BY pos;
+----
+0
+1
+5
+100
+
+# Positions spanning multiple 16-bit roaring containers decode correctly.
+query I
+SELECT pos FROM uc_read_deletion_vector('{DV_MULTI}', content_offset=>0, content_size=>{DV_MULTI_SIZE}) ORDER BY pos;
+----
+0
+1
+70000
+131072
+131073
+
+# A valid blob at a non-zero content-offset inside a larger file (the shape a puffin container /
+# scan-plan content-offset points at).
+query I
+SELECT pos FROM uc_read_deletion_vector('{DV_OFFSET_FILE}', content_offset=>{DV_OFFSET}, content_size=>{DV_OFFSET_BLOBSIZE}) ORDER BY pos;
+----
+7
+42
+
+# Whole-file read of a bare deletion vector (no content-offset): the UCPuffinReader bare-blob path.
+query I
+SELECT pos FROM uc_read_deletion_vector('{DV_POS}') ORDER BY pos;
+----
+0
+1
+5
+100
+
+# -----------------------------------------------------------------------------
+# Reject guards -- malformed/truncated/OOB input must fail cleanly, never over-read or crash
+#
+
+# Below the 20-byte minimum.
+statement error
+SELECT * FROM uc_read_deletion_vector('{DV_SMALL}', content_offset=>0, content_size=>{DV_SMALL_SIZE});
+----
+too small
+
+# Wrong deletion-vector magic.
+statement error
+SELECT * FROM uc_read_deletion_vector('{DV_MAGIC}', content_offset=>0, content_size=>{DV_MAGIC_SIZE});
+----
+magic mismatch
+
+# Negative bitmap count.
+statement error
+SELECT * FROM uc_read_deletion_vector('{DV_BADCOUNT}', content_offset=>0, content_size=>{DV_BADCOUNT_SIZE});
+----
+bad bitmap count
+
+# Bitmap count claims a bitmap, but the payload is not a valid portable-roaring bitmap.
+statement error
+SELECT * FROM uc_read_deletion_vector('{DV_BADPAYLOAD}', content_offset=>0, content_size=>{DV_BADPAYLOAD_SIZE});
+----
+bad bitmap payload
+
+# OOB: an array container claims more values than the buffer holds -- the pre-`readSafe` bound rejects.
+statement error
+SELECT * FROM uc_read_deletion_vector('{DV_OOB}', content_offset=>0, content_size=>{DV_OOB_SIZE});
+----
+bad bitmap payload
+
+# Correct bytes but a wrong stored checksum.
+statement error
+SELECT * FROM uc_read_deletion_vector('{DV_CRC}', content_offset=>0, content_size=>{DV_CRC_SIZE});
+----
+failed its checksum
+
+# Extra bytes after the checksum.
+statement error
+SELECT * FROM uc_read_deletion_vector('{DV_TRAILING}', content_offset=>0, content_size=>{DV_TRAILING_SIZE});
+----
+trailing bytes after checksum
+
+# -----------------------------------------------------------------------------
+# uc_read_deletion_vector argument validation
+#
+
+# content_offset without content_size (and vice versa) is rejected.
+statement error
+SELECT * FROM uc_read_deletion_vector('{DV_EMPTY}', content_offset=>0);
+----
+must be given together
+
+# Negative content_offset / content_size.
+statement error
+SELECT * FROM uc_read_deletion_vector('{DV_EMPTY}', content_offset=>-1, content_size=>20);
+----
+must be non-negative

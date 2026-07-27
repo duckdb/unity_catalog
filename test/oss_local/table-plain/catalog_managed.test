@@ -37,7 +37,7 @@ FROM duck.plain.{UC_TEST_TABLE};
 
 query I
 SELECT count(*) FROM duckdb_logs()
-WHERE message LIKE 'uc-api.LoadTable duck.plain.{UC_TEST_TABLE}%';
+WHERE message LIKE 'api.LoadTable duck.plain.{UC_TEST_TABLE}%';
 ----
 0
 
@@ -50,6 +50,6 @@ INSERT INTO duck.plain.{UC_TEST_TABLE} VALUES (1, 'blabla');
 
 query I
 SELECT count(*) FROM duckdb_logs()
-WHERE message LIKE 'uc-api.UpdateTable duck.plain.{UC_TEST_TABLE}%';
+WHERE message LIKE 'api.UpdateTable duck.plain.{UC_TEST_TABLE}%';
 ----
 0

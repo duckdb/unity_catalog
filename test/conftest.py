@@ -53,3 +53,15 @@ def pytest_configure(config):
             )
         ],
     )
+    # Server-free "core" tests -- no logical dependency on a UC/Databricks service, so no provisioner,
+    # no services, no creds; runs by default. Two kinds live here: C++ Catch unit tests (via the
+    # standalone unittest_cpp binary, collected by test/functions/test_cpp.py) and sqllogic/mock tests
+    # that stand alone (dv_decode, type_precision). If unittest_cpp isn't built its collector
+    # self-skips (absence != failure); build it with `dbuild` or `cmake --build <dir> --target unittest_cpp`.
+    register_suite(
+        config,
+        "functions",
+        path="test/functions",
+        marker="functions",
+        default=True,
+    )

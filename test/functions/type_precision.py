@@ -108,6 +108,11 @@ def test_type_precision_null():
     """SHOW ALL TABLES over a null-type_precision ColumnInfo must succeed (not throw) and list the table."""
     with _MockUnityCatalog() as mock:
         sql = (
+            # threads=1: SHOW ALL TABLES fans out its per-schema table fetches across DuckDB's
+            # thread pool, and that concurrent listing is intermittently racy (a table goes
+            # missing). This test pins the null-type_precision PARSE fix, not concurrency, so
+            # serialize to keep it deterministic.
+            "SET threads TO 1;"
             f"CREATE SECRET (TYPE UNITY_CATALOG, TOKEN 'x', ENDPOINT '{mock.endpoint}', AWS_REGION 'us-east-2');"
             f"ATTACH '{_CATALOG}' AS unity (TYPE unity_catalog, DEFAULT_SCHEMA 'cmt');"
             "SELECT 'spark_like_count=' || count(*) FROM (SHOW ALL TABLES) t WHERE t.name = 'spark_like';"

@@ -128,7 +128,7 @@ static void CancelPlan(ClientContext &ctx, const string &scan_plan_endpoint, con
 	if (plan_id.empty()) {
 		return;
 	}
-	UC_LOG_DEBUG(ctx, "scan-plan.CancelPlan plan_id=%s", plan_id);
+	UC_LOG_DEBUG(ctx, "api-irc.CancelPlan plan_id=%s", plan_id);
 	string url = scan_plan_endpoint + "/v1/catalogs/" + catalog_name + "/namespaces/" + schema_name + "/tables/" +
 	             table_name + "/plan/" + plan_id;
 	try {
@@ -140,6 +140,10 @@ static void CancelPlan(ClientContext &ctx, const string &scan_plan_endpoint, con
 		AuthenticateViaBearerToken(hdrs, token);
 		DeleteRequestInfo req(url, hdrs, *params);
 		http_util.Request(req);
+	} catch (const std::exception &e) {
+		// Still best-effort (we don't rethrow), but a failed cleanup means a plan may leak
+		// server-side until it ages out — worth a WARNING so an operator can spot it.
+		UC_LOG_WARNING(ctx, "api-irc.CancelPlan plan_id=%s cleanup DELETE failed: %s", plan_id, e.what());
 	} catch (...) {
 		// best-effort cleanup — swallow
 	}
@@ -244,9 +248,8 @@ static UCAPIError CheckError(duckdb_yyjson::yyjson_val *api_result) {
 //  	--header "Authorization: Bearer ${TOKEN}" | jq .
 
 string UCAPI::GetDefaultSchema(ClientContext &ctx, const UCCredentials &credentials) {
-	UC_LOG_DEBUG(ctx, "uc-api.GetDefaultSchema endpoint=%s", credentials.endpoint);
+	UC_LOG_DEBUG(ctx, "api.GetDefaultSchema endpoint=%s", credentials.endpoint);
 	auto url = credentials.endpoint + "/api/2.0/settings/types/default_namespace_ws/names/default";
-	UC_LOG_DEBUG(ctx, "uc-api.GetDefaultSchema endpoint=%s", credentials.endpoint);
 	auto resp = MakeRequest(ctx, url, credentials.token);
 
 	YYJsonDoc doc(resp);
@@ -271,7 +274,7 @@ UCAPICommitsResult UCAPI::LoadTable(ClientContext &ctx, const string &catalog_na
 	UCAPICommitsResult result;
 	string url = StringUtil::Format("%s/api/2.1/unity-catalog/delta/v1/catalogs/%s/schemas/%s/tables/%s",
 	                                credentials.endpoint, catalog_name, schema_name, table_name);
-	UC_LOG_DEBUG(ctx, "uc-api.LoadTable %s.%s.%s", catalog_name, schema_name, table_name);
+	UC_LOG_DEBUG(ctx, "api.LoadTable %s.%s.%s", catalog_name, schema_name, table_name);
 	auto api_result = MakeRequest(ctx, url, credentials.token);
 
 	YYJsonDoc doc(api_result);
@@ -323,12 +326,12 @@ UCAPICommitsResult UCAPI::LoadTable(ClientContext &ctx, const string &catalog_na
 	D_ASSERT(server_ltv == max_commit_version || !ltv_present || result.commits.empty());
 	if (!ltv_present && !result.commits.empty()) {
 		UC_LOG_WARNING(ctx,
-		               "uc-api.LoadTable %s.%s.%s -> incoherent response: %zu commit(s) but no "
+		               "api.LoadTable %s.%s.%s -> incoherent response: %zu commit(s) but no "
 		               "latest-table-version; using max commit version %lld as max_catalog_version",
 		               catalog_name, schema_name, table_name, result.commits.size(), (int64_t)result.ratified_version);
 	}
 
-	UC_LOG_DEBUG(ctx, "uc-api.LoadTable %s.%s.%s -> etag=%s commits=%zu ratified_version=%lld", catalog_name,
+	UC_LOG_DEBUG(ctx, "api.LoadTable %s.%s.%s -> etag=%s commits=%zu ratified_version=%lld", catalog_name,
 	             schema_name, table_name, result.etag.empty() ? "(none)" : result.etag, result.commits.size(),
 	             (int64_t)result.ratified_version);
 	return result;
@@ -357,7 +360,7 @@ string UCAPI::UpdateTable(ClientContext &ctx, const string &catalog_name, const 
 	                                credentials.endpoint, catalog_name, schema_name, table_name);
 	string backfill_log =
 	    backfill_version.IsValid() ? to_string((int64_t)backfill_version.GetIndex()) : string("(none)");
-	UC_LOG_DEBUG(ctx, "uc-api.UpdateTable %s.%s.%s version=%lld table_id=%s etag=%s backfill_version=%s", catalog_name,
+	UC_LOG_DEBUG(ctx, "api.UpdateTable %s.%s.%s version=%lld table_id=%s etag=%s backfill_version=%s", catalog_name,
 	             schema_name, table_name, (int64_t)version, table_id.empty() ? "(none)" : table_id,
 	             etag.empty() ? "(none)" : etag, backfill_log);
 	auto api_result = MakeRequest(ctx, url, credentials.token, body);
@@ -375,7 +378,7 @@ string UCAPI::UpdateTable(ClientContext &ctx, const string &catalog_name, const 
 	if (metadata && yyjson_is_obj(metadata)) {
 		new_etag = TryGetStrFromObject(metadata, "etag", false);
 	}
-	UC_LOG_DEBUG(ctx, "uc-api.UpdateTable %s.%s.%s -> new_etag=%s", catalog_name, schema_name, table_name,
+	UC_LOG_DEBUG(ctx, "api.UpdateTable %s.%s.%s -> new_etag=%s", catalog_name, schema_name, table_name,
 	             new_etag.empty() ? "(none)" : new_etag);
 	return new_etag;
 }
@@ -392,7 +395,7 @@ UCAPITableCredentials UCAPI::GetTableCredentials(ClientContext &ctx, const strin
 		// Use the temporary-table-credentials endpoint, keyed by table_id.
 		string url = credentials.endpoint + "/api/2.1/unity-catalog/temporary-table-credentials";
 		string body = StringUtil::Format(R"({"table_id": "%s", "operation": "%s"})", table_id, operation);
-		UC_LOG_DEBUG(ctx, "uc-api.GetTableCredentials %s.%s.%s op=%s managed=0 table_id=%s", catalog_name, schema_name,
+		UC_LOG_DEBUG(ctx, "api.GetTableCredentials %s.%s.%s op=%s managed=0 table_id=%s", catalog_name, schema_name,
 		             table_name, operation, table_id);
 		auto api_result = MakeRequest(ctx, url, credentials.token, body);
 
@@ -416,7 +419,7 @@ UCAPITableCredentials UCAPI::GetTableCredentials(ClientContext &ctx, const strin
 	string url = StringUtil::Format(
 	    "%s/api/2.1/unity-catalog/delta/v1/catalogs/%s/schemas/%s/tables/%s/credentials?operation=%s",
 	    credentials.endpoint, catalog_name, schema_name, table_name, operation);
-	UC_LOG_DEBUG(ctx, "uc-api.GetTableCredentials %s.%s.%s op=%s managed=1", catalog_name, schema_name, table_name,
+	UC_LOG_DEBUG(ctx, "api.GetTableCredentials %s.%s.%s op=%s managed=1", catalog_name, schema_name, table_name,
 	             operation);
 	auto api_result = MakeRequest(ctx, url, credentials.token);
 
@@ -468,10 +471,9 @@ static UCAPIColumnDefinition ParseColumnDefinition(duckdb_yyjson::yyjson_val *co
 vector<UCAPITable> UCAPI::GetTables(ClientContext &ctx, Catalog &catalog, const string &schema,
                                     const UCCredentials &credentials) {
 	vector<UCAPITable> result;
-	UC_LOG_DEBUG(ctx, "uc-api.GetTables catalog=%s schema=%s", catalog.GetDBPath(), schema);
+	UC_LOG_DEBUG(ctx, "api.GetTables catalog=%s schema=%s", catalog.GetDBPath(), schema);
 	auto url = credentials.endpoint + "/api/2.1/unity-catalog/tables?catalog_name=" + catalog.GetDBPath() +
 	           "&schema_name=" + schema;
-	UC_LOG_DEBUG(ctx, "uc-api.GetTables catalog=%s schema=%s", catalog.GetDBPath(), schema);
 	auto api_result = MakeRequest(ctx, url, credentials.token);
 
 	YYJsonDoc doc(api_result);
@@ -513,16 +515,15 @@ vector<UCAPITable> UCAPI::GetTables(ClientContext &ctx, Catalog &catalog, const 
 		result.push_back(table_result);
 	}
 
-	UC_LOG_DEBUG(ctx, "uc-api.GetTables catalog=%s schema=%s -> tables=%zu", catalog.GetDBPath(), schema,
+	UC_LOG_DEBUG(ctx, "api.GetTables catalog=%s schema=%s -> tables=%zu", catalog.GetDBPath(), schema,
 	             result.size());
 	return result;
 }
 
 vector<UCAPISchema> UCAPI::GetSchemas(ClientContext &ctx, Catalog &catalog, const UCCredentials &credentials) {
 	vector<UCAPISchema> result;
-	UC_LOG_DEBUG(ctx, "uc-api.GetSchemas catalog=%s", catalog.GetDBPath());
+	UC_LOG_DEBUG(ctx, "api.GetSchemas catalog=%s", catalog.GetDBPath());
 	auto url = credentials.endpoint + "/api/2.1/unity-catalog/schemas?catalog_name=" + catalog.GetDBPath();
-	UC_LOG_DEBUG(ctx, "uc-api.GetSchemas catalog=%s", catalog.GetDBPath());
 	auto api_result = MakeRequest(ctx, url, credentials.token);
 
 	YYJsonDoc doc(api_result);
@@ -544,7 +545,7 @@ vector<UCAPISchema> UCAPI::GetSchemas(ClientContext &ctx, Catalog &catalog, cons
 		result.push_back(schema_result);
 	}
 
-	UC_LOG_DEBUG(ctx, "uc-api.GetSchemas catalog=%s -> schemas=%zu", catalog.GetDBPath(), result.size());
+	UC_LOG_DEBUG(ctx, "api.GetSchemas catalog=%s -> schemas=%zu", catalog.GetDBPath(), result.size());
 	return result;
 }
 
@@ -759,13 +760,13 @@ UCScanPlanResult UCAPI::FetchPlanningResult(ClientContext &ctx, const string &ca
                                             optional_ptr<int64_t> retry_after_ms_out) {
 	string url = scan_plan_endpoint + "/v1/catalogs/" + catalog_name + "/namespaces/" + schema_name + "/tables/" +
 	             table_name + "/plan/" + plan_id;
-	UC_LOG_DEBUG(ctx, "scan-plan.FetchPlanningResult plan_id=%s", plan_id);
+	UC_LOG_DEBUG(ctx, "api-irc.FetchPlanningResult plan_id=%s", plan_id);
 	auto resp = MakeRequestResp(ctx, url, credentials.token);
 	if (retry_after_ms_out) {
 		*retry_after_ms_out = ParseRetryAfterMs(*resp);
 	}
 	auto result = ParseScanPlanResponse(resp->body);
-	UC_LOG_DEBUG(ctx, "scan-plan.FetchPlanningResult plan_id=%s -> status=%s inline=%zu plan_tasks=%zu delete=%zu%s%s",
+	UC_LOG_DEBUG(ctx, "api-irc.FetchPlanningResult plan_id=%s -> status=%s inline=%zu plan_tasks=%zu delete=%zu%s%s",
 	             plan_id, UCScanPlanStatusToString(result.status), result.file_scan_tasks.size(),
 	             result.plan_tasks.size(), result.delete_files.size(),
 	             result.status == UCScanPlanStatus::FAILED ? " error=" : "",
@@ -781,13 +782,13 @@ UCScanPlanResult UCAPI::PlanTableScan(ClientContext &ctx, const string &catalog_
 	// TODO: remove hard coded case-sensitive?
 	string body = filter_json.empty() ? "{\"case-sensitive\":false}"
 	                                  : "{\"case-sensitive\":false,\"filter\":" + filter_json + "}";
-	UC_LOG_DEBUG(ctx, "scan-plan.PlanTableScan %s.%s.%s filter=%s", catalog_name, schema_name, table_name,
+	UC_LOG_DEBUG(ctx, "api-irc.PlanTableScan %s.%s.%s filter=%s", catalog_name, schema_name, table_name,
 	             filter_json.empty() ? "(none)" : filter_json);
 	auto resp = MakeRequestResp(ctx, url, credentials.token, body);
 	int64_t retry_after_ms = ParseRetryAfterMs(*resp);
 	auto result = ParseScanPlanResponse(resp->body);
 	UC_LOG_DEBUG(ctx,
-	             "scan-plan.PlanTableScan %s.%s.%s -> status=%s plan_id=%s inline=%zu plan_tasks=%zu delete=%zu%s%s",
+	             "api-irc.PlanTableScan %s.%s.%s -> status=%s plan_id=%s inline=%zu plan_tasks=%zu delete=%zu%s%s",
 	             catalog_name, schema_name, table_name, UCScanPlanStatusToString(result.status), result.plan_id.c_str(),
 	             result.file_scan_tasks.size(), result.plan_tasks.size(), result.delete_files.size(),
 	             result.status == UCScanPlanStatus::FAILED ? " error=" : "",
@@ -848,7 +849,7 @@ UCScanPlanResult UCAPI::FetchScanTasks(ClientContext &ctx, const string &catalog
 		escaped += c;
 	}
 	string body = "{\"plan-task\":\"" + escaped + "\"}";
-	UC_LOG_DEBUG(ctx, "scan-plan.FetchScanTasks %s.%s.%s token=%s", catalog_name, schema_name, table_name, plan_task);
+	UC_LOG_DEBUG(ctx, "api-irc.FetchScanTasks %s.%s.%s token=%s", catalog_name, schema_name, table_name, plan_task);
 	auto resp = MakeRequest(ctx, url, credentials.token, body);
 
 	// FetchScanTasksResult is a bare ScanTasks object — no status field.
@@ -860,7 +861,7 @@ UCScanPlanResult UCAPI::FetchScanTasks(ClientContext &ctx, const string &catalog
 	UCScanPlanResult result;
 	result.status = UCScanPlanStatus::COMPLETED;
 	ParseScanTasksPayload(root, result);
-	UC_LOG_DEBUG(ctx, "scan-plan.FetchScanTasks %s.%s.%s token=%s -> inline=%zu plan_tasks=%zu delete=%zu",
+	UC_LOG_DEBUG(ctx, "api-irc.FetchScanTasks %s.%s.%s token=%s -> inline=%zu plan_tasks=%zu delete=%zu",
 	             catalog_name, schema_name, table_name, plan_task, result.file_scan_tasks.size(),
 	             result.plan_tasks.size(), result.delete_files.size());
 	return result;

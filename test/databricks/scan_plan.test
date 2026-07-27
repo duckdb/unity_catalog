@@ -97,7 +97,7 @@ SELECT count(*) FROM scan_plan_days_managed WHERE day = 'Mon' AND id % 2 = 0;
 # Server still pruned to 1 file (AND with true-fallback doesn't widen the server predicate)
 query I
 SELECT count(*) FROM duckdb_logs()
-WHERE message LIKE 'scan-plan.PlanTableScan% inline=1% plan_tasks=0%';
+WHERE message LIKE 'api-irc.PlanTableScan% inline=1% plan_tasks=0%';
 ----
 1
 

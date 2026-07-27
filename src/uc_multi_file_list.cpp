@@ -1,4 +1,5 @@
 #include "uc_multi_file_list.hpp"
+#include "uc_position_delete_filter.hpp"
 #include "uc_puffin.hpp"
 #include "uc_logging.hpp"
 
@@ -102,31 +103,6 @@ unique_ptr<MultiFileReader> UCMultiFileReaderFactory(const TableFunction &) {
 // Delete-file application
 // ---------------------------------------------------------------------------
 
-// A DeleteFilter backed by a plain set of absolute deleted row positions — the common shape
-// both classic (file_path, pos) delete files and decoded deletion-vector bitmaps reduce to.
-// Mirrors the vendored delta extension's DeltaDeleteFilter / the iceberg extension's
-// IcebergPositionalDeleteFilter (same DeleteFilter contract, same O(1)-membership-check shape).
-struct UCPositionDeleteFilter : public DeleteFilter {
-	explicit UCPositionDeleteFilter(unordered_set<int64_t> positions_p) : positions(std::move(positions_p)) {
-	}
-
-	idx_t Filter(row_t start_row_index, idx_t count, SelectionVector &result_sel) override {
-		if (count == 0) {
-			return 0;
-		}
-		result_sel.Initialize(STANDARD_VECTOR_SIZE);
-		idx_t selected = 0;
-		for (idx_t i = 0; i < count; i++) {
-			if (!positions.count(start_row_index + i)) {
-				result_sel.set_index(selected++, i);
-			}
-		}
-		return selected;
-	}
-
-	unordered_set<int64_t> positions;
-};
-
 // Grab a private copy of the system `parquet_scan` table function (same lookup
 // UCScanPlanPushdownFilter uses for the main data scan).
 static TableFunction GetParquetScanFunction(ClientContext &context) {
@@ -202,7 +178,7 @@ static void ScanPositionalDeleteFile(ClientContext &context, const UCScanDeleteF
 	});
 	// Logged (with the DV counterpart below) so a test can assert WHICH delete sub-path a live
 	// scan-plan response actually took — classic parquet position-delete vs deletion-vector blob.
-	UC_LOG_DEBUG(context, "scan-plan.PositionalDelete file=%s data_file=%s", delete_file.file_path, data_file_path);
+	UC_LOG_DEBUG(context, "api-irc.PositionalDelete file=%s data_file=%s", delete_file.file_path, data_file_path);
 }
 
 // Iceberg v3 deletion vector: a `deletion-vector-v1` puffin blob at [content_offset,
@@ -217,22 +193,33 @@ static void ScanDeletionVectorFile(ClientContext &context, const UCScanDeleteFil
 		                  "content-size-in-bytes — server response is malformed",
 		                  delete_file.file_path, delete_file.content_offset);
 	}
-	auto &fs = FileSystem::GetFileSystem(context);
-	auto handle = fs.OpenFile(delete_file.file_path, FileOpenFlags::FILE_FLAGS_READ);
-	auto length = NumericCast<idx_t>(delete_file.content_size_in_bytes);
-	auto buffer = make_unsafe_uniq_array<data_t>(length);
-	handle->Read(buffer.get(), length, NumericCast<idx_t>(delete_file.content_offset));
+	// An unreachable delete file or a corrupt/rejected blob means WRONG ROWS if swallowed, so we
+	// rethrow to fail the scan — but WARNING first, correlating the failure to this delete file
+	// (FromBlob itself takes no ClientContext to log from).
+	try {
+		auto &fs = FileSystem::GetFileSystem(context);
+		auto handle = fs.OpenFile(delete_file.file_path, FileOpenFlags::FILE_FLAGS_READ);
+		auto length = NumericCast<idx_t>(delete_file.content_size_in_bytes);
+		auto buffer = make_unsafe_uniq_array<data_t>(length);
+		handle->Read(buffer.get(), length, NumericCast<idx_t>(delete_file.content_offset));
 
-	auto blob = UCDeletionVectorData::FromBlob(buffer.get(), length, delete_file.file_path);
-	set<idx_t> positions;
-	blob->ToSet(positions);
-	// The load-bearing confirmation: this line is emitted ONLY when a delete resolves to a
-	// deletion-vector-v1 puffin blob (content-offset present), so a test asserting its presence
-	// proves the puffin/DV path — not just that some delete was applied. See scan_plan_deletes.test.
-	UC_LOG_DEBUG(context, "scan-plan.DeletionVector file=%s offset=%lld size=%lld positions=%zu", delete_file.file_path,
-	             (long long)delete_file.content_offset, (long long)delete_file.content_size_in_bytes, positions.size());
-	for (auto pos : positions) {
-		out.insert(NumericCast<int64_t>(pos));
+		auto blob = UCDeletionVectorData::FromBlob(buffer.get(), length, delete_file.file_path);
+		set<idx_t> positions;
+		blob->ToSet(positions);
+		// The load-bearing confirmation: this line is emitted ONLY when a delete resolves to a
+		// deletion-vector-v1 puffin blob (content-offset present), so a test asserting its presence
+		// proves the puffin/DV path — not just that some delete was applied. See scan_plan_deletes.test.
+		UC_LOG_DEBUG(context, "api-irc.DeletionVector file=%s offset=%lld size=%lld positions=%zu",
+		             delete_file.file_path, (long long)delete_file.content_offset,
+		             (long long)delete_file.content_size_in_bytes, positions.size());
+		for (auto pos : positions) {
+			out.insert(NumericCast<int64_t>(pos));
+		}
+	} catch (const std::exception &e) {
+		UC_LOG_WARNING(context, "api-irc.DeletionVector file=%s offset=%lld size=%lld failed: %s",
+		               delete_file.file_path, (long long)delete_file.content_offset,
+		               (long long)delete_file.content_size_in_bytes, e.what());
+		throw;
 	}
 }
 

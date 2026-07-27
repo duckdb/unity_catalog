@@ -189,7 +189,7 @@ optional_idx TableInformation::BackfillCommits(ClientContext &context, const vec
 			// Real failure — stop to avoid advancing backfilled_version past a gap. Surface it: a
 			// silently-swallowed backfill failure lets staged commits accumulate until the server
 			// rejects further commits (HTTP 429, "too many un-backfilled commits").
-			UC_LOG_WARNING(context, "uc.BackfillCommits version=%lld src=%s dst=%s failed: %s", (int64_t)commit.version,
+			UC_LOG_WARNING(context, "api.BackfillCommits version=%lld src=%s dst=%s failed: %s", (int64_t)commit.version,
 			               src.c_str(), dst.c_str(), e.what());
 			break;
 		}
@@ -280,7 +280,7 @@ void TableInformation::InternalAttach(ClientContext &context) {
 		optional_idx start_wm = commit_state.with_locked([](const UCCommitState &s) { return s.backfilled_version; });
 		if (read_only) {
 			UC_LOG_DEBUG(context,
-			             "uc.InternalAttach %s.%s.%s read-only: skipping backfill (%zu backfillable commit(s))",
+			             "api.InternalAttach %s.%s.%s read-only: skipping backfill (%zu backfillable commit(s))",
 			             table_data->catalog_name, table_data->schema_name, table_data->name, commits.commits.size());
 		}
 		optional_idx new_wm = read_only ? start_wm : BackfillCommits(context, commits.commits, start_wm);

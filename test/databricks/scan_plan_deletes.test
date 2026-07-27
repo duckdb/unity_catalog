@@ -5,17 +5,22 @@
 #
 # Live-verified. scan_plan_days_deletes is 5 files, one row per file deleted after a
 # deletion-vector-enabling DELETE. Databricks surfaces these as `deletion-vector-v1` puffin blobs,
-# which BuildUCDeleteFilter -> ScanDeletionVectorFile (uc_puffin) decodes and applies. The row-count
-# assertions below prove the correct rows are dropped; the scan-plan.DeletionVector log assertion
-# proves it travelled the puffin/DV path specifically (not classic parquet position-deletes). See
+# which BuildUCDeleteFilter -> ScanDeletionVectorFile (uc_puffin) decodes and applies. See
 # docs/scan-plan-design.md.
 #
-# TODO: the DELETE that defines the deleted rows lives in the fixture
-# (data/scan_plan_days_deletes.sql) because it must run server-side at provision time to
-# materialize the deletion vectors this read-only .test then reads -- it can't move into the test
-# body. This split would read cleaner as a pure-Python test (cf. test/irc/test_irc_api_retry.py)
-# co-locating provisioning + assertions, unless we adopt an advanced-sqllogic oracle (read_parquet
-# differential comparison, per duckdb-iceberg #1204).
+# Expected values come from a COMMITTED, REGENERABLE oracle rather than hand-enumerated ids: the
+# exact post-delete result is materialized once to data/scan_plan_days_deletes_oracle.parquet, and
+# every row-level assertion below is a two-sided differential diff -- the live catalog query vs
+# read_parquet() of the oracle, tied by a matching `nosort` label (results_N; the duckdb-iceberg
+# #1204 pattern). Any delete-application error surfaces as a label mismatch. Scaling the table (more
+# files/rows, a different DELETE set) is cheap: edit data/scan_plan_days_deletes.sql to match, rerun
+# `python test/databricks/data/scan_plan_days_deletes_oracle.py`, and commit the new parquet -- never
+# hand-enumerate deleted ids again. The api-irc.DeletionVector log assertion (kept, below) still
+# proves the DV/puffin path specifically ran, which a pure row diff cannot.
+#
+# The DELETE that defines the deleted rows lives in the fixture (data/scan_plan_days_deletes.sql)
+# because it must run server-side at provision time to materialize the deletion vectors this
+# read-only .test then reads -- it can't move into the test body.
 
 require parquet
 
@@ -56,26 +61,25 @@ statement ok
 USE unity;
 
 # -----------------------------------------------------------------------------
-# Full scan: 50 rows written; ids 5, 15, 25, 35, 45 deleted (the last row of each weekday file,
-# via the provision-time DELETE in data/scan_plan_days_deletes.sql) -> 45 remain.
+# Full post-delete row set -- differential vs the committed oracle
+#
+# 50 rows written; ids 5, 15, 25, 35, 45 deleted (the last row of each weekday file, via the
+# provision-time DELETE) -> 45 remain. The live scan and the oracle share label results_1: their
+# rows must be identical. A wrong delete (extra/missing row, wrong day) is a label mismatch.
 #
 
-query I
-SELECT count(*) FROM scan_plan_days_deletes;
-----
-45
+query IT nosort results_1
+SELECT id, day FROM scan_plan_days_deletes ORDER BY id;
 
-query I
-SELECT count(*) FROM scan_plan_days_deletes WHERE id IN (5, 15, 25, 35, 45);
-----
-0
+query IT nosort results_1
+SELECT id, day FROM read_parquet('test/databricks/data/scan_plan_days_deletes_oracle.parquet') ORDER BY id;
 
 # -----------------------------------------------------------------------------
 # Confirm the delete travelled the deletion-vector (puffin) path, not classic parquet
-# position-deletes. scan-plan.DeletionVector is emitted ONLY by ScanDeletionVectorFile (a
-# content-offset -> puffin blob), so this turns the counts above from "some delete was applied"
+# position-deletes. api-irc.DeletionVector is emitted ONLY by ScanDeletionVectorFile (a
+# content-offset -> puffin blob), so this turns the row diff above from "some delete was applied"
 # into "the puffin/DV path we built is what ran". If Databricks ever switches to parquet
-# position-delete files, this flips to 0 and scan-plan.PositionalDelete appears instead.
+# position-delete files, this flips to 0 and api-irc.PositionalDelete appears instead.
 #
 
 statement ok
@@ -86,25 +90,35 @@ SELECT count(*) FROM scan_plan_days_deletes;
 
 query I
 SELECT (count(*) > 0)::INT FROM duckdb_logs()
-WHERE message LIKE 'scan-plan.DeletionVector%';
+WHERE message LIKE 'api-irc.DeletionVector%';
 ----
 1
 
 # -----------------------------------------------------------------------------
-# Filter pushdown + delete application together: day = 'Mon' still prunes to 1 file,
-# and the deleted id (5) must not reappear even though the file-level filter is unrelated
-# to the delete.
+# Filter pushdown + delete application together -- differential vs the same predicate on the oracle
+#
+# day = 'Mon' prunes to the single Mon file server-side, AND the deleted id (5) must not reappear
+# even though the file-level filter is unrelated to the delete. The live scan and the oracle share
+# label results_2 (each with the SAME day = 'Mon' predicate): the pruned+deleted rows must match,
+# so id 5's absence is asserted by the diff, not by a hand-listed id. The log check confirms the
+# server still pruned to one file.
 #
 
-query I
-SELECT count(*) FROM scan_plan_days_deletes WHERE day = 'Mon';
-----
-9
+statement ok
+CALL truncate_duckdb_logs();
 
-query II
-SELECT min(id), max(id) FROM scan_plan_days_deletes WHERE day = 'Mon';
+query IT nosort results_2
+SELECT id, day FROM scan_plan_days_deletes WHERE day = 'Mon' ORDER BY id;
+
+query IT nosort results_2
+SELECT id, day FROM read_parquet('test/databricks/data/scan_plan_days_deletes_oracle.parquet')
+WHERE day = 'Mon' ORDER BY id;
+
+query I
+SELECT count(*) FROM duckdb_logs()
+WHERE message LIKE 'api-irc.PlanTableScan% inline=1% plan_tasks=0%';
 ----
-1	10
+1
 
 statement ok
 DETACH unity;

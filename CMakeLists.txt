@@ -34,6 +34,12 @@ else()
   target_link_libraries(${LOADABLE_EXTENSION_NAME} roaring::roaring)
 endif()
 
+# C++ (Catch) unit tests for pure logic no sqllogictest .test can drive in isolation. Standalone
+# `unittest_cpp` runner, built on demand -- see test/functions/CMakeLists.txt.
+if(BUILD_UNITTESTS AND NOT EMSCRIPTEN)
+  add_subdirectory(test/functions)
+endif()
+
 install(
   TARGETS ${EXTENSION_NAME}
   EXPORT "${DUCKDB_EXPORT_SET}"
