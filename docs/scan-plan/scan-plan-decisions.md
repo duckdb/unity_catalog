@@ -304,9 +304,10 @@ The doc above records the original `scan-plan-api--v1-main` work. Since then:
   now opt-in via a `USE_IRC_SCAN_PLAN` ATTACH boolean; the URL is derived
   (`…/api/2.1/unity-catalog/iceberg-rest`), retiring the deprecated `…/iceberg` endpoint Databricks
   now rejects. Per-ATTACH availability tri-state — the `/plan` call is the probe (Databricks serves
-  no usable `/config`); AVAILABLE is sticky, UNAVAILABLE re-probes after 15 min. On a `/plan`
-  failure the endpoint is marked unavailable and later queries fall back to Delta silently (the
-  first failure still errors — true per-query fallback is a follow-up).
+  no usable `/config`); AVAILABLE is sticky, UNAVAILABLE re-probes after 15 min. A `/plan` failure
+  falls back to Delta **for the same query** — the pushdown points the scan wrapper's inner-scan
+  delegate at the Delta scan (the seam parquet uses on success) — and marks the endpoint unavailable
+  so later scans skip it until the re-probe. Regression-tested by `scan_plan_fallback.test`.
 - **Finding — Databricks pre-applies catalog-managed deletes server-side.** Live-verified against
   `iceberg-rest`: a DV-enabled DELETE yields a scan-plan of only surviving-row files with **no**
   delete file, so `BuildUCDeleteFilter` / `ScanDeletionVectorFile` do not engage on this path. The

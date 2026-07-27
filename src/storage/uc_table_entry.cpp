@@ -38,8 +38,10 @@ struct UCScanPlanBindData : public FunctionData {
 	UCCredentials credentials;
 	string scan_plan_endpoint;
 	optional_ptr<UnityCatalog> uc_catalog; // marks scan-plan availability from the pushdown callback
+	optional_ptr<TableInformation> table;  // captured for the Delta fallback when /plan fails
+	unique_ptr<EntryLookupInfo> lookup_info;
 
-	// Post-pushdown: parquet delegate (filled by pushdown_complex_filter)
+	// Post-pushdown: inner-scan delegate (parquet on scan-plan success, delta on /plan-failure fallback)
 	bool scan_plan_done = false;
 	unique_ptr<FunctionData> parquet_bind_data;
 	table_function_init_global_t parquet_init_global = nullptr;
@@ -53,6 +55,21 @@ struct UCScanPlanBindData : public FunctionData {
 		return false;
 	}
 };
+
+// Build the Delta read scan for this table -- the fallback path. Shared by GetScanFunction's
+// non-scan-plan branch and the pushdown's /plan-failure fallback.
+static TableFunction BuildDeltaScan(ClientContext &context, TableInformation &table,
+                                    const EntryLookupInfo &lookup_info, unique_ptr<FunctionData> &bind_data) {
+	table.RefreshCredentials(context);
+	table.InternalAttach(context);
+	auto &delta_catalog = *table.GetInternalCatalog();
+	auto &schema = delta_catalog.GetSchema(context, Identifier::DefaultSchema());
+	auto transaction = schema.GetCatalogTransaction(context);
+	auto table_entry = schema.LookupEntry(transaction, lookup_info);
+	D_ASSERT(table_entry);
+	auto &delta_table = table_entry->Cast<TableCatalogEntry>();
+	return delta_table.GetScanFunction(context, bind_data, lookup_info);
+}
 
 // ---------------------------------------------------------------------------
 // UCScanPlanTableFunction callbacks
@@ -149,15 +166,28 @@ static void UCScanPlanPushdownFilter(ClientContext &context, LogicalGet &get, Fu
 	} catch (std::exception &e) {
 		// The `/plan` call is the probe: mark this attach's scan-plan endpoint UNAVAILABLE so later
 		// scans skip it (re-probed after the wall-clock window; scan-plan-gating.md). For now every
-		// failure is treated the same (404/405/5xx/network -- "treat like 404"). NOTE: this first
-		// failure still errors the query; true per-query fallback to Delta from here needs rebinding
-		// the scan across the pushdown boundary (a follow-up) -- subsequent queries do fall back.
+		// failure is treated the same (404/405/5xx/network -- "treat like 404").
 		if (bd.uc_catalog) {
 			bd.uc_catalog->MarkScanPlanUnavailable();
 		}
-		UC_LOG_WARNING(context, "api-irc.PlanTableScan %s.%s.%s failed, marking scan-plan unavailable: %s",
+		UC_LOG_WARNING(context, "api-irc.PlanTableScan %s.%s.%s failed, falling back to Delta: %s",
 		               bd.catalog_name, bd.schema_name, bd.table_name, e.what());
-		throw IOException("UC scan plan API call failed for table '%s': %s", bd.table_name, e.what());
+		// Fall back to Delta for THIS query by pointing the wrapper's delegate at the Delta scan --
+		// the same seam parquet uses on success (UCScanPlanGetVirtualColumns is delta-compatible).
+		// Needs a DELTA-format table and the fallback context captured at bind time; else re-raise.
+		if (!bd.table || !bd.lookup_info || bd.table->table_data->data_source_format != "DELTA") {
+			throw IOException("UC scan plan API call failed for table '%s' and no Delta fallback is "
+			                  "available: %s",
+			                  bd.table_name, e.what());
+		}
+		auto delta_fn = BuildDeltaScan(context, *bd.table, *bd.lookup_info, bd.parquet_bind_data);
+		if (delta_fn.get_virtual_columns) {
+			delta_fn.get_virtual_columns(context, bd.parquet_bind_data.get());
+		}
+		bd.parquet_init_global = delta_fn.init_global;
+		bd.parquet_init_local = delta_fn.init_local;
+		bd.parquet_scan_fn = delta_fn.function;
+		bd.scan_plan_done = true;
 	}
 }
 
@@ -249,27 +279,19 @@ TableFunction UCTableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
 		bd->credentials = table.catalog.credentials;
 		bd->scan_plan_endpoint = table.catalog.GetIRCEndpoint();
 		bd->uc_catalog = &table.catalog;
+		// Capture the Delta-fallback context so the pushdown can fall back if /plan fails.
+		bd->table = &table;
+		bd->lookup_info = make_uniq<EntryLookupInfo>(lookup_info);
 		bind_data = std::move(bd);
 		return MakeUCScanPlanTableFunction();
 	}
 
-	// --- Delta path (unchanged fallback) ---
+	// --- Delta path ---
 	if (table_data->data_source_format != "DELTA") {
 		throw NotImplementedException("Table '%s' is of unsupported format '%s', ", table_data->name,
 		                              table_data->data_source_format);
 	}
-
-	table.RefreshCredentials(context);
-	table.InternalAttach(context);
-
-	auto &delta_catalog = *table.GetInternalCatalog();
-	auto &schema = delta_catalog.GetSchema(context, Identifier::DefaultSchema());
-	auto transaction = schema.GetCatalogTransaction(context);
-	auto table_entry = schema.LookupEntry(transaction, lookup_info);
-	D_ASSERT(table_entry);
-
-	auto &delta_table = table_entry->Cast<TableCatalogEntry>();
-	return delta_table.GetScanFunction(context, bind_data, lookup_info);
+	return BuildDeltaScan(context, table, lookup_info, bind_data);
 }
 
 virtual_column_map_t UCTableEntry::GetVirtualColumns() const {
