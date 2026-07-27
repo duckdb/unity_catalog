@@ -189,8 +189,8 @@ optional_idx TableInformation::BackfillCommits(ClientContext &context, const vec
 			// Real failure — stop to avoid advancing backfilled_version past a gap. Surface it: a
 			// silently-swallowed backfill failure lets staged commits accumulate until the server
 			// rejects further commits (HTTP 429, "too many un-backfilled commits").
-			UC_LOG_WARNING(context, "api.BackfillCommits version=%lld src=%s dst=%s failed: %s", (int64_t)commit.version,
-			               src.c_str(), dst.c_str(), e.what());
+			UC_LOG_WARNING(context, "api.BackfillCommits version=%lld src=%s dst=%s failed: %s",
+			               (int64_t)commit.version, src.c_str(), dst.c_str(), e.what());
 			break;
 		}
 	}

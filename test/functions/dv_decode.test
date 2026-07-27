@@ -1,10 +1,11 @@
-# name: test/oss_local/dv_decode.test
+# name: test/functions/dv_decode.test
 # description: Server-free unit coverage of the deletion-vector blob decoder (UCDeletionVectorData::FromBlob,
+# group: [functions]
+
 # src/uc_puffin.cpp) via uc_read_deletion_vector. The paired driver dv_decode.py crafts blob files and passes
 # their paths + sizes as env vars, declared require-env below and referenced as {DV_*}. The content_offset/
 # content_size form drives FromBlob directly (where the guards live); one bare call covers the whole-file
 # UCPuffinReader path. Pins the valid decode AND every reject-guard the live #1204 suite skipped.
-# group: [functions]
 
 require parquet
 

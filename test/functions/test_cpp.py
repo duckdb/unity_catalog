@@ -33,9 +33,7 @@ def _cpp_binary():
 
 
 def _cases(binary):
-    out = subprocess.run(
-        [str(binary), "--list-test-names-only"], capture_output=True, text=True, timeout=30
-    )
+    out = subprocess.run([str(binary), "--list-test-names-only"], capture_output=True, text=True, timeout=30)
     return [ln for ln in out.stdout.splitlines() if ln.strip()]
 
 

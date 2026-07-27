@@ -62,8 +62,8 @@ def test_dv_decode(request, tmp_path):
         fixtures[f"{name}_SIZE"] = str(len(data))
 
     # -- valid --------------------------------------------------------------
-    put("DV_EMPTY", _blob([]))                                    # 0 bitmaps -> 0 positions
-    put("DV_POS", _blob([(0, [0, 1, 5, 100])]))                   # one container
+    put("DV_EMPTY", _blob([]))  # 0 bitmaps -> 0 positions
+    put("DV_POS", _blob([(0, [0, 1, 5, 100])]))  # one container
     put("DV_MULTI", _blob([(0, [0, 1, 70000, 131072, 131073])]))  # multiple 16-bit containers
     # valid blob at a non-zero offset inside a larger file (content-offset path)
     pad = b"\x00" * 13
@@ -73,14 +73,17 @@ def test_dv_decode(request, tmp_path):
     fixtures["DV_OFFSET_BLOBSIZE"] = str(len(off_blob))
 
     # -- reject guards (src/uc_puffin.cpp:68) --------------------------------
-    put("DV_SMALL", b"\x00" * 10)                                 # < 20 -> too small
+    put("DV_SMALL", b"\x00" * 10)  # < 20 -> too small
     put("DV_MAGIC", struct.pack(">I", 16) + b"XXXX" + struct.pack("<q", 0) + b"\x00\x00\x00\x00")  # bad magic
-    put("DV_BADCOUNT", _blob([], count=-1))                       # negative n_bitmaps
+    put("DV_BADCOUNT", _blob([], count=-1))  # negative n_bitmaps
     # n_bitmaps=1, valid key, junk where a portable-roaring bitmap should be -> deserialize_size == 0
     bad_body = MAGIC + struct.pack("<q", 1) + struct.pack("<i", 0) + b"\xAB\xCD"
-    put("DV_BADPAYLOAD", struct.pack(">I", len(bad_body) + 4) + bad_body + struct.pack(">I", zlib.crc32(bad_body) & 0xFFFFFFFF))
-    put("DV_CRC", _blob([], crc=0xDEADBEEF))                      # good bytes, wrong checksum
-    put("DV_TRAILING", _blob([]) + b"\xFF")                       # extra byte after checksum
+    put(
+        "DV_BADPAYLOAD",
+        struct.pack(">I", len(bad_body) + 4) + bad_body + struct.pack(">I", zlib.crc32(bad_body) & 0xFFFFFFFF),
+    )
+    put("DV_CRC", _blob([], crc=0xDEADBEEF))  # good bytes, wrong checksum
+    put("DV_TRAILING", _blob([]) + b"\xFF")  # extra byte after checksum
 
     # OOB: array header claims 4 values but the buffer holds only 1 -> readSafe/deserialize_size reject
     oob_roaring = struct.pack("<I", SERIAL_COOKIE_NO_RUNCONTAINER) + struct.pack("<I", 1)

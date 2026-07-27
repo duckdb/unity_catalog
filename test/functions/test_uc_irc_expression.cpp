@@ -106,8 +106,9 @@ TEST_CASE("uc irc: AND / OR conjunctions", "[uc][irc]") {
 	auto gt = Cmp(ExpressionType::COMPARE_GREATERTHAN, Col("age"), Const(Value::INTEGER(10)));
 	auto lt = Cmp(ExpressionType::COMPARE_LESSTHAN, Col("age"), Const(Value::INTEGER(20)));
 	auto conj = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND, std::move(gt), std::move(lt));
-	CHECK(One(std::move(conj)) ==
-	      R"({"type":"and","left":{"type":"gt","term":"age","value":10},"right":{"type":"lt","term":"age","value":20}})");
+	CHECK(
+	    One(std::move(conj)) ==
+	    R"({"type":"and","left":{"type":"gt","term":"age","value":10},"right":{"type":"lt","term":"age","value":20}})");
 
 	auto e1 = Cmp(ExpressionType::COMPARE_EQUAL, Col("age"), Const(Value::INTEGER(1)));
 	auto e2 = Cmp(ExpressionType::COMPARE_EQUAL, Col("age"), Const(Value::INTEGER(2)));
@@ -139,6 +140,7 @@ TEST_CASE("uc irc: top-level filters are ANDed; empty -> empty", "[uc][irc]") {
 
 	filters.push_back(Cmp(ExpressionType::COMPARE_GREATERTHAN, Col("age"), Const(Value::INTEGER(10))));
 	filters.push_back(Cmp(ExpressionType::COMPARE_LESSTHAN, Col("age"), Const(Value::INTEGER(20))));
-	CHECK(SerializeFiltersToIRC(filters) ==
-	      R"({"type":"and","left":{"type":"gt","term":"age","value":10},"right":{"type":"lt","term":"age","value":20}})");
+	CHECK(
+	    SerializeFiltersToIRC(filters) ==
+	    R"({"type":"and","left":{"type":"gt","term":"age","value":10},"right":{"type":"lt","term":"age","value":20}})");
 }

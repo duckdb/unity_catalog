@@ -331,8 +331,8 @@ UCAPICommitsResult UCAPI::LoadTable(ClientContext &ctx, const string &catalog_na
 		               catalog_name, schema_name, table_name, result.commits.size(), (int64_t)result.ratified_version);
 	}
 
-	UC_LOG_DEBUG(ctx, "api.LoadTable %s.%s.%s -> etag=%s commits=%zu ratified_version=%lld", catalog_name,
-	             schema_name, table_name, result.etag.empty() ? "(none)" : result.etag, result.commits.size(),
+	UC_LOG_DEBUG(ctx, "api.LoadTable %s.%s.%s -> etag=%s commits=%zu ratified_version=%lld", catalog_name, schema_name,
+	             table_name, result.etag.empty() ? "(none)" : result.etag, result.commits.size(),
 	             (int64_t)result.ratified_version);
 	return result;
 }
@@ -515,8 +515,7 @@ vector<UCAPITable> UCAPI::GetTables(ClientContext &ctx, Catalog &catalog, const 
 		result.push_back(table_result);
 	}
 
-	UC_LOG_DEBUG(ctx, "api.GetTables catalog=%s schema=%s -> tables=%zu", catalog.GetDBPath(), schema,
-	             result.size());
+	UC_LOG_DEBUG(ctx, "api.GetTables catalog=%s schema=%s -> tables=%zu", catalog.GetDBPath(), schema, result.size());
 	return result;
 }
 
@@ -787,8 +786,7 @@ UCScanPlanResult UCAPI::PlanTableScan(ClientContext &ctx, const string &catalog_
 	auto resp = MakeRequestResp(ctx, url, credentials.token, body);
 	int64_t retry_after_ms = ParseRetryAfterMs(*resp);
 	auto result = ParseScanPlanResponse(resp->body);
-	UC_LOG_DEBUG(ctx,
-	             "api-irc.PlanTableScan %s.%s.%s -> status=%s plan_id=%s inline=%zu plan_tasks=%zu delete=%zu%s%s",
+	UC_LOG_DEBUG(ctx, "api-irc.PlanTableScan %s.%s.%s -> status=%s plan_id=%s inline=%zu plan_tasks=%zu delete=%zu%s%s",
 	             catalog_name, schema_name, table_name, UCScanPlanStatusToString(result.status), result.plan_id.c_str(),
 	             result.file_scan_tasks.size(), result.plan_tasks.size(), result.delete_files.size(),
 	             result.status == UCScanPlanStatus::FAILED ? " error=" : "",
@@ -861,9 +859,9 @@ UCScanPlanResult UCAPI::FetchScanTasks(ClientContext &ctx, const string &catalog
 	UCScanPlanResult result;
 	result.status = UCScanPlanStatus::COMPLETED;
 	ParseScanTasksPayload(root, result);
-	UC_LOG_DEBUG(ctx, "api-irc.FetchScanTasks %s.%s.%s token=%s -> inline=%zu plan_tasks=%zu delete=%zu",
-	             catalog_name, schema_name, table_name, plan_task, result.file_scan_tasks.size(),
-	             result.plan_tasks.size(), result.delete_files.size());
+	UC_LOG_DEBUG(ctx, "api-irc.FetchScanTasks %s.%s.%s token=%s -> inline=%zu plan_tasks=%zu delete=%zu", catalog_name,
+	             schema_name, table_name, plan_task, result.file_scan_tasks.size(), result.plan_tasks.size(),
+	             result.delete_files.size());
 	return result;
 }
 
