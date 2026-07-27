@@ -1,5 +1,6 @@
 # name: test/databricks/scan_plan.test
-# description: IRC scan-plan API (server-side filter pushdown) against Databricks Unity Catalog.
+# description: IRC scan-plan API (server-side filter pushdown) against Databricks Unity Catalog,
+# plus the /plan-failure -> Delta fallback (a dead endpoint must not error the query).
 # group: [databricks]
 
 #
@@ -114,3 +115,44 @@ USE memory;
 
 statement ok
 DETACH unity;
+
+# -----------------------------------------------------------------------------
+# /plan-failure fallback: a dead IRC endpoint must fall back to the Delta read path
+# for the SAME query, not error (the delegate-swap in uc_table_entry.cpp). Reuses the
+# table already provisioned above -- a fresh attach whose availability starts UNKNOWN.
+#
+
+statement ok
+ATTACH '{CATALOG}' AS borked (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}',
+    use_irc_scan_plan true, api_irc_endpoint_override 'http://127.0.0.1:1');
+
+statement ok
+USE borked;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# Scan succeeds via the Delta fallback despite the dead /plan endpoint (5 files, 50 rows).
+query I
+SELECT count(*) FROM scan_plan_days_managed;
+----
+50
+
+# A predicate still returns the right rows (DuckDB's Filter operator applies it over the Delta scan).
+query I
+SELECT count(*) FROM scan_plan_days_managed WHERE day = 'Mon';
+----
+10
+
+# The fallback logged its WARNING naming the /plan failure.
+query I
+SELECT (count(*) > 0)::INT FROM duckdb_logs()
+WHERE message LIKE 'api-irc.PlanTableScan% failed, falling back to Delta%';
+----
+1
+
+statement ok
+USE memory;
+
+statement ok
+DETACH borked;
