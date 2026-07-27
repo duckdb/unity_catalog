@@ -4,9 +4,9 @@
 
 #
 # Live-verified. scan_plan_days_deletes is 5 files, one row per file deleted after a
-# deletion-vector-enabling DELETE. Databricks surfaces these as `deletion-vector-v1` puffin blobs,
-# which BuildUCDeleteFilter -> ScanDeletionVectorFile (uc_puffin) decodes and applies. See
-# docs/scan-plan-design.md.
+# deletion-vector-enabling DELETE. Against the iceberg-rest endpoint Databricks pre-applies the
+# delete SERVER-SIDE -- the scan-plan returns only surviving-row files, so no client-side delete
+# path runs here (see "On the delete path" below). This test therefore validates the END RESULT.
 #
 # Expected values come from a COMMITTED, REGENERABLE oracle rather than hand-enumerated ids: the
 # exact post-delete result is materialized once to data/scan_plan_days_deletes_oracle.parquet, and
@@ -15,12 +15,11 @@
 # #1204 pattern). Any delete-application error surfaces as a label mismatch. Scaling the table (more
 # files/rows, a different DELETE set) is cheap: edit data/scan_plan_days_deletes.sql to match, rerun
 # `python test/databricks/data/scan_plan_days_deletes_oracle.py`, and commit the new parquet -- never
-# hand-enumerate deleted ids again. The api-irc.DeletionVector log assertion (kept, below) still
-# proves the DV/puffin path specifically ran, which a pure row diff cannot.
+# hand-enumerate deleted ids again.
 #
 # The DELETE that defines the deleted rows lives in the fixture (data/scan_plan_days_deletes.sql)
-# because it must run server-side at provision time to materialize the deletion vectors this
-# read-only .test then reads -- it can't move into the test body.
+# because it must run server-side at provision time to materialize the post-delete state this
+# read-only .test reads back -- it can't move into the test body.
 
 require parquet
 
@@ -35,8 +34,6 @@ require-env DATABRICKS_TOKEN
 require-env DATABRICKS_ENDPOINT
 
 require-env DATABRICKS_REGION
-
-require-env DATABRICKS_SCAN_PLAN_ENDPOINT
 
 require-env CATALOG
 
@@ -55,7 +52,7 @@ CREATE SECRET (
 
 statement ok
 ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}',
-    scan_plan_endpoint '{DATABRICKS_SCAN_PLAN_ENDPOINT}');
+    use_irc_scan_plan true);
 
 statement ok
 USE unity;
@@ -75,24 +72,14 @@ query IT nosort results_1
 SELECT id, day FROM read_parquet('test/databricks/data/scan_plan_days_deletes_oracle.parquet') ORDER BY id;
 
 # -----------------------------------------------------------------------------
-# Confirm the delete travelled the deletion-vector (puffin) path, not classic parquet
-# position-deletes. api-irc.DeletionVector is emitted ONLY by ScanDeletionVectorFile (a
-# content-offset -> puffin blob), so this turns the row diff above from "some delete was applied"
-# into "the puffin/DV path we built is what ran". If Databricks ever switches to parquet
-# position-delete files, this flips to 0 and api-irc.PositionalDelete appears instead.
+# On the delete path
 #
-
-statement ok
-CALL truncate_duckdb_logs();
-
-statement ok
-SELECT count(*) FROM scan_plan_days_deletes;
-
-query I
-SELECT (count(*) > 0)::INT FROM duckdb_logs()
-WHERE message LIKE 'api-irc.DeletionVector%';
-----
-1
+# The differential diff above is the correctness gate: the deleted rows are gone regardless of HOW
+# the delete was applied. Against the iceberg-rest endpoint Databricks pre-applies the delete
+# server-side -- the scan-plan returns only surviving-row files, so NO client-side delete-file path
+# (DV-puffin ScanDeletionVectorFile / parquet-positional) runs here. Those client paths are covered
+# by the offline unit tests (dv_decode FromBlob decode, unittest_cpp position-set); a live server
+# that hands back delete files would exercise them end-to-end, and the oracle would still validate.
 
 # -----------------------------------------------------------------------------
 # Filter pushdown + delete application together -- differential vs the same predicate on the oracle
@@ -119,6 +106,9 @@ SELECT count(*) FROM duckdb_logs()
 WHERE message LIKE 'api-irc.PlanTableScan% inline=1% plan_tasks=0%';
 ----
 1
+
+statement ok
+USE memory;
 
 statement ok
 DETACH unity;

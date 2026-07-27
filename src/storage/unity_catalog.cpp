@@ -98,6 +98,33 @@ void UnityCatalog::ClearCache() {
 	schemas.ClearEntries();
 }
 
+// --- IRC scan-plan gating (see docs/scan-plan/scan-plan-gating.md) ---
+
+bool UnityCatalog::ShouldTryScanPlan() {
+	if (!credentials.use_irc_scan_plan) {
+		return false;
+	}
+	lock_guard<mutex> l(scan_plan_lock);
+	if (scan_plan_state == ScanPlanAvailability::UNAVAILABLE) {
+		if (std::chrono::steady_clock::now() - scan_plan_unavailable_since < SCAN_PLAN_RE_PROBE) {
+			return false; // still within the re-probe window
+		}
+		scan_plan_state = ScanPlanAvailability::UNKNOWN; // aged out -> allow one re-probe
+	}
+	return true; // UNKNOWN or AVAILABLE
+}
+
+void UnityCatalog::MarkScanPlanAvailable() {
+	lock_guard<mutex> l(scan_plan_lock);
+	scan_plan_state = ScanPlanAvailability::AVAILABLE;
+}
+
+void UnityCatalog::MarkScanPlanUnavailable() {
+	lock_guard<mutex> l(scan_plan_lock);
+	scan_plan_state = ScanPlanAvailability::UNAVAILABLE;
+	scan_plan_unavailable_since = std::chrono::steady_clock::now();
+}
+
 PhysicalOperator &UnityCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
                                                   LogicalCreateTable &op, PhysicalOperator &plan) {
 	throw NotImplementedException("UnityCatalog PlanCreateTableAs");

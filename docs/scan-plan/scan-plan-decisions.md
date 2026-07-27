@@ -287,8 +287,9 @@ The doc above records the original `scan-plan-api--v1-main` work. Since then:
   deliverable (src + roaring dep + scan_plan tests + docs); `uc_api.cpp` was 3-way merged to keep
   upstream's `type_precision` null-parse fix.
 - **Open question #2 resolved — live-verified.** `scan_plan_deletes.test` passed against a real
-  Databricks warehouse: a DV-enabled DELETE surfaces as a `deletion-vector-v1` puffin blob, and
-  the test now asserts the puffin/DV path specifically via a `api-irc.DeletionVector` log line.
+  Databricks warehouse: a DV-enabled DELETE surfaced as a `deletion-vector-v1` puffin blob (against
+  the **legacy `…/iceberg`** endpoint). Superseded by the `iceberg-rest` migration + the pre-apply
+  finding below.
 - **Async polling hardened** (own commit): poll-until-terminal with `Retry-After` + exponential
   backoff + a wall-clock budget, `InterruptCheck` for cancellation, and a best-effort plan
   `DELETE` on abort — replacing the old fixed 10s cap (borrowed shape from duckdb-iceberg #1204).
@@ -299,3 +300,16 @@ The doc above records the original `scan-plan-api--v1-main` work. Since then:
   `test/irc/test_irc_api_retry.py` — a Python mock-server test covering the poll/retry/cancel
   path offline. The `uc_read_deletion_vector` whole-file path gave `UCPuffinReader` its first
   caller (review-finding S1 resolved by use). See `scan-plan-design.md` §5–6.
+- **IRC scan-plan gating + `iceberg-rest` migration** (see `scan-plan-gating.md`). Scan planning is
+  now opt-in via a `USE_IRC_SCAN_PLAN` ATTACH boolean; the URL is derived
+  (`…/api/2.1/unity-catalog/iceberg-rest`), retiring the deprecated `…/iceberg` endpoint Databricks
+  now rejects. Per-ATTACH availability tri-state — the `/plan` call is the probe (Databricks serves
+  no usable `/config`); AVAILABLE is sticky, UNAVAILABLE re-probes after 15 min. On a `/plan`
+  failure the endpoint is marked unavailable and later queries fall back to Delta silently (the
+  first failure still errors — true per-query fallback is a follow-up).
+- **Finding — Databricks pre-applies catalog-managed deletes server-side.** Live-verified against
+  `iceberg-rest`: a DV-enabled DELETE yields a scan-plan of only surviving-row files with **no**
+  delete file, so `BuildUCDeleteFilter` / `ScanDeletionVectorFile` do not engage on this path. The
+  delete-file code stays intact and unit-covered (`dv_decode`, `unittest_cpp` position-set) for any
+  server that does return delete files; `scan_plan_deletes.test` validates the end result via the
+  committed differential oracle rather than a delete-path log line.

@@ -21,8 +21,6 @@ require-env DATABRICKS_ENDPOINT
 
 require-env DATABRICKS_REGION
 
-require-env DATABRICKS_SCAN_PLAN_ENDPOINT
-
 require-env CATALOG
 
 require-env SCHEMA
@@ -40,7 +38,7 @@ CREATE SECRET (
 
 statement ok
 ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}',
-    scan_plan_endpoint '{DATABRICKS_SCAN_PLAN_ENDPOINT}');
+    use_irc_scan_plan true);
 
 statement ok
 USE unity;
@@ -110,6 +108,9 @@ query II
 SELECT min(id), max(id) FROM scan_plan_days_managed WHERE day = 'Fri' AND id % 2 = 0;
 ----
 42	50
+
+statement ok
+USE memory;
 
 statement ok
 DETACH unity;

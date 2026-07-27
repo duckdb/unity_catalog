@@ -209,6 +209,12 @@ seam the `delta` extension uses (`DeltaMultiFileReader::FinalizeBind`). Once set
 scan calls `DeleteFilter::Filter(start_row_index, count, result_sel)` per chunk and the deleted
 rows are dropped natively.
 
+> **Observed on Databricks (via `iceberg-rest`):** catalog-managed deletes are **pre-applied
+> server-side** — the scan-plan returns only surviving-row files with *no* `delete_files`, so none
+> of Part 2 engages on that path (live-verified; see `scan-plan-decisions.md`). Everything below is
+> still exercised by the offline unit tests and would engage against any server that hands back
+> delete files.
+
 ### 4.1 The common shape: `UCPositionDeleteFilter`
 
 Both positional sub-forms reduce to **a set of absolute deleted row positions** within the data

@@ -9,6 +9,7 @@
 #include "duckdb/main/database.hpp"
 
 #include "uc_api.hpp"
+#include "uc_logging.hpp"
 #include "uc_multi_file_list.hpp"
 #include "uc_irc_expression.hpp"
 
@@ -36,6 +37,7 @@ struct UCScanPlanBindData : public FunctionData {
 	string storage_location;
 	UCCredentials credentials;
 	string scan_plan_endpoint;
+	optional_ptr<UnityCatalog> uc_catalog; // marks scan-plan availability from the pushdown callback
 
 	// Post-pushdown: parquet delegate (filled by pushdown_complex_filter)
 	bool scan_plan_done = false;
@@ -132,6 +134,9 @@ static void UCScanPlanPushdownFilter(ClientContext &context, LogicalGet &get, Fu
 			bd.parquet_init_local = parquet_fn.init_local;
 			bd.parquet_scan_fn = parquet_fn.function;
 			bd.scan_plan_done = true;
+			if (bd.uc_catalog) {
+				bd.uc_catalog->MarkScanPlanAvailable();
+			}
 			// Filters intentionally NOT cleared: DuckDB will add a Filter operator that applies
 			// the original predicates, which subsumes any per-file residual the server returned.
 			// Alternative: parse UCScanPlanFileScanTask::residual_filter_json back into DuckDB
@@ -142,13 +147,16 @@ static void UCScanPlanPushdownFilter(ClientContext &context, LogicalGet &get, Fu
 	} catch (const InterruptException &) {
 		throw; // query cancel/timeout is not a scan-plan failure — must not be wrapped or trigger fallback
 	} catch (std::exception &e) {
-		// TODO: distinguish "feature not available for this caller" from transient errors.
-		// HTTP 405 confirmed as "not enabled" status from live endpoint.
-		// On a feature-unavailable response, set a per-UnityCatalog atomic flag
-		// (AVAILABLE/UNAVAILABLE, checked in GetScanPlanEndpoint) so all subsequent queries on
-		// this attach silently fall back to the Delta path without retrying.  Transient errors
-		// (5xx, network) must NOT set UNAVAILABLE — propagate per-query and allow retry.
-		// Granularity: per-ATTACH (per UnityCatalog instance) — availability is per-caller.
+		// The `/plan` call is the probe: mark this attach's scan-plan endpoint UNAVAILABLE so later
+		// scans skip it (re-probed after the wall-clock window; scan-plan-gating.md). For now every
+		// failure is treated the same (404/405/5xx/network -- "treat like 404"). NOTE: this first
+		// failure still errors the query; true per-query fallback to Delta from here needs rebinding
+		// the scan across the pushdown boundary (a follow-up) -- subsequent queries do fall back.
+		if (bd.uc_catalog) {
+			bd.uc_catalog->MarkScanPlanUnavailable();
+		}
+		UC_LOG_WARNING(context, "api-irc.PlanTableScan %s.%s.%s failed, marking scan-plan unavailable: %s",
+		               bd.catalog_name, bd.schema_name, bd.table_name, e.what());
 		throw IOException("UC scan plan API call failed for table '%s': %s", bd.table_name, e.what());
 	}
 }
@@ -229,9 +237,9 @@ TableFunction UCTableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
 	auto &table_data = table.table_data;
 	D_ASSERT(table_data);
 
-	// --- Scan plan path (try first when a scan plan endpoint is configured) ---
-	auto scan_ep = table.catalog.GetScanPlanEndpoint();
-	if (!scan_ep.empty()) {
+	// --- Scan plan path (opt-in; skipped when this endpoint is known-unavailable -- see
+	//     docs/scan-plan/scan-plan-gating.md) ---
+	if (table.catalog.ShouldTryScanPlan()) {
 		table.RefreshCredentials(context);
 		auto bd = make_uniq<UCScanPlanBindData>();
 		bd->catalog_name = table_data->catalog_name;
@@ -239,7 +247,8 @@ TableFunction UCTableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
 		bd->table_name = table_data->name;
 		bd->storage_location = table_data->storage_location;
 		bd->credentials = table.catalog.credentials;
-		bd->scan_plan_endpoint = scan_ep;
+		bd->scan_plan_endpoint = table.catalog.GetIRCEndpoint();
+		bd->uc_catalog = &table.catalog;
 		bind_data = std::move(bd);
 		return MakeUCScanPlanTableFunction();
 	}

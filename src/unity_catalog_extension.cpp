@@ -92,10 +92,12 @@ static unique_ptr<Catalog> UnityCatalogAttach(optional_ptr<StorageExtensionInfo>
 			secret_name = entry.second.ToString();
 		} else if (lower_name == "default_schema") {
 			default_schema = entry.second.ToString();
-		} else if (lower_name == "scan_plan_endpoint") {
-			// NOTE: POC
-			credentials.scan_plan_endpoint = entry.second.ToString();
-			StringUtil::RTrim(credentials.scan_plan_endpoint, "/");
+		} else if (lower_name == "use_irc_scan_plan") {
+			credentials.use_irc_scan_plan = entry.second.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
+		} else if (lower_name == "api_irc_endpoint_override") {
+			// Hidden test escape hatch; users opt in with use_irc_scan_plan and let the URL derive.
+			credentials.irc_endpoint_override = entry.second.ToString();
+			StringUtil::RTrim(credentials.irc_endpoint_override, "/");
 		} else {
 			throw BinderException("Unrecognized option for UC attach: %s", entry.first);
 		}
