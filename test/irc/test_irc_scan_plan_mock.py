@@ -309,11 +309,7 @@ def test_prepared_statement_replans_each_execution(data_files):
         return {}
 
     with MockUC(script) as srv:
-        r = srv.query(
-            f"PREPARE pp AS SELECT 'R=' || count(*) FROM {TABLE};"
-            "EXECUTE pp;"
-            "EXECUTE pp;"
-        )
+        r = srv.query(f"PREPARE pp AS SELECT 'R=' || count(*) FROM {TABLE};" "EXECUTE pp;" "EXECUTE pp;")
         assert r.returncode == 0, r.stderr
         seen = [ln.strip() for ln in r.stdout.splitlines() if ln.strip().startswith("R=")]
         n_plans = sum(1 for x in srv.requests if x["path"].endswith("/plan"))
@@ -339,10 +335,7 @@ def test_scan_works_with_filter_pushdown_disabled(data_files):
         return {}
 
     with MockUC(script) as srv:
-        r = srv.query(
-            "SET disabled_optimizers='filter_pushdown';"
-            f"SELECT count(*) FROM {TABLE} WHERE day = 'Mon';"
-        )
+        r = srv.query("SET disabled_optimizers='filter_pushdown';" f"SELECT count(*) FROM {TABLE} WHERE day = 'Mon';")
         assert r.returncode == 0, r.stderr
         # Right answer: DuckDB's own Filter still applies the predicate.
         assert scalar(r) == "10", r.stdout
