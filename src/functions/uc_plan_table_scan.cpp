@@ -22,21 +22,6 @@ struct PlanScanGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-static const char *StatusToString(UCScanPlanStatus s) {
-	switch (s) {
-	case UCScanPlanStatus::COMPLETED:
-		return "completed";
-	case UCScanPlanStatus::SUBMITTED:
-		return "submitted";
-	case UCScanPlanStatus::FAILED:
-		return "failed";
-	case UCScanPlanStatus::CANCELLED:
-		return "cancelled";
-	default:
-		return "unknown";
-	}
-}
-
 static unique_ptr<FunctionData> PlanScanBind(ClientContext &, TableFunctionBindInput &input,
                                              vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = make_uniq<PlanScanBindData>();
@@ -75,7 +60,7 @@ static void PlanScanFunction(ClientContext &, TableFunctionInput &data_p, DataCh
 	}
 	state.emitted = true;
 	auto &r = state.result;
-	output.data[0].SetValue(0, Value(StatusToString(r.status)));
+	output.data[0].SetValue(0, Value(UCScanPlanStatusToString(r.status)));
 	output.data[1].SetValue(0, r.plan_id.empty() ? Value(LogicalType::VARCHAR) : Value(r.plan_id));
 	output.data[2].SetValue(0, Value::BIGINT(NumericCast<int64_t>(r.file_scan_tasks.size())));
 	output.data[3].SetValue(0, Value::BIGINT(NumericCast<int64_t>(r.delete_files.size())));

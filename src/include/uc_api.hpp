@@ -90,6 +90,9 @@ struct UCScanPlanDataFile {
 // IRC spec: PlanStatus — status of a server-side planning operation.
 enum class UCScanPlanStatus { UNKNOWN = 0, COMPLETED, SUBMITTED, FAILED, CANCELLED };
 
+// The IRC wire spelling ("completed", "submitted", ...); "unknown" for a status we didn't recognize.
+const char *UCScanPlanStatusToString(UCScanPlanStatus s);
+
 // IRC spec: discriminator on ContentFile.content for delete files.
 enum class UCScanDeleteFileType { UNKNOWN = 0, POSITION_DELETES, EQUALITY_DELETES };
 

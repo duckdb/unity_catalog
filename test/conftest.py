@@ -65,3 +65,13 @@ def pytest_configure(config):
         marker="functions",
         default=True,
     )
+    # Also server-free: the IRC scan-plan mocks. A threaded Python HTTP server stands in for the
+    # UC catalog + Iceberg REST plan endpoints, so the request/poll/cancel loop and the whole
+    # ATTACH -> scan read path run with no container and no creds.
+    register_suite(
+        config,
+        "irc",
+        path="test/irc",
+        marker="irc",
+        default=True,
+    )

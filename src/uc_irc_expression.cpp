@@ -10,17 +10,42 @@
 
 namespace duckdb {
 
+// Quote+escape `s` as a JSON string literal.
+static string JsonQuote(const string &s) {
+	string result = "\"";
+	for (char c : s) {
+		if (c == '"') {
+			result += "\\\"";
+		} else if (c == '\\') {
+			result += "\\\\";
+		} else if (c == '\n') {
+			result += "\\n";
+		} else if (c == '\r') {
+			result += "\\r";
+		} else if (c == '\t') {
+			result += "\\t";
+		} else {
+			result += c;
+		}
+	}
+	result += "\"";
+	return result;
+}
+
 static string ValueToIRCJson(const Value &val) {
 	switch (val.type().id()) {
 	case LogicalTypeId::TINYINT:
 	case LogicalTypeId::SMALLINT:
 	case LogicalTypeId::INTEGER:
 	case LogicalTypeId::BIGINT:
+		return to_string(val.GetValue<int64_t>());
 	case LogicalTypeId::UTINYINT:
 	case LogicalTypeId::USMALLINT:
 	case LogicalTypeId::UINTEGER:
 	case LogicalTypeId::UBIGINT:
-		return to_string(val.GetValue<int64_t>());
+		// Via uint64_t, not int64_t: GetValue<int64_t>() throws on a UBIGINT above INT64_MAX, and
+		// a throw here would abort the whole scan over a serialization detail.
+		return to_string(val.GetValue<uint64_t>());
 	case LogicalTypeId::FLOAT:
 	case LogicalTypeId::DOUBLE: {
 		// %.17g round-trips an IEEE-754 double exactly. std::to_string() would emit 6 fixed
@@ -37,30 +62,22 @@ static string ValueToIRCJson(const Value &val) {
 	}
 	case LogicalTypeId::BOOLEAN:
 		return val.GetValue<bool>() ? "true" : "false";
-	case LogicalTypeId::VARCHAR: {
-		string s = val.ToString();
-		string result = "\"";
-		for (char c : s) {
-			if (c == '"') {
-				result += "\\\"";
-			} else if (c == '\\') {
-				result += "\\\\";
-			} else if (c == '\n') {
-				result += "\\n";
-			} else if (c == '\r') {
-				result += "\\r";
-			} else if (c == '\t') {
-				result += "\\t";
-			} else {
-				result += c;
-			}
-		}
-		result += "\"";
-		return result;
-	}
+	case LogicalTypeId::VARCHAR:
+		return JsonQuote(val.ToString());
 	default:
 		return "";
 	}
+}
+
+// GetName() is the *alias*, which looks like it would leak `SELECT day AS d` onto the wire — but
+// pushdown substitutes the base-table colref, whose alias is the physical name (pinned by
+// test_irc_scan_plan_mock.py).
+static string TermForColumnRef(const BoundColumnRefExpression &col_ref) {
+	string col_name = col_ref.GetName().GetIdentifierName();
+	if (col_name.empty()) {
+		return "";
+	}
+	return JsonQuote(col_name);
 }
 
 // Returns an IRC Expression JSON string, or "" if the expression cannot be
@@ -120,15 +137,15 @@ static string ExprToIRCJson(const Expression &expr) {
 			return "";
 		}
 
-		string col_name = col_ref->GetName().GetIdentifierName();
-		if (col_name.empty()) {
+		string term = TermForColumnRef(*col_ref);
+		if (term.empty()) {
 			return "";
 		}
 		string val_json = ValueToIRCJson(const_->GetValue());
 		if (val_json.empty()) {
 			return "";
 		}
-		return string("{\"type\":\"") + irc_type + "\",\"term\":\"" + col_name + "\",\"value\":" + val_json + "}";
+		return string("{\"type\":\"") + irc_type + "\",\"term\":" + term + ",\"value\":" + val_json + "}";
 	}
 
 	case ExpressionClass::BOUND_CONJUNCTION: {
@@ -172,12 +189,12 @@ static string ExprToIRCJson(const Expression &expr) {
 			return "";
 		}
 		auto &col = reinterpret_cast<const BoundColumnRefExpression &>(*op_children[0]);
-		string col_name = col.GetName().GetIdentifierName();
-		if (col_name.empty()) {
+		string term = TermForColumnRef(col);
+		if (term.empty()) {
 			return "";
 		}
 		const char *irc_type = (expr.GetExpressionType() == ExpressionType::OPERATOR_IS_NULL) ? "is-null" : "not-null";
-		return string("{\"type\":\"") + irc_type + "\",\"term\":\"" + col_name + "\"}";
+		return string("{\"type\":\"") + irc_type + "\",\"term\":" + term + "}";
 	}
 
 	default:

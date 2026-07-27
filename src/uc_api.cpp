@@ -598,10 +598,19 @@ static UCScanPlanDataFile ParseDataFile(duckdb_yyjson::yyjson_val *df_val) {
 
 static UCScanDeleteFile ParseDeleteFile(duckdb_yyjson::yyjson_val *del_val) {
 	UCScanDeleteFile df;
-	string content = TryGetStrFromObject(del_val, "content");
-	df.content = (content == "position-deletes") ? UCScanDeleteFileType::POSITION_DELETES
-	                                             : UCScanDeleteFileType::EQUALITY_DELETES;
 	df.file_path = TryGetStrFromObject(del_val, "file-path");
+	// Reject an unknown discriminator here rather than defaulting it into EQUALITY_DELETES, which
+	// would report a malformed response as the (very different) equality-deletes-unsupported error.
+	string content = TryGetStrFromObject(del_val, "content");
+	if (content == "position-deletes") {
+		df.content = UCScanDeleteFileType::POSITION_DELETES;
+	} else if (content == "equality-deletes") {
+		df.content = UCScanDeleteFileType::EQUALITY_DELETES;
+	} else {
+		throw IOException("scan-plan: delete file '%s' has unknown content discriminator '%s' (expected "
+		                  "'position-deletes' or 'equality-deletes') — server response is malformed",
+		                  df.file_path, content);
+	}
 	df.file_format = TryGetStrFromObject(del_val, "file-format", false);
 	df.file_size_in_bytes = (int64_t)TryGetNumFromObject(del_val, "file-size-in-bytes", false);
 	df.record_count = (int64_t)TryGetNumFromObject(del_val, "record-count", false);
@@ -738,7 +747,7 @@ static UCScanPlanResult ParseScanPlanResponse(const string &json_str) {
 // Scan plan API methods
 // ---------------------------------------------------------------------------
 
-static const char *UCScanPlanStatusToString(UCScanPlanStatus s) {
+const char *UCScanPlanStatusToString(UCScanPlanStatus s) {
 	switch (s) {
 	case UCScanPlanStatus::COMPLETED:
 		return "completed";
@@ -778,7 +787,9 @@ UCScanPlanResult UCAPI::PlanTableScan(ClientContext &ctx, const string &catalog_
                                       const string &scan_plan_endpoint, const string &filter_json) {
 	string url = scan_plan_endpoint + "/v1/catalogs/" + catalog_name + "/namespaces/" + schema_name + "/tables/" +
 	             table_name + "/plan";
-	// TODO: remove hard coded case-sensitive?
+	// case-sensitive:false is deliberate and required by Databricks. It also matches DuckDB, whose
+	// identifiers are case-insensitive — so the column names SerializeFiltersToIRC puts in each
+	// `term` need not match the catalog's casing.
 	string body = filter_json.empty() ? "{\"case-sensitive\":false}"
 	                                  : "{\"case-sensitive\":false,\"filter\":" + filter_json + "}";
 	UC_LOG_DEBUG(ctx, "api-irc.PlanTableScan %s.%s.%s filter=%s", catalog_name, schema_name, table_name,

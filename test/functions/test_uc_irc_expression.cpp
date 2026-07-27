@@ -97,6 +97,13 @@ TEST_CASE("uc irc: non-finite double drops the term", "[uc][irc]") {
 	CHECK(One(Cmp(ExpressionType::COMPARE_LESSTHAN, Col("p", LogicalType::DOUBLE), Const(Value::DOUBLE(inf)))).empty());
 }
 
+TEST_CASE("uc irc: a column name needing escapes is quoted", "[uc][irc]") {
+	// The term was concatenated in raw while values went through the escaper, so a quote in a
+	// column name produced a request body that is not valid JSON at all.
+	CHECK(One(Cmp(ExpressionType::COMPARE_EQUAL, Col(R"(we"ird)"), Const(Value::INTEGER(1)))) ==
+	      R"({"type":"eq","term":"we\"ird","value":1})");
+}
+
 TEST_CASE("uc irc: is-null / not-null", "[uc][irc]") {
 	CHECK(One(IsNull(ExpressionType::OPERATOR_IS_NULL, Col("age"))) == R"({"type":"is-null","term":"age"})");
 	CHECK(One(IsNull(ExpressionType::OPERATOR_IS_NOT_NULL, Col("age"))) == R"({"type":"not-null","term":"age"})");

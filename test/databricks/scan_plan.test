@@ -1,7 +1,8 @@
 # name: test/databricks/scan_plan.test
 # description: IRC scan-plan API (server-side filter pushdown) against Databricks Unity Catalog,
-# plus the /plan-failure -> Delta fallback (a dead endpoint must not error the query).
 # group: [databricks]
+
+# plus the /plan-failure -> Delta fallback (a dead endpoint must not error the query).
 
 #
 # Table (test/databricks/data/scan_plan_days_managed.sql): id INT, day VARCHAR, 5 files

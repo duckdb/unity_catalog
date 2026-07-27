@@ -98,7 +98,7 @@ void UnityCatalog::ClearCache() {
 	schemas.ClearEntries();
 }
 
-// --- IRC scan-plan gating (see docs/scan-plan/scan-plan-gating.md) ---
+// --- IRC scan-plan gating (see docs/sp/scan-plan-gating.md) ---
 
 bool UnityCatalog::ShouldTryScanPlan() {
 	if (!credentials.use_irc_scan_plan) {

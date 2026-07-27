@@ -1,8 +1,7 @@
 #pragma once
 
-// A DeleteFilter over a set of absolute deleted row positions. Split into its own header (rather
-// than file-local in uc_multi_file_list.cpp) so the position-set -> surviving-rows logic can be
-// unit-tested in isolation. See test/cpp/test_uc_position_delete_filter.cpp.
+// Split out of uc_multi_file_list.cpp only so the position-set -> surviving-rows logic can be
+// unit-tested in isolation (test/functions/test_uc_position_delete_filter.cpp).
 
 #include "duckdb/common/multi_file/multi_file_data.hpp" // DeleteFilter (+ row_t/idx_t/SelectionVector)
 #include "duckdb/common/types/selection_vector.hpp"
@@ -11,9 +10,8 @@
 
 namespace duckdb {
 
-// The common shape both classic (file_path, pos) delete files and decoded deletion-vector bitmaps
-// reduce to. Mirrors the vendored delta extension's DeltaDeleteFilter / the iceberg extension's
-// IcebergPositionalDeleteFilter (same DeleteFilter contract, same O(1)-membership-check shape).
+// What both classic (file_path, pos) delete files and decoded deletion-vector bitmaps reduce to.
+// Same shape as delta's DeltaDeleteFilter and iceberg's IcebergPositionalDeleteFilter.
 struct UCPositionDeleteFilter : public DeleteFilter {
 	explicit UCPositionDeleteFilter(unordered_set<int64_t> positions_p) : positions(std::move(positions_p)) {
 	}

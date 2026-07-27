@@ -202,12 +202,6 @@ void TableInformation::MarkDirty(const lock_guard<mutex> &_attach_lock) {
 }
 
 bool TableInformation::IsCatalogManaged() const {
-	// OSS UC signals managed tables via table_type directly.
-	// TODO: Databricks probably does too, confirm pls
-	if (table_data->table_type == "MANAGED") {
-		return true;
-	}
-
 	// Databricks preview property (pre-GA)
 	auto it = table_data->properties.find("delta.feature.catalogOwned-preview");
 	if (it != table_data->properties.end() && it->second == "supported") {

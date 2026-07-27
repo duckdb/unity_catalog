@@ -2,6 +2,8 @@
 #include "uc_puffin.hpp"
 
 #include "duckdb/common/bswap.hpp"
+#include "duckdb/common/helper.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "yyjson.hpp"
 
 namespace duckdb {
@@ -102,8 +104,12 @@ unique_ptr<UCDeletionVectorData> UCDeletionVectorData::FromBlob(data_ptr_t blob_
 		blob_start += sizeof(int32_t);
 		vector_size -= sizeof(int32_t);
 
+		// Bound maxbytes by the buffer, not by the blob's self-declared vector_size: it is only ever
+		// decremented, so a corrupt value underflows and the header parse reads past blob_end.
+		auto remaining = NumericCast<size_t>(blob_end - blob_start);
+		size_t max_bytes = MinValue<size_t>(NumericCast<size_t>(vector_size), remaining);
 		size_t bitmap_size =
-		    roaring::api::roaring_bitmap_portable_deserialize_size((const char *)blob_start, vector_size);
+		    roaring::api::roaring_bitmap_portable_deserialize_size((const char *)blob_start, max_bytes);
 		if (bitmap_size == 0 || blob_start + bitmap_size > blob_end) {
 			throw InvalidInputException("Deletion vector blob in \"%s\" is corrupt (bad bitmap payload)", path);
 		}

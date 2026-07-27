@@ -14,6 +14,7 @@
 #include "storage/uc_schema_set.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/string_util.hpp"
 
 #include <chrono>
 
@@ -93,7 +94,7 @@ public:
 
 	void ClearCache();
 
-	// --- IRC scan-plan gating (opt-in; see docs/scan-plan/scan-plan-gating.md) ---
+	// --- IRC scan-plan gating (opt-in; see docs/sp/scan-plan-gating.md) ---
 
 	// The IRC base URL for this catalog: the hidden override, else derived from the UC endpoint.
 	// Only meaningful when credentials.use_irc_scan_plan is set.
@@ -101,7 +102,9 @@ public:
 		if (!credentials.irc_endpoint_override.empty()) {
 			return credentials.irc_endpoint_override;
 		}
-		return credentials.endpoint + "/api/2.1/unity-catalog/iceberg-rest";
+		string base = credentials.endpoint;
+		StringUtil::RTrim(base, "/"); // the override is trimmed at parse time; the UC endpoint isn't
+		return base + "/api/2.1/unity-catalog/iceberg-rest";
 	}
 
 	// Whether a scan should attempt the scan-plan path: opt-in AND not currently known-unavailable.

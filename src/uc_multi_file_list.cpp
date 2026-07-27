@@ -56,7 +56,6 @@ UCMultiFileList::UCMultiFileList(ClientContext &context, const UCScanPlanResult 
     : LazyMultiFileList(&context), credentials(std::move(credentials_p)), catalog_name(std::move(catalog_name_p)),
       schema_name(std::move(schema_name_p)), table_name(std::move(table_name_p)),
       scan_plan_endpoint(std::move(scan_plan_endpoint_p)) {
-	// Pre-seed inline file-scan-tasks — available immediately without a fetch round-trip.
 	for (auto &task : plan.file_scan_tasks) {
 		AddFileScanTask(task, plan.delete_files);
 	}
@@ -69,29 +68,32 @@ UCMultiFileList::UCMultiFileList(ClientContext &context, const UCScanPlanResult 
 }
 
 bool UCMultiFileList::ExpandNextPath() const {
-	if (remaining_tokens.empty()) {
-		return false;
-	}
+	// Must return "added a file", not "tokens remain": a false latches all_files_expanded, and
+	// MultiFileList::Scan reads the resulting empty OpenFileInfo as end-of-list.
+	while (!remaining_tokens.empty()) {
+		string token = std::move(remaining_tokens.front());
+		remaining_tokens.erase(remaining_tokens.begin());
 
-	string token = std::move(remaining_tokens.front());
-	remaining_tokens.erase(remaining_tokens.begin());
-
-	auto &ctx = *context.get_mutable();
-	auto result =
-	    UCAPI::FetchScanTasks(ctx, catalog_name, schema_name, table_name, token, credentials, scan_plan_endpoint);
-	for (auto &task : result.file_scan_tasks) {
-		AddFileScanTask(task, result.delete_files);
+		auto &ctx = *context.get_mutable();
+		auto result =
+		    UCAPI::FetchScanTasks(ctx, catalog_name, schema_name, table_name, token, credentials, scan_plan_endpoint);
+		// fetchScanTasks may itself hand back more plan-tasks.
+		for (auto &new_token : result.plan_tasks) {
+			remaining_tokens.push_back(std::move(new_token));
+		}
+		if (result.file_scan_tasks.empty()) {
+			continue; // this token carried no files -- drain the next rather than reporting "done"
+		}
+		for (auto &task : result.file_scan_tasks) {
+			AddFileScanTask(task, result.delete_files);
+		}
+		return true;
 	}
-	// Re-queue nested tokens (server may return additional plan-tasks from fetchScanTasks).
-	for (auto &new_token : result.plan_tasks) {
-		remaining_tokens.push_back(std::move(new_token));
-	}
-
-	return !remaining_tokens.empty();
+	return false;
 }
 
-// Thread-local staging area for UCScanPlanPushdownFilter → UCMultiFileReaderFactory handoff.
-// Set immediately before parquet_fn.bind(); consumed (moved) by the factory on the same thread.
+// The only channel into get_multi_file_reader, which takes just a TableFunction: set before
+// parquet_fn.bind(), moved out by the factory on the same thread.
 thread_local shared_ptr<UCMultiFileList> tl_uc_file_list;
 
 unique_ptr<MultiFileReader> UCMultiFileReaderFactory(const TableFunction &) {
@@ -103,8 +105,6 @@ unique_ptr<MultiFileReader> UCMultiFileReaderFactory(const TableFunction &) {
 // Delete-file application
 // ---------------------------------------------------------------------------
 
-// Grab a private copy of the system `parquet_scan` table function (same lookup
-// UCScanPlanPushdownFilter uses for the main data scan).
 static TableFunction GetParquetScanFunction(ClientContext &context) {
 	auto &sys_cat = Catalog::GetSystemCatalog(context);
 	auto &parquet_entry = sys_cat.GetEntry<TableFunctionCatalogEntry>(
@@ -112,8 +112,7 @@ static TableFunction GetParquetScanFunction(ClientContext &context) {
 	return parquet_entry.functions.GetFunctionByArguments(context, {LogicalType::VARCHAR});
 }
 
-// Bind + fully drain `path` through parquet_scan, calling `consume` on each non-empty chunk.
-// Delete files are small (a handful of KB to low MB) so this is fine to fully materialize.
+// Fully materializing is fine here: delete files run KB to low MB.
 static void ScanParquetFile(ClientContext &context, const string &path,
                             const std::function<void(DataChunk &)> &consume) {
 	auto parquet_fn = GetParquetScanFunction(context);
@@ -176,26 +175,22 @@ static void ScanPositionalDeleteFile(ClientContext &context, const UCScanDeleteF
 			}
 		}
 	});
-	// Logged (with the DV counterpart below) so a test can assert WHICH delete sub-path a live
-	// scan-plan response actually took — classic parquet position-delete vs deletion-vector blob.
+	// Which delete sub-path ran is otherwise invisible; no test asserts this today.
 	UC_LOG_DEBUG(context, "api-irc.PositionalDelete file=%s data_file=%s", delete_file.file_path, data_file_path);
 }
 
-// Iceberg v3 deletion vector: a `deletion-vector-v1` puffin blob at [content_offset,
-// content_offset + content_size_in_bytes) within delete_file.file_path.
+// Iceberg v3 deletion vector: a `deletion-vector-v1` puffin blob at a byte range in the file.
 static void ScanDeletionVectorFile(ClientContext &context, const UCScanDeleteFile &delete_file,
                                    unordered_set<int64_t> &out) {
-	// content_offset >= 0 is guaranteed by BuildUCDeleteFilter's routing; the spec requires
-	// content-size-in-bytes whenever content-offset is present, so a negative size here means a
-	// malformed response — fail with a clear message rather than an opaque NumericCast error.
+	// The spec requires content-size-in-bytes wherever content-offset is present, so a missing one
+	// is a malformed response — say so rather than failing later inside NumericCast.
 	if (delete_file.content_size_in_bytes < 0) {
 		throw IOException("scan-plan: deletion-vector delete file '%s' has content-offset %d but no "
 		                  "content-size-in-bytes — server response is malformed",
 		                  delete_file.file_path, delete_file.content_offset);
 	}
-	// An unreachable delete file or a corrupt/rejected blob means WRONG ROWS if swallowed, so we
-	// rethrow to fail the scan — but WARNING first, correlating the failure to this delete file
-	// (FromBlob itself takes no ClientContext to log from).
+	// Swallowing here would mean wrong rows, so rethrow — but name the delete file first, since
+	// FromBlob has no context to log from.
 	try {
 		auto &fs = FileSystem::GetFileSystem(context);
 		auto handle = fs.OpenFile(delete_file.file_path, FileOpenFlags::FILE_FLAGS_READ);
@@ -206,9 +201,6 @@ static void ScanDeletionVectorFile(ClientContext &context, const UCScanDeleteFil
 		auto blob = UCDeletionVectorData::FromBlob(buffer.get(), length, delete_file.file_path);
 		set<idx_t> positions;
 		blob->ToSet(positions);
-		// The load-bearing confirmation: this line is emitted ONLY when a delete resolves to a
-		// deletion-vector-v1 puffin blob (content-offset present), so a test asserting its presence
-		// proves the puffin/DV path — not just that some delete was applied. See scan_plan_deletes.test.
 		UC_LOG_DEBUG(context, "api-irc.DeletionVector file=%s offset=%lld size=%lld positions=%zu",
 		             delete_file.file_path, (long long)delete_file.content_offset,
 		             (long long)delete_file.content_size_in_bytes, positions.size());
