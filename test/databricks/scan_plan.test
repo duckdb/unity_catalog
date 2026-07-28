@@ -40,7 +40,7 @@ CREATE SECRET (
 
 statement ok
 ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}',
-    use_irc_scan_plan true);
+    USE_IRC_SCAN_PLAN true);
 
 statement ok
 USE unity;
@@ -94,6 +94,13 @@ SELECT count(*) FROM scan_plan_days_managed WHERE day = 'Mon' AND id % 2 = 0;
 ----
 5
 
+# Exactly one plan call for the query. The pruning assertion below counts only results that
+# pruned, so on its own it would pass even if we called /plan repeatedly.
+query I
+SELECT count(*) FROM duckdb_logs() WHERE message LIKE 'api-irc.PlanTableScan% filter=%';
+----
+1
+
 # Server still pruned to 1 file (AND with true-fallback doesn't widen the server predicate)
 query I
 SELECT count(*) FROM duckdb_logs()
@@ -125,7 +132,7 @@ DETACH unity;
 
 statement ok
 ATTACH '{CATALOG}' AS borked (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}',
-    use_irc_scan_plan true, api_irc_endpoint_override 'http://127.0.0.1:1');
+    USE_IRC_SCAN_PLAN true, api_irc_endpoint_override 'http://127.0.0.1:1');
 
 statement ok
 USE borked;
@@ -157,3 +164,42 @@ USE memory;
 
 statement ok
 DETACH borked;
+
+# -----------------------------------------------------------------------------
+# USE_IRC_SCAN_PLAN gates the path: without it, /plan is never called
+#
+# Asserted as the ABSENCE of a plan attempt, because the Delta fallback would hide a gate that
+# failed open -- scan planning would be tried, fail or succeed, and the rows would look the same
+# either way.
+#
+
+statement ok
+ATTACH '{CATALOG}' AS plain (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}');
+
+statement ok
+USE plain;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM scan_plan_days_managed;
+----
+50
+
+# No plan attempt, and no HTTP request to the IRC endpoint.
+query I
+SELECT count(*) FROM duckdb_logs() WHERE message LIKE 'api-irc.%';
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_logs() WHERE message LIKE '%iceberg-rest%';
+----
+0
+
+statement ok
+USE memory;
+
+statement ok
+DETACH plain;

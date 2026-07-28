@@ -77,7 +77,7 @@ def data_files(tmp_path_factory):
         path = d / f"{day}.parquet"
         lo = i * ROWS_PER_FILE + 1
         hi = lo + ROWS_PER_FILE
-        sql = f"COPY (SELECT id, '{day}' AS day FROM range({lo}, {hi}) t(id)) " f"TO '{path}' (FORMAT parquet);"
+        sql = f"COPY (SELECT id, '{day}' AS day FROM range({lo}, {hi}) t(id)) TO '{path}' (FORMAT parquet);"
         r = _run_sql(sql)
         assert r.returncode == 0, r.stderr
         paths.append(str(path))
@@ -176,15 +176,20 @@ class MockUC:
         """Rename a column in the served /tables response (before the first query)."""
         self._httpd.table_info["columns"][idx]["name"] = name
 
-    def attach_sql(self, alias="unity"):
+    def attach_sql(self, alias="unity", scan_plan="true"):
+        """scan_plan=None omits the option entirely, exercising the default."""
+        opt = "" if scan_plan is None else f" use_irc_scan_plan {scan_plan},"
         return (
             f"CREATE SECRET (TYPE unity_catalog, TOKEN 'tok', ENDPOINT '{self.endpoint}', AWS_REGION 'us-east-1');"
             f"ATTACH '{CATALOG}' AS {alias} (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}',"
-            f" use_irc_scan_plan true, api_irc_endpoint_override '{self.endpoint}');"
+            f"{opt} API_IRC_ENDPOINT_OVERRIDE '{self.endpoint}');"
         )
 
-    def query(self, sql, alias="unity"):
-        return _run_sql(f"LOAD unity_catalog; LOAD parquet; {self.attach_sql(alias)} USE {alias}; {sql}")
+    def query(self, sql, alias="unity", scan_plan="true"):
+        return _run_sql(f"LOAD unity_catalog; LOAD parquet; {self.attach_sql(alias, scan_plan)} USE {alias}; {sql}")
+
+    def plan_requests(self):
+        return [x for x in self.requests if x["path"].endswith("/plan")]
 
 
 # -----------------------------------------------------------------------------
@@ -281,6 +286,31 @@ def test_chained_and_empty_plan_tasks(data_files):
 
 
 # -----------------------------------------------------------------------------
+# USE_IRC_SCAN_PLAN gates the whole path
+#
+# Every other test here opts in, so nothing covered the default. It has to be asserted as the
+# ABSENCE of a /plan request: a broken gate would attempt scan planning, fail against a server
+# that doesn't offer it, fall back to Delta and leave every suite green. The fallback that makes
+# the feature safe is exactly what would hide the gate failing open.
+#
+
+
+@pytest.mark.parametrize("scan_plan", [None, "false"])
+def test_scan_plan_not_attempted_unless_opted_in(data_files, scan_plan):
+    def script(method, path, requests):
+        if path.endswith("/plan"):
+            return {"status": "completed", "plan-id": "p1", "file-scan-tasks": [_file_scan_task(f) for f in data_files]}
+        return {}
+
+    with MockUC(script) as srv:
+        # The query itself fails -- the Delta path looks for a real Delta table at the mock's
+        # storage_location, which doesn't exist. That's fine: the assertion is that we never asked
+        # the IRC endpoint to plan.
+        srv.query(f"SELECT count(*) FROM {TABLE};", scan_plan=scan_plan)
+        assert srv.plan_requests() == [], f"scan plan attempted without opt-in ({scan_plan=})"
+
+
+# -----------------------------------------------------------------------------
 # Each execution re-plans
 #
 # The scan-plan response carries short-lived temp S3 credentials and a point-in-time file list.
@@ -309,7 +339,7 @@ def test_prepared_statement_replans_each_execution(data_files):
         return {}
 
     with MockUC(script) as srv:
-        r = srv.query(f"PREPARE pp AS SELECT 'R=' || count(*) FROM {TABLE};" "EXECUTE pp;" "EXECUTE pp;")
+        r = srv.query(f"PREPARE pp AS SELECT 'R=' || count(*) FROM {TABLE};EXECUTE pp;EXECUTE pp;")
         assert r.returncode == 0, r.stderr
         seen = [ln.strip() for ln in r.stdout.splitlines() if ln.strip().startswith("R=")]
         n_plans = sum(1 for x in srv.requests if x["path"].endswith("/plan"))
@@ -335,7 +365,7 @@ def test_scan_works_with_filter_pushdown_disabled(data_files):
         return {}
 
     with MockUC(script) as srv:
-        r = srv.query("SET disabled_optimizers='filter_pushdown';" f"SELECT count(*) FROM {TABLE} WHERE day = 'Mon';")
+        r = srv.query(f"SET disabled_optimizers='filter_pushdown';SELECT count(*) FROM {TABLE} WHERE day = 'Mon';")
         assert r.returncode == 0, r.stderr
         # Right answer: DuckDB's own Filter still applies the predicate.
         assert scalar(r) == "10", r.stdout
@@ -387,9 +417,7 @@ def test_filter_term_is_the_physical_column_name(data_files):
 def test_filter_term_survives_a_view_alias(data_files):
     with MockUC(_completed_all(data_files)) as srv:
         # TEMP: the attach is READ_ONLY, so the view can't live in the UC catalog.
-        r = srv.query(
-            f"CREATE TEMP VIEW v AS SELECT id, day AS d FROM {TABLE};" "SELECT count(*) FROM v WHERE d = 'Mon';"
-        )
+        r = srv.query(f"CREATE TEMP VIEW v AS SELECT id, day AS d FROM {TABLE};SELECT count(*) FROM v WHERE d = 'Mon';")
         assert r.returncode == 0, r.stderr
         assert scalar(r) == "10", r.stdout
         bodies = [b for b in srv.plan_bodies() if "filter" in b]
