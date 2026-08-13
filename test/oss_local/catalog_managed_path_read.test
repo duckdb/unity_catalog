@@ -1,5 +1,5 @@
 # name: test/oss_local/catalog_managed_path_read.test
-# description: a path-based read of a catalog-managed table must fail rather than answer from storage (report C2). The report asks for a path-vs-catalog count mismatch; that is unreachable, because the kernel refuses the path read outright -- so this pins the refusal and the catalog read that replaces it.
+# description: a path-based read of a catalog-managed table must fail rather than answer from storage. The kernel refuses to open one without the catalog's version, so a stale-but-plausible count is unreachable; this pins the refusal and the catalog read that replaces it.
 # group: [oss_local]
 
 require parquet
@@ -33,7 +33,7 @@ statement ok
 USE duck.{UC_TEST_SCHEMA};
 
 # -----------------------------------------------------------------------------
-# The catalog path is the correct answer -- step 1 of the reporter's repro
+# The catalog path is the correct answer
 #
 
 statement ok
@@ -45,11 +45,11 @@ SELECT count(*) FROM {UC_TEST_TABLE};
 2
 
 # -----------------------------------------------------------------------------
-# The path read refuses -- their step 3, with the outcome corrected
+# The path read refuses
 #
-# The report expects a stale count here. It cannot happen: the kernel will not open a
-# catalog-managed table without the catalog's version, so the read errors instead. That is
-# the property worth pinning -- a wrong answer is impossible because there is no answer.
+# A stale count is impossible here: the kernel will not open a catalog-managed table without
+# the catalog's version, so the read errors instead. A wrong answer cannot occur because
+# there is no answer.
 #
 
 statement error
@@ -85,6 +85,10 @@ SELECT id, name FROM {UC_TEST_TABLE} ORDER BY id;
 ----
 1	first
 2	second
+
+# `USE` above made duck the default database, which cannot be detached while selected
+statement ok
+USE memory;
 
 statement ok
 DETACH duck;

@@ -1,5 +1,5 @@
 # name: test/oss_local/char_varchar_width.test
-# description: CHAR(n)/VARCHAR(n) width is enforced on writes that go through the UC catalog path (report C1). The bound lives in Delta field metadata that only Spark writes, so char_varchar_width.py hand-seeds the _delta_log; this body is the reporter's acceptance step -- an over-length INSERT through ATTACH ... (TYPE unity_catalog) must raise a clean error.
+# description: CHAR(n)/VARCHAR(n) width is enforced on writes that go through the UC catalog path -- an over-length INSERT through ATTACH ... (TYPE unity_catalog) must raise a clean error. The bound lives in Delta field metadata that only Spark writes, so char_varchar_width.py hand-seeds the _delta_log.
 # group: [oss_local]
 
 require parquet
@@ -55,10 +55,10 @@ SELECT id, code FROM {UC_TEST_TABLE} ORDER BY id;
 1	ABCDE
 
 # -----------------------------------------------------------------------------
-# Over the limit: rejected -- this is step 2 of the reporter's repro
+# Over the limit: rejected
 #
-# Their criterion is "step 2 raises a clean error". Reject, not truncate: the reference
-# writer rejects, and truncation would silently alter the value.
+# Reject rather than truncate: Spark refuses an over-length write, and truncating would
+# silently alter the value.
 #
 
 statement error
@@ -80,6 +80,10 @@ query I
 SELECT count(*) FROM {UC_TEST_TABLE};
 ----
 2
+
+# `USE` above made duck the default database, which cannot be detached while selected
+statement ok
+USE memory;
 
 statement ok
 DETACH duck;
