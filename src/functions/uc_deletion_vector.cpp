@@ -25,7 +25,7 @@ struct ReadDVGlobalState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> ReadDVBind(ClientContext &, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<ReadDVBindData>();
 	result->path = input.inputs[0].ToString();
 

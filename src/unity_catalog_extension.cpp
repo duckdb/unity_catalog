@@ -83,7 +83,7 @@ static unique_ptr<Catalog> UnityCatalogAttach(optional_ptr<StorageExtensionInfo>
 
 	// check if we have a secret provided
 	string secret_name;
-	string default_schema;
+	Identifier default_schema;
 	for (auto &entry : info.options) {
 		auto lower_name = StringUtil::Lower(entry.first);
 		if (lower_name == "type" || lower_name == "read_only") {
@@ -91,7 +91,7 @@ static unique_ptr<Catalog> UnityCatalogAttach(optional_ptr<StorageExtensionInfo>
 		} else if (lower_name == "secret") {
 			secret_name = entry.second.ToString();
 		} else if (lower_name == "default_schema") {
-			default_schema = entry.second.ToString();
+			default_schema = Identifier(entry.second.ToString());
 		} else if (lower_name == "use_irc_scan_plan") {
 			credentials.use_irc_scan_plan = entry.second.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
 		} else if (lower_name == "api_irc_endpoint_override") {
@@ -145,7 +145,7 @@ static unique_ptr<Catalog> UnityCatalogAttach(optional_ptr<StorageExtensionInfo>
 		//! No explicit default schema provided, ask the catalog:
 		// Fixme: default namespace endpoint not available in OSS unity catalog, hence we throw
 		try {
-			default_schema = UCAPI::GetDefaultSchema(context, credentials);
+			default_schema = Identifier(UCAPI::GetDefaultSchema(context, credentials));
 		} catch (Exception &e) {
 			UC_LOG_ERROR(context, "api.GetDefaultSchema failed: %s", e.what());
 		}

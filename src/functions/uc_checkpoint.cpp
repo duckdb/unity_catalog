@@ -50,7 +50,7 @@ static CheckpointTableBindData ResolveTableName(ClientContext &context, const st
 
 template <bool FORCE>
 static unique_ptr<FunctionData> CheckpointTableBind(ClientContext &context, TableFunctionBindInput &input,
-                                                    vector<LogicalType> &return_types, vector<string> &names) {
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<CheckpointTableBindData>(ResolveTableName(context, input.inputs[0].ToString()));
 	result->force = FORCE;
 	return_types.push_back(LogicalType::BOOLEAN);

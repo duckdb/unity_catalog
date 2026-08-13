@@ -15,7 +15,7 @@
 namespace duckdb {
 
 UnityCatalog::UnityCatalog(AttachedDatabase &db_p, const string &internal_name, AttachOptions &attach_options,
-                           UCCredentials credentials, const string &default_schema, string catalog_name_p)
+                           UCCredentials credentials, const Identifier &default_schema, string catalog_name_p)
     : Catalog(db_p), internal_name(internal_name), access_mode(attach_options.access_mode),
       credentials(std::move(credentials)), catalog_name(std::move(catalog_name_p)), schemas(*this),
       default_schema(default_schema) {
@@ -56,7 +56,7 @@ optional_ptr<SchemaCatalogEntry> UnityCatalog::LookupSchema(CatalogTransaction t
 			    "specify a DEFAULT_SCHEMA on ATTACH: `ATTACH '..' (TYPE unity_catalog, DEFAULT_SCHEMA 'my_schema')`",
 			    GetName());
 		}
-		return GetSchema(transaction, Identifier(default_schema), if_not_found);
+		return GetSchema(transaction, default_schema, if_not_found);
 	}
 	auto entry = schemas.GetEntry(transaction.GetContext(), schema_lookup);
 	if (!entry && if_not_found != OnEntryNotFound::RETURN_NULL) {
@@ -73,7 +73,7 @@ string UnityCatalog::GetDBPath() {
 	return internal_name;
 }
 
-string UnityCatalog::GetDefaultSchema() const {
+Identifier UnityCatalog::GetDefaultSchema() const {
 	return default_schema;
 }
 

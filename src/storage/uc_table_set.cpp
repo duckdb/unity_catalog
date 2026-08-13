@@ -24,7 +24,7 @@
 namespace duckdb {
 
 static idx_t ParseDeltaVersionFromAtClause(const BoundAtClause &at_clause) {
-	if (StringUtil::Lower(at_clause.Unit()) != "version") {
+	if (at_clause.Unit() != "version") {
 		throw InvalidConfigurationException("Delta tables only support at_clause with unit 'version'");
 	}
 	Value version_value = at_clause.GetValue();

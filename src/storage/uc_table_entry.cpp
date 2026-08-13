@@ -230,7 +230,7 @@ static unique_ptr<GlobalTableFunctionState> UCScanPlanInitGlobal(ClientContext &
 	vector<Identifier> input_table_names;
 	TableFunctionRef dummy_ref;
 	vector<LogicalType> return_types;
-	vector<string> return_names;
+	vector<Identifier> return_names;
 	TableFunctionBindInput bind_input(inputs, named_params, input_table_types, input_table_names, nullptr, nullptr,
 	                                  parquet_fn, dummy_ref);
 	try {

@@ -23,7 +23,7 @@ struct PlanScanGlobalState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> PlanScanBind(ClientContext &, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<string> &names) {
+                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<PlanScanBindData>();
 	result->endpoint = input.inputs[0].ToString();
 	result->catalog = input.inputs[1].ToString();
