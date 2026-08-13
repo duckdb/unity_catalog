@@ -231,8 +231,8 @@ wheels = [
 
 [[package]]
 name = "duckdb-pytest-driver"
-version = "0.1.0"
-source = { git = "https://github.com/benfleis/duckdb-pytest-driver?branch=dev%2Fv0.2#fd97963d048cfa68f1fbffb3978d05cce60b0e9b" }
+version = "0.2.0"
+source = { git = "https://github.com/benfleis/duckdb-pytest-driver?branch=dev%2Fv0.3#dd710fcf64a73c693279a44a93923e7bc27280db" }
 dependencies = [
     { name = "pytest" },
 ]
@@ -259,7 +259,7 @@ dev = [
 [package.metadata.requires-dev]
 dev = [
     { name = "databricks-sdk" },
-    { name = "duckdb-pytest-driver", extras = ["xdist"], git = "https://github.com/benfleis/duckdb-pytest-driver?branch=dev%2Fv0.2" },
+    { name = "duckdb-pytest-driver", extras = ["xdist"], git = "https://github.com/benfleis/duckdb-pytest-driver?branch=dev%2Fv0.3" },
     { name = "pre-commit", specifier = ">=0.6.1" },
 ]
 

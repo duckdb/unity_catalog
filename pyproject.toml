@@ -26,7 +26,7 @@ package = false
 
 # The driver isn't published yet — resolve it from the GitHub branch (was: ../driver sibling checkout).
 [tool.uv.sources]
-duckdb-pytest-driver = { git = "https://github.com/benfleis/duckdb-pytest-driver", branch = "dev/v0.2" }
+duckdb-pytest-driver = { git = "https://github.com/benfleis/duckdb-pytest-driver", branch = "dev/v0.3" }
 
 # Conform to duckdb's python black settings
 [tool.ruff]
