@@ -38,7 +38,7 @@ _FIXTURES = REPO_ROOT / "test" / "fixtures"
 # DuckDB logical types -> UC/Spark types for `uctl create` column specs.
 UC_TYPE_MAP = {
     "INTEGER": "INT",
-    "BIGINT": "BIGINT",
+    "BIGINT": "LONG",
     "SMALLINT": "SMALLINT",
     "TINYINT": "TINYINT",
     "VARCHAR": "STRING",
