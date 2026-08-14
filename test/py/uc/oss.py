@@ -38,7 +38,7 @@ _FIXTURES = REPO_ROOT / "test" / "fixtures"
 # DuckDB logical types -> UC/Spark types for `uctl create` column specs.
 UC_TYPE_MAP = {
     "INTEGER": "INT",
-    "BIGINT": "BIGINT",
+    "BIGINT": "LONG",
     "SMALLINT": "SMALLINT",
     "TINYINT": "TINYINT",
     "VARCHAR": "STRING",
@@ -95,7 +95,7 @@ class OssProvisioner:
         wd = getattr(self._config, "sqllogic_working_dir", None) or os.getcwd()
         return find_duckdb(self._config, wd)
 
-    def provision(self, specs, token, *, dry_run=False, params=None) -> OssBindings:
+    def provision(self, specs, token, *, dry_run=False, params=None, config=None) -> OssBindings:
         os.environ.setdefault("UC_TEST_CATALOG", server._CATALOG)  # "duck"
         catalog = os.environ["UC_TEST_CATALOG"]
         # A parametrized test's `schema` param picks the REPL context; else first rw

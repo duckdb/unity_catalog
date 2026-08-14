@@ -18,7 +18,7 @@ struct UCTableDataPathBindData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> UCTableDataPathBind(ClientContext &context, TableFunctionBindInput &input,
-                                                    vector<LogicalType> &return_types, vector<string> &names) {
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (!input.info) {
 		throw InternalException("table_data_path: missing function info");
 	}

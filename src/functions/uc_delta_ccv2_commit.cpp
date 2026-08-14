@@ -16,7 +16,7 @@ unique_ptr<GlobalTableFunctionState> UCDeltaCCV2CommitInit(ClientContext &contex
 }
 
 static unique_ptr<FunctionData> UCDeltaCCV2CommitBind(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types, vector<string> &names) {
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	throw InternalException(
 	    "__internal_delta_ccv2_commit_staged is only for internal use and should not be called directly");
 }

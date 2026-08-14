@@ -1,0 +1,94 @@
+# name: test/oss_local/catalog_managed_path_read.test
+# description: a path-based read of a catalog-managed table must fail rather than answer from storage. The kernel refuses to open one without the catalog's version, so a stale-but-plausible count is unreachable; this pins the refusal and the catalog read that replaces it.
+# group: [oss_local]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_SCHEMA
+
+require-env UC_TEST_TABLE
+
+require-env UC_CMT_STORAGE_LOCATION
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+statement ok
+USE duck.{UC_TEST_SCHEMA};
+
+# -----------------------------------------------------------------------------
+# The catalog path is the correct answer
+#
+
+statement ok
+INSERT INTO {UC_TEST_TABLE} VALUES (1, 'first'), (2, 'second');
+
+query I
+SELECT count(*) FROM {UC_TEST_TABLE};
+----
+2
+
+# -----------------------------------------------------------------------------
+# The path read refuses
+#
+# A stale count is impossible here: the kernel will not open a catalog-managed table without
+# the catalog's version, so the read errors instead. A wrong answer cannot occur because
+# there is no answer.
+#
+
+statement error
+SELECT count(*) FROM delta_scan('{UC_CMT_STORAGE_LOCATION}');
+----
+is a catalog-managed Delta table
+
+# The message must point at the fix, not just at the refusal
+statement error
+SELECT count(*) FROM delta_scan('{UC_CMT_STORAGE_LOCATION}');
+----
+TYPE unity_catalog
+
+# The other way to reach storage: a plain delta ATTACH. This succeeds -- the refusal fires
+# when the snapshot is opened, on first query, not at attach time.
+statement ok
+ATTACH '{UC_CMT_STORAGE_LOCATION}' AS bypass (TYPE delta);
+
+statement error
+SELECT count(*) FROM bypass;
+----
+is a catalog-managed Delta table
+
+statement ok
+DETACH bypass;
+
+# -----------------------------------------------------------------------------
+# The catalog remains the way in, and still answers
+#
+
+query II
+SELECT id, name FROM {UC_TEST_TABLE} ORDER BY id;
+----
+1	first
+2	second
+
+# `USE` above made duck the default database, which cannot be detached while selected
+statement ok
+USE memory;
+
+statement ok
+DETACH duck;

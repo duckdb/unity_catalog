@@ -39,7 +39,7 @@ public:
 class UnityCatalog : public Catalog {
 public:
 	explicit UnityCatalog(AttachedDatabase &db_p, const string &internal_name, AttachOptions &attach_options,
-	                      UCCredentials credentials, const string &default_schema,
+	                      UCCredentials credentials, const Identifier &default_schema,
 	                      string catalog_name = "unity_catalog");
 	~UnityCatalog() override;
 
@@ -85,7 +85,7 @@ public:
 	                                            unique_ptr<LogicalOperator> plan) override;
 
 	DatabaseSize GetDatabaseSize(ClientContext &context) override;
-	string GetDefaultSchema() const override;
+	Identifier GetDefaultSchema() const override;
 	void OnDetach(ClientContext &context) override;
 
 	//! Whether or not this is an in-memory UC database
@@ -120,7 +120,7 @@ private:
 
 private:
 	UCSchemaSet schemas;
-	string default_schema;
+	Identifier default_schema;
 
 	// Per-ATTACH scan-plan availability, guarded by scan_plan_lock.
 	enum class ScanPlanAvailability : uint8_t { UNKNOWN, AVAILABLE, UNAVAILABLE };
