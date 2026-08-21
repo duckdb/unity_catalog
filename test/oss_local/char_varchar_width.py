@@ -8,7 +8,7 @@ catalog plumbing, not to re-test the rule itself.
 The fixture is a committed Delta log rather than a TableSpec, and has to be: the bound lives in
 Delta field metadata (`__CHAR_VARCHAR_TYPE_STRING`) that only Spark writes. DuckDB has no
 fixed-length char type at all -- it parses CHAR(5) and discards the width -- so neither the duckdb
-middleman nor `uctl create` can express it. We copy `data/char_varchar_c1` into the table's
+middleman nor `uctl create` can express it. We copy `data/char_varchar` into the table's
 storage location (a copy, so the INSERTs below never mutate the committed tree) and register that
 location with UC.
 
@@ -28,15 +28,16 @@ from uc import uctl
 
 CATALOG = "duck"
 SCHEMA = "plain"  # EXTERNAL -> uctl gives the table a location we can stage into
-FIXTURE = pathlib.Path(__file__).resolve().parents[2] / "data" / "char_varchar_c1"
+FIXTURE = pathlib.Path(__file__).resolve().parents[2] / "data" / "char_varchar"
 
 
 @pytest.mark.oss_local
 def test_char_varchar_width(request, uc_server):
     # Unique per run: a container shared across sessions (--existing-service) would otherwise
     # collide on the table name and its storage location.
-    table = f"char_varchar_c1_{uuid.uuid4().hex[:8]}"
+    table = f"char_varchar_{uuid.uuid4().hex[:8]}"
 
+    # TODO: use uc.plain_table_location() instead; this predates it.
     # uctl gives a plain table `<data dir>/<catalog>/<schema>/<table>`; stage the log there so the
     # registration lands on it. The data dir is bind-mounted at the same path host and container.
     location = pathlib.Path(uc_server.data_dir) / CATALOG / SCHEMA / table

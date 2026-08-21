@@ -3,7 +3,8 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # Extension config.
 EXT_NAME=unity_catalog
 EXT_CONFIG=${PROJ_DIR}extension_config.cmake
-DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs;tpch;tpcds
+# json: bodies that read a _delta_log commit back as JSON.
+DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs;tpch;tpcds;json
 
 # Defaults default to the uv-built .venv (see `make venv`); override any on the CLI.
 UV      ?= uv
