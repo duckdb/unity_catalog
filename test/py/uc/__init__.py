@@ -35,3 +35,18 @@ def uctl(*args, check=True):
         out = (r.stdout + r.stderr).strip()
         raise ProvisionFailed(f"uctl {' '.join(map(str, args))} failed (exit {r.returncode}): {out}")
     return r
+
+
+def plain_table_location(uc_server, table, catalog="duck", schema="plain"):
+    """Where uctl points an EXTERNAL table: `<data dir>/<catalog>/<schema>/<table>`.
+
+    The data dir is bind-mounted at the same path host and container, so a test body reads back the
+    same tree the write went to. Drivers that stage a hand-written `_delta_log` need this before the
+    table exists, which is why it is computed rather than asked for.
+    """
+    if not uc_server.data_dir:
+        raise ProvisionFailed(
+            "uc_server exposes no data_dir, so an EXTERNAL table's storage location cannot be "
+            "staged into -- the container was attached rather than started here"
+        )
+    return Path(uc_server.data_dir) / catalog / schema / table
