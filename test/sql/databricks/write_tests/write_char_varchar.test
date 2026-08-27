@@ -1,0 +1,74 @@
+# name: test/sql/databricks/write_tests/write_char_varchar.test
+# description: an over-length write to a CHAR column is refused through the UC catalog path
+# group: [write_tests]
+
+#
+# char_varchar_write is created by
+# scripts/databricks_data_gen/custom_data_sources/char_varchar_write.sql. Spark records the
+# declared width; UC reports the column as a plain string, so enforcement can only come from the
+# Delta metadata. Assertions avoid row counts: the workspace is shared and the accepted inserts
+# accumulate across runs.
+#
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+require-env DATABRICKS_WRITE_TEST_CATALOG
+
+require-env DATABRICKS_WRITE_TEST_SCHEMA
+
+require-env RUN_WRITE_TESTS
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH '{DATABRICKS_WRITE_TEST_CATALOG}' AS databricks_catalog (TYPE unity_catalog, DEFAULT_SCHEMA '{DATABRICKS_WRITE_TEST_SCHEMA}');
+
+statement ok
+USE databricks_catalog;
+
+# At the limit: accepted
+statement ok
+INSERT INTO char_varchar_write VALUES (1, 'ABCDE');
+
+# Over the limit: rejected rather than truncated. Spark refuses the same write, and truncating
+# would silently alter the value.
+statement error
+INSERT INTO char_varchar_write VALUES (2, 'ABCDEFGH');
+----
+is declared as char(5)
+
+query I
+SELECT count(*) FROM char_varchar_write WHERE code = 'ABCDEFGH';
+----
+0
+
+# NULLs are unbounded
+statement ok
+INSERT INTO char_varchar_write VALUES (3, NULL);
+
+statement ok
+USE memory;
+
+statement ok
+DETACH databricks_catalog;
