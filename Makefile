@@ -5,7 +5,8 @@ EXT_NAME=unity_catalog
 EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 
 # Core extensions that we need for crucial testing
-DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs;tpch;tpcds
+# json: bodies that read a _delta_log commit back as JSON.
+DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs;tpch;tpcds;json
 
 #FULL_TEST_EXTENSION_DEPS=tpcds;tpch TODO: add
 
@@ -62,6 +63,10 @@ run_databricks_tests:
 write_tests_prepare: venv
 	${PYTHON_BIN} scripts/databricks_data_gen/generate_databricks_test_data.py copy ${DATABRICKS_WRITE_TEST_CATALOG}.source ${DATABRICKS_WRITE_TEST_CATALOG}.${DATABRICKS_WRITE_TEST_SCHEMA}
 	${PYTHON_BIN} scripts/databricks_data_gen/generate_databricks_test_data.py copy ${DATABRICKS_WRITE_TEST_CATALOG}.source ${DATABRICKS_WRITE_TEST_CATALOG}.${DATABRICKS_WRITE_TEST_SCHEMA} --catalog-managed
+	# Declared types the copy above cannot carry: it is a CTAS, and a CHAR width does not survive one.
+	for f in scripts/databricks_data_gen/write_data_sources/*.sql; do \
+		${PYTHON_BIN} scripts/databricks_data_gen/generate_databricks_test_data.py from-custom-sql $$f ${DATABRICKS_WRITE_TEST_CATALOG}.${DATABRICKS_WRITE_TEST_SCHEMA}; \
+	done
 
 write_tests_run:
 	$(BUILD_DIR)/test/unittest "test/sql/databricks/write_tests/*"

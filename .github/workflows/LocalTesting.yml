@@ -87,6 +87,11 @@ jobs:
       run: |
         sudo mv /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem
 
+    # The staged write targets assert on commit numbers, so the second pass needs them back at 0.
+    - name: Re-seed duck test catalog
+      run: |
+        UC_REPO="$GITHUB_WORKSPACE/unitycatalog" scripts/oss_uc_local/seed_tables
+
     - name: Test extension
       run: |
         make test_release
