@@ -1,0 +1,96 @@
+# name: test/sql/local_oss_unity_catalog/write_partition_values.test
+# description: a partitioned write through the UC catalog path keeps NULL distinct from the empty string
+# group: [local_oss_unity_catalog]
+
+#
+# A UC attach plans its insert down a different branch than a plain delta attach, so what
+# duckdb-delta's own tests prove about partition-value encoding does not carry over on its own.
+#
+# duck.external.partition_values_rw is staged by scripts/oss_uc_local/seed_tables from
+# data/partition_encoding: `partitionColumns` lives in the log's metaData, which neither
+# `uc table create` nor the duckdb middleman can express. Reseed between runs -- the assertions
+# name commits 2 and 3.
+#
+
+require parquet
+
+require httpfs
+
+require delta
+
+require unity_catalog
+
+require json
+
+require-env UC_TEST_SERVER_RUNNING
+
+require-env UC_TEST_DATA
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH 'duck' AS duck (TYPE unity_catalog, DEFAULT_SCHEMA 'external');
+
+# One INSERT per partition throughout: a single statement spanning multiple partitions currently
+# raises an internal error, which is a separate bug.
+
+statement ok
+INSERT INTO duck.external.partition_values_rw VALUES (1, 'ABC', 'p1');
+
+statement ok
+INSERT INTO duck.external.partition_values_rw VALUES (2, 'XYZ', NULL);
+
+statement ok
+INSERT INTO duck.external.partition_values_rw VALUES (3, 'EMPTY', '');
+
+query I
+SELECT id FROM duck.external.partition_values_rw WHERE p IS NULL;
+----
+2
+
+query I
+SELECT id FROM duck.external.partition_values_rw WHERE p = '';
+----
+3
+
+query II
+SELECT count(*), count(p) FROM duck.external.partition_values_rw;
+----
+3	2
+
+# -----------------------------------------------------------------------------
+# The commit is the contract
+#
+# Our reader and our writer share one convention, so the round trip above agrees with us whether or
+# not that convention is the one other engines follow.
+#
+# read_json_objects reads the raw commit line, because read_json types partitionValues as a struct
+# whose shape follows the data, and json_extract_string folds JSON null onto the same SQL NULL as an
+# absent key. The text form of json_extract keeps null, "" and absent apart.
+#
+# Null may be written as an absent key or a JSON null -- the kernel drops null-valued entries when it
+# materializes the map, so both mean null. Neither shape is pinned; only "" is wrong.
+#
+
+query T
+SELECT json_extract(json, '$.add.partitionValues.p')::VARCHAR
+FROM read_json_objects('{UC_TEST_DATA}/duck/external/partition_values_rw/_delta_log/00000000000000000003.json')
+WHERE json_exists(json, '$.add');
+----
+""
+
+query T
+SELECT json_extract(json, '$.add.partitionValues.p')::VARCHAR IS DISTINCT FROM '""'
+FROM read_json_objects('{UC_TEST_DATA}/duck/external/partition_values_rw/_delta_log/00000000000000000002.json')
+WHERE json_exists(json, '$.add');
+----
+true
+
+statement ok
+DETACH duck;

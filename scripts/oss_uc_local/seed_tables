@@ -106,6 +106,18 @@ uc schema get --full_name "duck.external" >/dev/null 2>&1 ||
 	uc schema create --catalog duck --name "external" \
 		--comment "plain (EXTERNAL) Delta tables"
 
+# stage_table TBL COLS FIXTURE -- an EXTERNAL table whose location is pre-seeded with FIXTURE's
+# committed Delta log. Column mapping and partitionColumns live in that log, and neither the UC CLI
+# nor duckdb can express them; UC takes the location as given, so the log is staged before the table
+# exists. Always rebuilt: the tests name commit numbers, so a run has to start from 0.
+stage_table() {
+	local tbl=$1 cols=$2 fixture=$3
+	drop_table external "$tbl"
+	cp -r "$EXT_REPO/data/$fixture" "$EXTERNAL_ROOT/$tbl"
+	uc table create --full_name "duck.external.$tbl" --columns "$cols" \
+		--storage_location "$EXTERNAL_ROOT/$tbl"
+}
+
 for schema in managed external; do
 	# _ro: default leaves it intact (create only if missing); --reset rebuilds it.
 	if [ "$RESET" = 1 ]; then
@@ -119,6 +131,10 @@ for schema in managed external; do
 	drop_table "$schema" "${TABLE}_rw"
 	create_table "$schema" "${TABLE}_rw"
 done
+
+# Write targets for the delta write-path regressions (column mapping, partition values).
+stage_table column_mapping_rw "id INT, code STRING" column_mapping/id_mode
+stage_table partition_values_rw "id INT, code STRING, p STRING" partition_encoding
 
 # Populate the _ro tables (CLI can't insert). WHERE NOT EXISTS covers both cases: a freshly
 # (re)created _ro is empty and gets the 5 rows; an existing _ro is left untouched. _rw left empty.
@@ -134,3 +150,4 @@ INSERT INTO duck.external.id_name_ro
 SQL
 
 echo "seed: duck.{managed,external}.${TABLE}_ro (5 rows$([ "$RESET" = 1 ] && echo ', reset')) + _rw (recreated empty) ready"
+echo "seed: duck.external.{column_mapping,partition_values}_rw staged from data/ (recreated) ready"

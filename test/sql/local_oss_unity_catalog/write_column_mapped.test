@@ -1,0 +1,76 @@
+# name: test/sql/local_oss_unity_catalog/write_column_mapped.test
+# description: a write through the UC catalog path addresses a column-mapped table physically
+# group: [local_oss_unity_catalog]
+
+#
+# A UC attach plans its insert down a different branch than a plain delta attach, so what
+# duckdb-delta's own tests prove about physical addressing does not carry over on its own.
+#
+# duck.external.column_mapping_rw is staged by scripts/oss_uc_local/seed_tables from
+# data/column_mapping/id_mode: the mapping lives in Delta field metadata that neither
+# `uc table create` nor the duckdb middleman can express. The fixture ships no data files, so
+# every parquet below is one this write produced. Reseed between runs -- the assertions name
+# commit 1.
+#
+
+require parquet
+
+require httpfs
+
+require delta
+
+require unity_catalog
+
+require json
+
+require-env UC_TEST_SERVER_RUNNING
+
+require-env UC_TEST_DATA
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH 'duck' AS duck (TYPE unity_catalog, DEFAULT_SCHEMA 'external');
+
+# -----------------------------------------------------------------------------
+# The row survives the round trip
+#
+
+statement ok
+INSERT INTO duck.external.column_mapping_rw VALUES (1, 'ABC');
+
+# The values, not the count: a column the reader cannot resolve comes back NULL, which leaves the
+# count right and the row unfindable.
+query II
+SELECT id, code FROM duck.external.column_mapping_rw ORDER BY id;
+----
+1	ABC
+
+# -----------------------------------------------------------------------------
+# The file is addressed physically
+#
+
+query II
+SELECT name, field_id FROM parquet_schema('{UC_TEST_DATA}/duck/external/column_mapping_rw/duckdb-*.parquet')
+WHERE name <> 'duckdb_schema' ORDER BY name;
+----
+col-aaaa	1
+col-bbbb	2
+
+# Asserting the logical name is *absent* is the half that matters: statistics keyed logically are
+# silently unusable to a reader resolving physically, and every other assertion here still passes.
+query II
+SELECT add.stats LIKE '%col-bbbb%', add.stats LIKE '%"code"%'
+FROM read_json('{UC_TEST_DATA}/duck/external/column_mapping_rw/_delta_log/00000000000000000001.json')
+WHERE add IS NOT NULL;
+----
+true	false
+
+statement ok
+DETACH duck;
