@@ -82,11 +82,11 @@ LogicalType UCUtils::TypeToLogicalType(ClientContext &context, const string &typ
 			auto nested_opens = 0;
 			for (;;) {
 				size_t next_sep = cur;
-				// find the location of the next ',' ignoring nested commas
+				// find the location of the next ',' ignoring nested commas and parentheses
 				while (type_text[next_sep] != ',' || nested_opens > 0) {
-					if (type_text[next_sep] == '<') {
+					if (type_text[next_sep] == '<' || type_text[next_sep] == '(') {
 						nested_opens++;
-					} else if (type_text[next_sep] == '>') {
+					} else if (type_text[next_sep] == '>' || type_text[next_sep] == ')') {
 						nested_opens--;
 					}
 					next_sep++;
@@ -115,11 +115,11 @@ LogicalType UCUtils::TypeToLogicalType(ClientContext &context, const string &typ
 			auto nested_opens = 0;
 			for (;;) {
 				size_t next_sep = cur;
-				// find the location of the next ',' ignoring nested commas
+				// find the location of the next ',' ignoring nested commas and parentheses
 				while (type_text[next_sep] != ',' || nested_opens > 0) {
-					if (type_text[next_sep] == '<') {
+					if (type_text[next_sep] == '<' || type_text[next_sep] == '(') {
 						nested_opens++;
-					} else if (type_text[next_sep] == '>') {
+					} else if (type_text[next_sep] == '>' || type_text[next_sep] == ')') {
 						nested_opens--;
 					}
 					next_sep++;

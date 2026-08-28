@@ -1,0 +1,82 @@
+# name: test/sql/unit/type_parsing.test
+# description: Test that UC type parsing handles decimal inside struct/map correctly
+# group: [unit]
+
+# This is an integration test that verifies DuckDB can handle the complex types
+# returned by the Unity Catalog API, particularly struct and map types containing
+# decimal(precision,scale) fields.
+#
+# The bug: the comma-splitting logic in struct/map type parsing only tracked
+# angle bracket nesting (<>), not parenthesis nesting (). This caused
+# "struct<price:decimal(38,18),name:string>" to be incorrectly split on the
+# comma inside decimal(38,18).
+
+require unity_catalog
+
+require delta
+
+# Verify DuckDB can create and query tables with the types that were previously
+# failing when read from Unity Catalog schema metadata.
+
+statement ok
+CREATE TABLE test_struct_decimal AS
+SELECT {'effective_price': 1.5::DECIMAL(38,9), 'unit': 'USD', 'list_price': 2.0::DECIMAL(38,9)} AS price;
+
+query I
+SELECT price.effective_price FROM test_struct_decimal;
+----
+1.500000000
+
+query I
+SELECT price.list_price FROM test_struct_decimal;
+----
+2.000000000
+
+statement ok
+CREATE TABLE test_array_struct_decimal AS
+SELECT [{'bid_price': 1.5::DECIMAL(38,18), 'clear_price': 2.0::DECIMAL(38,18), 'ad_id': 'x'}] AS products;
+
+query I
+SELECT products[1].bid_price FROM test_array_struct_decimal;
+----
+1.500000000000000000
+
+statement ok
+CREATE TABLE test_array_decimal AS
+SELECT [1.5::DECIMAL(38,18), 2.0::DECIMAL(38,18)] AS prices;
+
+query I
+SELECT prices[1] FROM test_array_decimal;
+----
+1.500000000000000000
+
+query I
+SELECT prices[2] FROM test_array_decimal;
+----
+2.000000000000000000
+
+statement ok
+CREATE TABLE test_map_decimal AS
+SELECT MAP {'item_a': 1.5::DECIMAL(38,18), 'item_b': 2.0::DECIMAL(38,18)} AS prices;
+
+query I
+SELECT prices['item_a'] FROM test_map_decimal;
+----
+1.500000000000000000
+
+query I
+SELECT prices['item_b'] FROM test_map_decimal;
+----
+2.000000000000000000
+
+statement ok
+DROP TABLE test_struct_decimal;
+
+statement ok
+DROP TABLE test_array_struct_decimal;
+
+statement ok
+DROP TABLE test_array_decimal;
+
+statement ok
+DROP TABLE test_map_decimal;
