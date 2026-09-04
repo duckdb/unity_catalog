@@ -436,6 +436,12 @@ void UCTableSet::LoadEntries(ClientContext &context, const lock_guard<mutex> &_e
 	for (auto &table : get_tables_result) {
 		D_ASSERT(schema.name == table.schema_name);
 		CreateTableInfo info;
+		// `position` is the API's ordering contract; the response's array order says nothing. Stable,
+		// so columns sharing a position (or carrying none) keep their listed order.
+		std::stable_sort(table.columns.begin(), table.columns.end(),
+		                 [](const UCAPIColumnDefinition &left, const UCAPIColumnDefinition &right) {
+			                 return left.position < right.position;
+		                 });
 		for (auto &col : table.columns) {
 			info.columns.AddColumn(CreateColumnDefinition(context, col));
 		}
