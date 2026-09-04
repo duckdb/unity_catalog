@@ -26,6 +26,8 @@ struct UCType {
 class UCUtils {
 public:
 	static LogicalType ToUCType(const LogicalType &input);
+	static LogicalType ColumnTypeFromDefinition(ClientContext &context, const UCAPIColumnDefinition &column);
+	static LogicalType TypeFromJson(ClientContext &context, const string &type_json);
 	static LogicalType TypeToLogicalType(ClientContext &context, const string &columnDefinition);
 	static string TypeToString(const LogicalType &input);
 };

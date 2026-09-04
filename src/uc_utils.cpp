@@ -1,5 +1,6 @@
 #include "uc_utils.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
+#include "yyjson.hpp"
 #include "storage/uc_schema_entry.hpp"
 #include "storage/uc_transaction.hpp"
 
@@ -26,6 +27,143 @@ string UCUtils::TypeToString(const LogicalType &input) {
 	default:
 		return input.ToString();
 	}
+}
+
+//===--------------------------------------------------------------------===//
+// Types from the catalog's Delta StructField JSON
+//===--------------------------------------------------------------------===//
+//
+// The same StructField JSON the Delta log carries, so nothing has to be split on separators that
+// also occur inside a type (`decimal(10,2)`, a struct's children).
+
+namespace {
+
+using duckdb_yyjson::yyjson_val;
+
+LogicalType TypeFromJsonValue(yyjson_val *type_val);
+
+const char *ObjectString(yyjson_val *obj, const char *field) {
+	auto *val = duckdb_yyjson::yyjson_obj_get(obj, field);
+	if (!val || !duckdb_yyjson::yyjson_is_str(val)) {
+		return nullptr;
+	}
+	return duckdb_yyjson::yyjson_get_str(val);
+}
+
+yyjson_val *ObjectField(yyjson_val *obj, const char *field) {
+	auto *val = duckdb_yyjson::yyjson_obj_get(obj, field);
+	if (!val) {
+		throw NotImplementedException("Unity Catalog type JSON is missing the '%s' field", field);
+	}
+	return val;
+}
+
+// Delta's primitive names, not the SQL text spellings TypeToLogicalType takes.
+LogicalType PrimitiveFromDeltaName(const string &name) {
+	if (name == "string") {
+		return LogicalType::VARCHAR;
+	} else if (name == "long") {
+		return LogicalType::BIGINT;
+	} else if (name == "integer") {
+		return LogicalType::INTEGER;
+	} else if (name == "short") {
+		return LogicalType::SMALLINT;
+	} else if (name == "byte") {
+		return LogicalType::TINYINT;
+	} else if (name == "float") {
+		return LogicalType::FLOAT;
+	} else if (name == "double") {
+		return LogicalType::DOUBLE;
+	} else if (name == "boolean") {
+		return LogicalType::BOOLEAN;
+	} else if (name == "binary") {
+		return LogicalType::BLOB;
+	} else if (name == "date") {
+		return LogicalType::DATE;
+	} else if (name == "timestamp") {
+		return LogicalType::TIMESTAMP_TZ;
+	} else if (name == "timestamp_ntz") {
+		return LogicalType::TIMESTAMP;
+	} else if (name == "void") {
+		return LogicalType::SQLNULL;
+	} else if (name.find("decimal(") == 0) {
+		auto spec_end = name.find(')');
+		auto sep = name.find(',');
+		if (spec_end == string::npos || sep == string::npos || sep > spec_end) {
+			throw NotImplementedException("Malformed decimal in Unity Catalog type JSON: '%s'", name);
+		}
+		auto precision_str = name.substr(8, sep - 8);
+		auto scale_str = name.substr(sep + 1, spec_end - sep - 1);
+		return LogicalType::DECIMAL(Cast::Operation<string_t, uint8_t>(precision_str),
+		                            Cast::Operation<string_t, uint8_t>(scale_str));
+	}
+	throw NotImplementedException("Unsupported type '%s' in Unity Catalog type JSON", name);
+}
+
+LogicalType StructFromJson(yyjson_val *struct_val) {
+	child_list_t<LogicalType> children;
+	size_t idx, max;
+	yyjson_val *field;
+	auto *fields = ObjectField(struct_val, "fields");
+	yyjson_arr_foreach(fields, idx, max, field) {
+		auto *name = ObjectString(field, "name");
+		if (!name) {
+			throw NotImplementedException("Unity Catalog type JSON has a struct field without a name");
+		}
+		children.emplace_back(name, TypeFromJsonValue(ObjectField(field, "type")));
+	}
+	if (children.empty()) {
+		throw NotImplementedException("Unity Catalog type JSON has a struct with no fields");
+	}
+	return LogicalType::STRUCT(std::move(children));
+}
+
+LogicalType TypeFromJsonValue(yyjson_val *type_val) {
+	if (duckdb_yyjson::yyjson_is_str(type_val)) {
+		return PrimitiveFromDeltaName(duckdb_yyjson::yyjson_get_str(type_val));
+	}
+	if (!duckdb_yyjson::yyjson_is_obj(type_val)) {
+		throw NotImplementedException("Unity Catalog type JSON is neither a type name nor a type object");
+	}
+	auto *kind = ObjectString(type_val, "type");
+	if (!kind) {
+		throw NotImplementedException("Unity Catalog type JSON object has no 'type'");
+	}
+	string kind_str = kind;
+	if (kind_str == "struct") {
+		return StructFromJson(type_val);
+	} else if (kind_str == "array") {
+		return LogicalType::LIST(TypeFromJsonValue(ObjectField(type_val, "elementType")));
+	} else if (kind_str == "map") {
+		return LogicalType::MAP(TypeFromJsonValue(ObjectField(type_val, "keyType")),
+		                        TypeFromJsonValue(ObjectField(type_val, "valueType")));
+	}
+	throw NotImplementedException("Unsupported nested type '%s' in Unity Catalog type JSON", kind_str);
+}
+
+} // namespace
+
+LogicalType UCUtils::TypeFromJson(ClientContext &context, const string &type_json) {
+	auto *doc = duckdb_yyjson::yyjson_read(type_json.c_str(), type_json.size(), 0);
+	if (!doc) {
+		throw NotImplementedException("Unity Catalog returned unreadable type JSON: '%s'", type_json);
+	}
+	try {
+		auto *root = duckdb_yyjson::yyjson_doc_get_root(doc);
+		auto result = TypeFromJsonValue(ObjectField(root, "type"));
+		duckdb_yyjson::yyjson_doc_free(doc);
+		return result;
+	} catch (...) {
+		duckdb_yyjson::yyjson_doc_free(doc);
+		throw;
+	}
+}
+
+LogicalType UCUtils::ColumnTypeFromDefinition(ClientContext &context, const UCAPIColumnDefinition &column) {
+	if (column.type_json.empty()) {
+		return UCUtils::TypeToLogicalType(context, column.type_text);
+	}
+	return UCUtils::TypeFromJson(context, column.type_json);
 }
 
 LogicalType UCUtils::TypeToLogicalType(ClientContext &context, const string &type_text) {

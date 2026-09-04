@@ -18,6 +18,8 @@ struct UCCredentials;
 struct UCAPIColumnDefinition {
 	string name;
 	string type_text;
+	//! The column's Delta StructField JSON. Optional in the API; preferred over type_text.
+	string type_json;
 	idx_t precision;
 	idx_t scale;
 	idx_t position;

@@ -456,6 +456,7 @@ static UCAPIColumnDefinition ParseColumnDefinition(duckdb_yyjson::yyjson_val *co
 
 	result.name = TryGetStrFromObject(column_def, "name");
 	result.type_text = TryGetStrFromObject(column_def, "type_text");
+	result.type_json = TryGetStrFromObject(column_def, "type_json", false);
 	// type_precision/type_scale are OPTIONAL in the UC /tables ColumnInfo: Delta-Spark-created
 	// tables report them as JSON null (only DECIMAL columns carry a real value), and a null/absent
 	// value must coerce to 0, not throw. Without fail_on_missing=false, ANY parse of the /tables
