@@ -109,7 +109,7 @@ static TableFunction GetParquetScanFunction(ClientContext &context) {
 	auto &sys_cat = Catalog::GetSystemCatalog(context);
 	auto &parquet_entry = sys_cat.GetEntry<TableFunctionCatalogEntry>(
 	    context, QualifiedName({Identifier(DEFAULT_SCHEMA)}, Identifier("parquet_scan")));
-	return parquet_entry.functions.GetFunctionByArguments(context, {LogicalType::VARCHAR});
+	return *parquet_entry.functions.GetFunctionByArguments(context, {LogicalType::VARCHAR});
 }
 
 // Fully materializing is fine here: delete files run KB to low MB.
