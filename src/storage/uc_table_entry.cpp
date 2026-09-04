@@ -105,8 +105,7 @@ static TableFunction BuildDeltaScan(ClientContext &context, TableInformation &ta
 	auto transaction = schema.GetCatalogTransaction(context);
 	auto table_entry = schema.LookupEntry(transaction, lookup_info);
 	if (!table_entry) {
-		throw CatalogException("Table '%s' is registered in Unity Catalog at '%s', but no Delta table was found there",
-		                       table.table_data->name, table.table_data->storage_location);
+		table.ThrowNoDeltaTable();
 	}
 	auto &delta_table = table_entry->Cast<TableCatalogEntry>();
 	return delta_table.GetScanFunction(context, bind_data, lookup_info);
