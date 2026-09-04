@@ -87,7 +87,10 @@ static void WarnOnSchemaDivergence(ClientContext &context, const CatalogEntry &r
 	}
 	auto &reported_table = reported.Cast<TableCatalogEntry>();
 	auto &resolved_table = resolved.Cast<TableCatalogEntry>();
-	UC_LOG_WARNING(context, "schema.Resolve %s: the catalog reports (%s) but the Delta log holds (%s); reading the log",
+	UC_LOG_WARNING(context,
+	               "schema.Resolve %s: the catalog reports (%s) but the Delta log holds (%s); reading the log. A "
+	               "commit the catalog has not caught up with resolves itself; repeated, the registration is stale "
+	               "or the table was written by an engine the catalog does not see",
 	               resolved_table.name.GetIdentifierName(), DescribeColumns(reported_table),
 	               DescribeColumns(resolved_table));
 }
@@ -104,8 +107,7 @@ unique_ptr<CatalogEntry> TableInformation::EntryFromDeltaLog(ClientContext &cont
 	auto transaction = delta_schema.GetCatalogTransaction(context);
 	auto table_entry = delta_schema.LookupEntry(transaction, lookup_info);
 	if (!table_entry) {
-		throw CatalogException("Table '%s' is registered in Unity Catalog at '%s', but no Delta table was found there",
-		                       table_data->name, table_data->storage_location);
+		ThrowNoDeltaTable();
 	}
 	auto create_info = table_entry->GetInfo();
 	auto &info = create_info->Cast<CreateTableInfo>();
@@ -144,13 +146,8 @@ optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, 
 			               table_data->name, e.what());
 			return reported.get();
 		}
-		{
-			// Once per attach: per transaction it would repeat every statement.
-			lock_guard<mutex> l(entry_lock);
-			if (reported && !divergence_reported) {
-				divergence_reported = true;
-				WarnOnSchemaDivergence(context, *reported, *entry);
-			}
+		if (reported) {
+			WarnOnSchemaDivergence(context, *reported, *entry);
 		}
 		return transaction.SetTableEntry(key, std::move(entry));
 	}
@@ -170,6 +167,11 @@ optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, 
 string TableInformation::EntryKey(optional_idx version) const {
 	auto key = schema.name.GetIdentifierName() + "." + table_data->name;
 	return version.IsValid() ? key + "@" + to_string(version.GetIndex()) : key;
+}
+
+void TableInformation::ThrowNoDeltaTable() const {
+	throw CatalogException("Table '%s' is registered in Unity Catalog at '%s', but no Delta table was found there",
+	                       table_data->name, table_data->storage_location);
 }
 
 optional_ptr<Catalog> TableInformation::GetInternalCatalog() {
