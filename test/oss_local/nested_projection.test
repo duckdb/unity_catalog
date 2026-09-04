@@ -1,0 +1,80 @@
+# name: test/oss_local/nested_projection.test
+# description: a nested projection through the UC catalog path returns what the files hold
+# group: [oss_local]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require json
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_SCHEMA
+
+require-env UC_TEST_TABLE
+
+require-env UC_TEST_TABLE_LOCATION
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+statement ok
+USE duck.{UC_TEST_SCHEMA};
+
+# -----------------------------------------------------------------------------
+# The catalog reports the shape the log carries
+#
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM {UC_TEST_TABLE});
+----
+id	INTEGER
+records	STRUCT("name" VARCHAR, "value" INTEGER)[]
+multi	MAP(VARCHAR, INTEGER[])
+
+# -----------------------------------------------------------------------------
+# Projecting through the catalog
+#
+# Values, not counts: a projection bound to the wrong child returns a row either way.
+#
+
+query IIIII
+SELECT id, records[1].name, records[2].value, multi['a'], multi['a'][2] FROM {UC_TEST_TABLE} ORDER BY id;
+----
+1	x	20	[1, 2, 3]	2
+2	p	40	[7]	NULL
+
+query III
+SELECT id, records::VARCHAR, multi::VARCHAR FROM {UC_TEST_TABLE} ORDER BY id;
+----
+1	[{'name': x, 'value': 10}, {'name': y, 'value': 20}]	{a=[1, 2, 3], b=[4, 5]}
+2	[{'name': p, 'value': 30}, {'name': q, 'value': 40}]	{a=[7], b=[8, 9]}
+
+# -----------------------------------------------------------------------------
+# The same files without the catalog
+#
+
+query IIIII
+SELECT id, records[1].name, records[2].value, multi['a'], multi['a'][2] FROM delta_scan('{UC_TEST_TABLE_LOCATION}') ORDER BY id;
+----
+1	x	20	[1, 2, 3]	2
+2	p	40	[7]	NULL
+
+query III
+SELECT id, records::VARCHAR, multi::VARCHAR FROM delta_scan('{UC_TEST_TABLE_LOCATION}') ORDER BY id;
+----
+1	[{'name': x, 'value': 10}, {'name': y, 'value': 20}]	{a=[1, 2, 3], b=[4, 5]}
+2	[{'name': p, 'value': 30}, {'name': q, 'value': 40}]	{a=[7], b=[8, 9]}
