@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/catalog/catalog_entry.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
 namespace duckdb {
@@ -33,7 +34,13 @@ public:
 		return access_mode;
 	}
 
+	//! Schemas resolved from the Delta log, keyed by qualified name: a statement binds against one of
+	//! these, so they outlive every statement that could still be reading them.
+	optional_ptr<CatalogEntry> GetTableEntry(const string &qualified_name);
+	CatalogEntry &SetTableEntry(const string &qualified_name, unique_ptr<CatalogEntry> entry);
+
 private:
+	unordered_map<string, unique_ptr<CatalogEntry>> table_entries;
 	//	UCConnection connection;
 	UCTransactionState transaction_state;
 	AccessMode access_mode;

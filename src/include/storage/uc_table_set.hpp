@@ -51,6 +51,8 @@ public:
 	void MarkDirty(const lock_guard<mutex> &_attach_lock);
 
 private:
+	unique_ptr<CatalogEntry> EntryFromDeltaLog(ClientContext &context, const EntryLookupInfo &lookup_info);
+	string EntryKey(optional_idx version = optional_idx()) const;
 	string AttachedCatalogName() const;
 	// Copies outstanding staged commits to _delta_log/ (file I/O, NOT under commit_state's lock).
 	// Takes the current watermark, returns the highest version successfully copied.
@@ -68,7 +70,7 @@ public:
 	shared_ptr<AttachedDatabase> internal_attached_database;
 	optional_ptr<Transaction> active_transaction;
 
-	//! Guards schema_versions and dummy
+	//! Guards divergence_reported and reported
 	mutex entry_lock;
 	//! Guards is_dirty and internal_attached_database (commit_state is now self-guarding above)
 	//
@@ -78,11 +80,14 @@ public:
 	// internal_attached_database in GetInternalCatalog/InternalCheckpoint). It MUST stay ONE protected
 	// struct to preserve InternalAttach's single critical section across all three.
 	mutex attach_lock;
-	//! Map of delta version to TableCatalogEntry for the table
-	unordered_map<idx_t, unique_ptr<CatalogEntry>> schema_versions;
-	//! Dummy entry created from the "List tables" API result, presumably the latest schema version
-	//! Only used for things like SHOW TABLES
-	unique_ptr<CatalogEntry> dummy;
+
+	// UC reported schema; from the "List tables" API result, used when the resolved schema is
+	// unavailable, e.g. SHOW TABLES; the schema resolved from the Delta log is authoritative, and
+	// is owned by the transaction that resolved it (UCTransaction::GetTableEntry)
+	unique_ptr<CatalogEntry> reported;
+
+	//! Whether the divergence between the two has been logged already.
+	bool divergence_reported = false;
 };
 
 class UCTableSet {

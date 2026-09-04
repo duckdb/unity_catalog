@@ -55,6 +55,20 @@ void UCTransaction::Rollback() {
 //	return connection.Query(query);
 //}
 
+optional_ptr<CatalogEntry> UCTransaction::GetTableEntry(const string &qualified_name) {
+	auto entry = table_entries.find(qualified_name);
+	if (entry == table_entries.end()) {
+		return nullptr;
+	}
+	return *entry->second;
+}
+
+CatalogEntry &UCTransaction::SetTableEntry(const string &qualified_name, unique_ptr<CatalogEntry> entry) {
+	auto &stored = table_entries[qualified_name];
+	stored = std::move(entry);
+	return *stored;
+}
+
 UCTransaction &UCTransaction::Get(ClientContext &context, Catalog &catalog) {
 	return Transaction::Get(context, catalog).Cast<UCTransaction>();
 }
