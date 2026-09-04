@@ -146,7 +146,7 @@ _CASES = {
 
 def _columns(spec):
     """A ColumnInfo list whose `position` always tells the truth, so a shuffled array order is the
-    reader's problem. Numeric type_precision/type_scale: null is its own bug (type_precision.py)."""
+    reader's problem. Numeric type_precision/type_scale: null is its own bug (test_type_precision.py)."""
     columns = []
     for position, (name, (type_text, type_json)) in enumerate(spec):
         column = {
