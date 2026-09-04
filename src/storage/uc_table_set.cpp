@@ -45,8 +45,8 @@ static ColumnDefinition CreateColumnDefinition(ClientContext &context, UCAPIColu
 	try {
 		return {Identifier(coldef.name), UCUtils::ColumnTypeFromDefinition(context, coldef)};
 	} catch (const std::exception &e) {
-		UC_LOG_WARNING(context, "schema.Describe column=%s type_text=%s unreadable: %s", coldef.name,
-		               coldef.type_text, e.what());
+		UC_LOG_WARNING(context, "schema.Describe column=%s type_text=%s unreadable: %s", coldef.name, coldef.type_text,
+		               e.what());
 		return {Identifier(coldef.name), LogicalType::VARCHAR};
 	}
 }
@@ -81,8 +81,7 @@ static bool SameColumns(const CatalogEntry &left, const CatalogEntry &right) {
 
 //! Nothing keeps the catalog's copy of the schema fresh: anyone holding the storage credentials can
 //! commit to the log without telling it.
-static void WarnOnSchemaDivergence(ClientContext &context, const CatalogEntry &reported,
-                                   const CatalogEntry &resolved) {
+static void WarnOnSchemaDivergence(ClientContext &context, const CatalogEntry &reported, const CatalogEntry &resolved) {
 	if (SameColumns(reported, resolved)) {
 		return;
 	}
