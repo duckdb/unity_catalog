@@ -49,6 +49,9 @@ public:
 	// is_dirty still lives under attach_lock; the guard-by-ref proves the caller holds it (idiom
 	// from InternalDetach). commit_state moved to a MutexProtected member below.
 	void MarkDirty(const lock_guard<mutex> &_attach_lock);
+	//! The lookup and the scan bind both resolve through the child catalog, and neither can say more
+	//! than that nothing was there.
+	void ThrowNoDeltaTable() const;
 
 private:
 	unique_ptr<CatalogEntry> EntryFromDeltaLog(ClientContext &context, const EntryLookupInfo &lookup_info);
@@ -70,7 +73,7 @@ public:
 	shared_ptr<AttachedDatabase> internal_attached_database;
 	optional_ptr<Transaction> active_transaction;
 
-	//! Guards divergence_reported and reported
+	//! Guards reported
 	mutex entry_lock;
 	//! Guards is_dirty and internal_attached_database (commit_state is now self-guarding above)
 	//
@@ -86,8 +89,6 @@ public:
 	// is owned by the transaction that resolved it (UCTransaction::GetTableEntry)
 	unique_ptr<CatalogEntry> reported;
 
-	//! Whether the divergence between the two has been logged already.
-	bool divergence_reported = false;
 };
 
 class UCTableSet {

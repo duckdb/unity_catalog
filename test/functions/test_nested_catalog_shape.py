@@ -243,14 +243,17 @@ def _run(mock, sql):
     return result, re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
 
 
-def test_divergence_is_reported_once():
+def test_divergence_is_reported():
+    """The warning fires on every lookup, so a catalog that has not caught up with a commit stops
+    warning by itself while a stale one keeps saying so. Only the count is unassertable here: the
+    CLI displays the first warning of a session and swallows the rest."""
     spec = [("id", _ID), ("rec", ("struct<second:string,first:string>", _struct(("second", _STR), ("first", _STR))))]
     with _MockUnityCatalog(_columns(spec), _PAIRS, "pairs") as mock:
         result, stdout = _run(mock, "SELECT id FROM unity.plain.pairs;SELECT id FROM unity.plain.pairs;")
 
     assert result.returncode == 0, stdout + result.stderr
     warnings = [line for line in stdout.splitlines() if "schema.Resolve" in line]
-    assert len(warnings) == 1, f"expected one divergence warning, got {len(warnings)}:\n{stdout}"
+    assert warnings, f"no divergence warning:\n{stdout}"
     assert 'STRUCT("second" VARCHAR, "first" VARCHAR)' in warnings[0], warnings[0]
     assert 'STRUCT("first" VARCHAR, "second" VARCHAR)' in warnings[0], warnings[0]
 
