@@ -306,8 +306,12 @@ static TableFunction MakeUCScanPlanTableFunction() {
 // ---------------------------------------------------------------------------
 
 UCTableEntry::UCTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, TableInformation &table, CreateTableInfo &info)
-    : TableCatalogEntry(catalog, schema, info), table(table) {
+    : TableCatalogEntry(catalog, schema, info), table(table), columns(info.columns.Copy()) {
 	this->internal = false;
+}
+
+const ColumnList &UCTableEntry::GetColumns() const {
+	return columns;
 }
 
 unique_ptr<BaseStatistics> UCTableEntry::GetStatistics(ClientContext &context, column_t column_id) {

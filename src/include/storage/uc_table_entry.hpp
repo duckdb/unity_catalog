@@ -48,6 +48,8 @@ public:
 
 	TableStorageInfo GetStorageInfo(ClientContext &context) override;
 
+	const ColumnList &GetColumns() const override;
+
 	virtual_column_map_t GetVirtualColumns() const override;
 	vector<column_t> GetRowIdColumns() const override;
 
@@ -56,6 +58,10 @@ public:
 
 public:
 	TableInformation &table;
+
+	//! Copied rather than moved out of the CreateTableInfo: the caller owns it and may instantiate
+	//! more than one entry from it.
+	ColumnList columns;
 };
 
 } // namespace duckdb
