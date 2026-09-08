@@ -18,5 +18,8 @@ READ_CATALOG = os.environ.get("DATABRICKS_READ_CATALOG", "duckdb_testing")
 # UC_TEST_CATALOG when the launching shell didn't set one.
 WRITE_CATALOG = os.environ.get("DATABRICKS_WRITE_CATALOG", "duckdb_write_testing")
 
-# S3 bucket backing `external` (non-managed) tables' LOCATION.
-S3_BUCKET = os.environ.get("DATABRICKS_S3_BUCKET", "duckdb-databricks-testing-ccv2")
+# S3 bucket backing `external` (non-managed) tables' LOCATION. The sibling
+# ducklabs-uc-testing-ro bucket is not used yet: a def creates and seeds the table it reads,
+# so read fixtures need a writable root too, and read/write share this one until the catalogs
+# themselves split.
+S3_BUCKET = os.environ.get("DATABRICKS_S3_BUCKET", "ducklabs-uc-testing-rw")

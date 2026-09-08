@@ -394,25 +394,34 @@ class DatabricksProvisioner(_BaseProvisioner):
         with step(f"provision {target} from {os.path.basename(def_path)}"):
             run_sql_file(def_path, table=target, location=location)
             if os.path.isfile(insert_path):
-                self._duckdb_insert(insert_path)
+                self._duckdb_insert(insert_path, target)
 
     def _s3_location(self, target):
-        """The S3 LOCATION for an `external` target: s3://<bucket>/<cat>/<schema>/<table>."""
+        """The S3 LOCATION for an `external` target:
+        s3://<bucket>/external/<cat>/<schema>/<table>.
+
+        Only external tables get a LOCATION from us; the bucket's `managed/` half is the
+        catalog's own managed root, which UC fills in server-side.
+        """
         cat, schema, table = _split_source(target)
-        return f"s3://{config.S3_BUCKET}/{cat}/{schema}/{table}"
+        return f"s3://{config.S3_BUCKET}/external/{cat}/{schema}/{table}"
 
     def _duckdb_shell(self):
         """The duckdb shell from the same build the driver resolves the unittest binary from."""
         wd = getattr(self._config, "sqllogic_working_dir", None) or os.getcwd()
         return find_duckdb(self._config, wd)
 
-    def _duckdb_insert(self, path):
+    def _duckdb_insert(self, path, target):
         """Run a companion .insert.sql through the build's duckdb (the UC write path). Its
-        ${DATABRICKS_*} creds are expanded from the env (present on the run path)."""
+        ${DATABRICKS_*} creds are expanded from the env (present on the run path); it addresses
+        its table through the same `{table_name}` substitution the def file gets, plus the
+        `{catalog}`/`{schema}` halves the ATTACH needs."""
+        cat, schema, _ = _split_source(target)
         wd = getattr(self._config, "sqllogic_working_dir", None) or os.getcwd()
         duckdb_bin = find_duckdb(self._config, wd)
         with open(path) as f:
             sql = os.path.expandvars(f.read())
+        sql = sql.replace("{table_name}", target).replace("{catalog}", cat).replace("{schema}", schema)
         proc = subprocess.run([duckdb_bin, "-unsigned", "-c", sql], capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError(f"DuckDB UC insert failed ({os.path.basename(path)}):\n{proc.stderr.strip()}")

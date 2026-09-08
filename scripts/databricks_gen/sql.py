@@ -174,6 +174,9 @@ def run_sql_file(path, *, table, location=None, dry_run=False):
     uses it -- required then), splits quote-aware on `;`, and executes each statement.
     Returns the statement list (executed unless dry_run). A `location` passed for a file that
     has no `{location}` is ignored (lenient, for programmatic callers).
+
+    The destination schema is created first: a def addresses its table by fqn, so pointing the
+    suite at another catalog otherwise fails on the first statement with a missing schema.
     """
     with open(path) as f:
         text = f.read()
@@ -184,6 +187,8 @@ def run_sql_file(path, *, table, location=None, dry_run=False):
             raise ValueError(f"{path} uses {{location}} but no location was provided")
         text = text.replace("{location}", location)
     statements = split_statements(text)
+    if "." in table:
+        statements.insert(0, f"CREATE SCHEMA IF NOT EXISTS {table.rsplit('.', 1)[0]}")
     if not dry_run:
         for stmt in statements:
             execute(stmt)
