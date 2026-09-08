@@ -40,6 +40,8 @@ public:
 	UCTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, TableInformation &table, CreateTableInfo &info);
 
 public:
+	const ColumnList &GetColumns() const override;
+
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override;
 
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
@@ -48,20 +50,17 @@ public:
 
 	TableStorageInfo GetStorageInfo(ClientContext &context) override;
 
-	const ColumnList &GetColumns() const override;
-
 	virtual_column_map_t GetVirtualColumns() const override;
 	vector<column_t> GetRowIdColumns() const override;
 
 	void BindUpdateConstraints(Binder &binder, LogicalGet &get, LogicalProjection &proj, LogicalUpdate &update,
 	                           ClientContext &context) override;
 
+protected:
+	ColumnList columns;
+
 public:
 	TableInformation &table;
-
-	//! Copied rather than moved out of the CreateTableInfo: the caller owns it and may instantiate
-	//! more than one entry from it.
-	ColumnList columns;
 };
 
 } // namespace duckdb

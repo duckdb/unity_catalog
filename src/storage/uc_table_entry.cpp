@@ -306,7 +306,7 @@ static TableFunction MakeUCScanPlanTableFunction() {
 // ---------------------------------------------------------------------------
 
 UCTableEntry::UCTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, TableInformation &table, CreateTableInfo &info)
-    : TableCatalogEntry(catalog, schema, info), table(table), columns(info.columns.Copy()) {
+    : TableCatalogEntry(catalog, schema, info), columns(std::move(info.columns)), table(table) {
 	this->internal = false;
 }
 
