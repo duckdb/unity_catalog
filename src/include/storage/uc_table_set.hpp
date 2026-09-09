@@ -11,6 +11,7 @@
 #include "storage/uc_table_entry.hpp"
 #include "uc_mutex_protected.hpp"
 #include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/pair.hpp"
 
 namespace duckdb {
 struct CreateTableInfo;
@@ -49,11 +50,12 @@ public:
 	// is_dirty still lives under attach_lock; the guard-by-ref proves the caller holds it (idiom
 	// from InternalDetach). commit_state moved to a MutexProtected member below.
 	void MarkDirty(const lock_guard<mutex> &_attach_lock);
-	//! The lookup and the scan bind both resolve through the child catalog, and neither can say more
-	//! than that nothing was there.
+
+	void ThrowIfUnreadableColumns() const;
 	void ThrowNoDeltaTable() const;
 
 private:
+	//! location holds no Delta table -> null; other failures throw
 	unique_ptr<CatalogEntry> EntryFromDeltaLog(ClientContext &context, const EntryLookupInfo &lookup_info);
 	string EntryKey(optional_idx version = optional_idx()) const;
 	string AttachedCatalogName() const;
@@ -73,8 +75,6 @@ public:
 	shared_ptr<AttachedDatabase> internal_attached_database;
 	optional_ptr<Transaction> active_transaction;
 
-	//! Guards reported
-	mutex entry_lock;
 	//! Guards is_dirty and internal_attached_database (commit_state is now self-guarding above)
 	//
 	// TODO(locks): widen the MutexProtected pattern used by commit_state to also cover is_dirty and
@@ -85,10 +85,14 @@ public:
 	mutex attach_lock;
 
 	// UC reported schema; from the "List tables" API result, used when the resolved schema is
-	// unavailable, e.g. SHOW TABLES; the schema resolved from the Delta log is authoritative, and
-	// is owned by the transaction that resolved it (UCTransaction::GetTableEntry)
+	// unavailable, e.g. SHOW TABLES; resolved schema from the Delta log is authoritative, and
+	// owned by the UCTransaction.
+	//
+	// Written once before this TableInformation is reachable, and never reassigned: safe to read.
 	unique_ptr<CatalogEntry> reported;
 
+	// Columns of `reported` marked UNKNOWN since we cannot handle them; used for error text.
+	vector<pair<string, string>> unreadable_columns;
 };
 
 class UCTableSet {

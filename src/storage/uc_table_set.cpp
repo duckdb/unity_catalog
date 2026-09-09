@@ -39,15 +39,18 @@ static idx_t ParseDeltaVersionFromAtClause(const BoundAtClause &at_clause) {
 UCTableSet::UCTableSet(UCSchemaEntry &schema) : catalog(schema.ParentCatalog().Cast<UnityCatalog>()), schema(schema) {
 }
 
-static ColumnDefinition CreateColumnDefinition(ClientContext &context, UCAPIColumnDefinition &coldef) {
-	// Reads resolve their schema from the log, so an unreadable description costs an accurate
-	// DESCRIBE and nothing else.
+// A type we cannot parse becomes UNKNOWN, as duckdb-iceberg does for a table it has not loaded: the
+// listing keeps its row, and a read cannot bind the column to a guess. The caller records which
+// columns these were, so the refusal can name them.
+static ColumnDefinition CreateColumnDefinition(ClientContext &context, UCAPIColumnDefinition &coldef,
+                                               vector<pair<string, string>> &unreadable) {
 	try {
-		return {Identifier(coldef.name), UCUtils::ColumnTypeFromDefinition(context, coldef)};
+		return {Identifier(coldef.name), UCUtils::ColumnTypeFromDefinition(coldef)};
 	} catch (const std::exception &e) {
 		UC_LOG_WARNING(context, "schema.Describe column=%s type_text=%s unreadable: %s", coldef.name, coldef.type_text,
 		               e.what());
-		return {Identifier(coldef.name), LogicalType::VARCHAR};
+		unreadable.emplace_back(coldef.name, coldef.type_text);
+		return {Identifier(coldef.name), LogicalType::UNKNOWN};
 	}
 }
 
@@ -79,8 +82,6 @@ static bool SameColumns(const CatalogEntry &left, const CatalogEntry &right) {
 	return true;
 }
 
-//! Nothing keeps the catalog's copy of the schema fresh: anyone holding the storage credentials can
-//! commit to the log without telling it.
 static void WarnOnSchemaDivergence(ClientContext &context, const CatalogEntry &reported, const CatalogEntry &resolved) {
 	if (SameColumns(reported, resolved)) {
 		return;
@@ -95,8 +96,6 @@ static void WarnOnSchemaDivergence(ClientContext &context, const CatalogEntry &r
 	               DescribeColumns(resolved_table));
 }
 
-//! The child catalog holds one table under its own default schema, so asking it for this table's UC
-//! schema name gets an answer it cannot give.
 unique_ptr<CatalogEntry> TableInformation::EntryFromDeltaLog(ClientContext &context,
                                                              const EntryLookupInfo &lookup_info) {
 	// RefreshCredentials first: InternalAttach may flush pending backfills, thus needing the credentials.
@@ -107,7 +106,7 @@ unique_ptr<CatalogEntry> TableInformation::EntryFromDeltaLog(ClientContext &cont
 	auto transaction = delta_schema.GetCatalogTransaction(context);
 	auto table_entry = delta_schema.LookupEntry(transaction, lookup_info);
 	if (!table_entry) {
-		ThrowNoDeltaTable();
+		return nullptr;
 	}
 	auto create_info = table_entry->GetInfo();
 	auto &info = create_info->Cast<CreateTableInfo>();
@@ -118,8 +117,9 @@ unique_ptr<CatalogEntry> TableInformation::EntryFromDeltaLog(ClientContext &cont
 optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, const EntryLookupInfo &lookup_info) {
 	auto at = lookup_info.GetAtClause();
 	if (!at) {
-		// Neither path has a log to resolve against. Mirrors UCTableEntry::GetScanFunction.
+		// Neither ScanPlan/non-delta has a log to resolve against, return reported a la UCTableEntry::GetScanFunction.
 		if (reported && (catalog.ShouldTryScanPlan() || table_data->data_source_format != "DELTA")) {
+			ThrowIfUnreadableColumns();
 			return reported.get();
 		}
 
@@ -133,17 +133,16 @@ optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, 
 			return bound;
 		}
 
-		unique_ptr<CatalogEntry> entry;
-		try {
-			entry = EntryFromDeltaLog(context, lookup_info);
-		} catch (const std::exception &e) {
-			// Registered but never written to: nothing to resolve against yet, and a genuine read
-			// failure still surfaces at scan time.
+		// Registered but never written to: nothing to resolve against yet. A credential or transport
+		// failure is a different thing and must not quietly downgrade the schema, so it propagates.
+		auto entry = EntryFromDeltaLog(context, lookup_info);
+		if (!entry) {
 			if (!reported) {
-				throw;
+				ThrowNoDeltaTable();
 			}
-			UC_LOG_WARNING(context, "schema.Resolve %s: no schema in the Delta log (%s); using the catalog's report",
-			               table_data->name, e.what());
+			ThrowIfUnreadableColumns();
+			UC_LOG_WARNING(context, "schema.Resolve %s: no schema in the Delta log; using the catalog's report",
+			               table_data->name);
 			return reported.get();
 		}
 		if (reported) {
@@ -153,20 +152,35 @@ optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, 
 	}
 
 	auto version = ParseDeltaVersionFromAtClause(*at);
-
 	auto &transaction = UCTransaction::Get(context, catalog);
 	auto key = EntryKey(version);
 	auto bound = transaction.GetTableEntry(key);
 	if (bound) {
 		return bound;
 	}
-	return transaction.SetTableEntry(key, EntryFromDeltaLog(context, lookup_info));
+	auto entry = EntryFromDeltaLog(context, lookup_info);
+	if (!entry) {
+		ThrowNoDeltaTable();
+	}
+	return transaction.SetTableEntry(key, std::move(entry));
 };
 
 //! Qualified name, plus the version where the query named one; unversioned means latest.
 string TableInformation::EntryKey(optional_idx version) const {
 	auto key = schema.name.GetIdentifierName() + "." + table_data->name;
 	return version.IsValid() ? key + "@" + to_string(version.GetIndex()) : key;
+}
+
+// `reported` describes a table, and tracks unrepresentables; this throws at bind with nice error
+void TableInformation::ThrowIfUnreadableColumns() const {
+	if (unreadable_columns.empty()) {
+		return;
+	}
+	auto &column = unreadable_columns.front();
+	throw NotImplementedException("Table '%s' has %llu column(s) with a type this build cannot read; the first is "
+	                              "'%s', which Unity Catalog reports as '%s'",
+	                              table_data->name, static_cast<uint64_t>(unreadable_columns.size()), column.first,
+	                              column.second);
 }
 
 void TableInformation::ThrowNoDeltaTable() const {
@@ -437,6 +451,7 @@ void UCTableSet::LoadEntries(ClientContext &context, const lock_guard<mutex> &_e
 	for (auto &table : get_tables_result) {
 		D_ASSERT(schema.name == table.schema_name);
 		CreateTableInfo info;
+		vector<pair<string, string>> unreadable;
 		// `position` is the API's ordering contract; the response's array order says nothing. Stable,
 		// so columns sharing a position (or carrying none) keep their listed order.
 		std::stable_sort(table.columns.begin(), table.columns.end(),
@@ -444,7 +459,7 @@ void UCTableSet::LoadEntries(ClientContext &context, const lock_guard<mutex> &_e
 			                 return left.position < right.position;
 		                 });
 		for (auto &col : table.columns) {
-			info.columns.AddColumn(CreateColumnDefinition(context, col));
+			info.columns.AddColumn(CreateColumnDefinition(context, col, unreadable));
 		}
 
 		lock_guard<mutex> l(entry_lock);
@@ -465,6 +480,7 @@ void UCTableSet::LoadEntries(ClientContext &context, const lock_guard<mutex> &_e
 
 		table_info.table_data = make_uniq<UCAPITable>(table);
 		table_info.reported = std::move(table_entry);
+		table_info.unreadable_columns = std::move(unreadable);
 	}
 }
 

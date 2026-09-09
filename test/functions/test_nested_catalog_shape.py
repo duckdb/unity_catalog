@@ -283,6 +283,24 @@ def test_table_without_a_log_falls_back_to_the_report(tmp_path):
     assert "Assertion" not in combined, combined
 
 
+def test_unreadable_column_without_a_log_is_refused(tmp_path):
+    """The report stands in only where it can be trusted. A column whose type neither the JSON nor
+    the text parser could read binds to nothing, so the read is refused naming the column and the
+    type UC gave it -- not with the binder's "parameter types could not be resolved"."""
+    spec = [("id", _ID), ("rec", ("struct<first: string, second: string>", None))]
+    with _MockUnityCatalog(_columns(spec), tmp_path, "pairs") as mock:
+        listed, listed_out = _run(mock, "SELECT column_names FROM (SHOW ALL TABLES) WHERE name = 'pairs';")
+        read, read_out = _run(mock, "SELECT id FROM unity.plain.pairs;")
+
+    assert listed.returncode == 0, listed_out + listed.stderr
+    assert "[id, rec]" in listed_out, listed_out
+
+    combined = read_out + read.stderr
+    assert read.returncode != 0, combined
+    assert "rec" in read.stderr and "struct<first: string, second: string>" in read.stderr, combined
+    assert "parameter" not in read.stderr.lower(), combined
+
+
 @pytest.mark.parametrize("case", sorted(_CASES))
 def test_nested_catalog_shape(case):
     fixture, table, spec, query, expected = _CASES[case]
