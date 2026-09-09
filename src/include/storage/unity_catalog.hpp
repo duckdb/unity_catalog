@@ -85,7 +85,7 @@ public:
 	                                            unique_ptr<LogicalOperator> plan) override;
 
 	DatabaseSize GetDatabaseSize(ClientContext &context) override;
-	Identifier GetDefaultSchema() const override;
+	optional<Identifier> GetDefaultSchema() const override;
 	void OnDetach(ClientContext &context) override;
 
 	//! Whether or not this is an in-memory UC database

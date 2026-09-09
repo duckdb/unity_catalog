@@ -54,7 +54,7 @@ optional_ptr<SchemaCatalogEntry> UnityCatalog::LookupSchema(CatalogTransaction t
 			throw InvalidInputException(
 			    "Default schema for catalog '%s' not found. This means auto-detection of default schema failed. Please "
 			    "specify a DEFAULT_SCHEMA on ATTACH: `ATTACH '..' (TYPE unity_catalog, DEFAULT_SCHEMA 'my_schema')`",
-			    GetName());
+			    GetName().GetIdentifierName());
 		}
 		return GetSchema(transaction, default_schema, if_not_found);
 	}
@@ -73,7 +73,12 @@ string UnityCatalog::GetDBPath() {
 	return internal_name;
 }
 
-Identifier UnityCatalog::GetDefaultSchema() const {
+optional<Identifier> UnityCatalog::GetDefaultSchema() const {
+	// Auto-detection can leave this unset, and core reads an empty Identifier as "unspecified"
+	// rather than as a schema named "".
+	if (default_schema.empty()) {
+		return {};
+	}
 	return default_schema;
 }
 

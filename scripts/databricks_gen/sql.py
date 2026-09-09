@@ -127,6 +127,15 @@ def build_create_table(fqn, columns=None, *, as_select=None, properties=None, lo
 # --------------------------------------------------------------------------- #
 
 
+def external_location(bucket, catalog, schema, table):
+    """The LOCATION an `external` table gets: s3://<bucket>/external/<catalog>/<schema>/<table>.
+
+    The bucket's other half, `managed/`, is the catalog's own managed root and is configured in
+    UC rather than emitted here.
+    """
+    return f"s3://{bucket}/external/{catalog}/{schema}/{table}"
+
+
 def create_schema(fqn):
     execute(f"CREATE SCHEMA IF NOT EXISTS {fqn}")
 
@@ -166,6 +175,14 @@ def select(sql):
 # --------------------------------------------------------------------------- #
 
 
+def split_fqn(fqn):
+    """catalog.schema.table -> (catalog, schema, table); anything else is a caller error."""
+    parts = fqn.split(".")
+    if len(parts) != 3:
+        raise ValueError(f"expected a catalog.schema.table name, got {fqn!r}")
+    return parts[0], parts[1], parts[2]
+
+
 def run_sql_file(path, *, table, location=None, dry_run=False):
     """Run a raw Databricks SQL def file (Delta artifacts: evolution / column mapping /
     catalog-managed) verbatim -- for tables that aren't a portable fixture shape.
@@ -174,6 +191,9 @@ def run_sql_file(path, *, table, location=None, dry_run=False):
     uses it -- required then), splits quote-aware on `;`, and executes each statement.
     Returns the statement list (executed unless dry_run). A `location` passed for a file that
     has no `{location}` is ignored (lenient, for programmatic callers).
+
+    The destination schema is created first: a def addresses its table by fqn, so pointing the
+    suite at another catalog otherwise fails on the first statement with a missing schema.
     """
     with open(path) as f:
         text = f.read()
@@ -184,6 +204,8 @@ def run_sql_file(path, *, table, location=None, dry_run=False):
             raise ValueError(f"{path} uses {{location}} but no location was provided")
         text = text.replace("{location}", location)
     statements = split_statements(text)
+    catalog, schema, _ = split_fqn(table)
+    statements.insert(0, f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
     if not dry_run:
         for stmt in statements:
             execute(stmt)

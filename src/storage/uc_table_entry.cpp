@@ -220,7 +220,8 @@ static unique_ptr<GlobalTableFunctionState> UCScanPlanInitGlobal(ClientContext &
 	auto &sys_cat = Catalog::GetSystemCatalog(context);
 	auto &parquet_entry = sys_cat.GetEntry<TableFunctionCatalogEntry>(
 	    context, QualifiedName({Identifier(DEFAULT_SCHEMA)}, Identifier("parquet_scan")));
-	auto parquet_fn = parquet_entry.functions.GetFunctionByArguments(context, {LogicalType::VARCHAR});
+	// copied out of the set: the bind mutates the function and needs a mutable one
+	auto parquet_fn = *parquet_entry.functions.GetFunctionByArguments(context, {LogicalType::VARCHAR});
 	parquet_fn.get_multi_file_reader = UCMultiFileReaderFactory;
 
 	string scan_path = bd.storage_location.empty() ? "uc://scan_plan" : bd.storage_location;
@@ -305,8 +306,12 @@ static TableFunction MakeUCScanPlanTableFunction() {
 // ---------------------------------------------------------------------------
 
 UCTableEntry::UCTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, TableInformation &table, CreateTableInfo &info)
-    : TableCatalogEntry(catalog, schema, info), table(table) {
+    : TableCatalogEntry(catalog, schema, info), columns(std::move(info.columns)), table(table) {
 	this->internal = false;
+}
+
+const ColumnList &UCTableEntry::GetColumns() const {
+	return columns;
 }
 
 unique_ptr<BaseStatistics> UCTableEntry::GetStatistics(ClientContext &context, column_t column_id) {
