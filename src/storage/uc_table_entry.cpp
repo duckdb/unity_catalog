@@ -43,7 +43,9 @@ TableFunction UCTableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
 	auto &schema = delta_catalog.GetSchema(context, DEFAULT_SCHEMA);
 	auto transaction = schema.GetCatalogTransaction(context);
 	auto table_entry = schema.LookupEntry(transaction, lookup_info);
-	D_ASSERT(table_entry);
+	if (!table_entry) {
+		table.ThrowNoDeltaTable();
+	}
 
 	auto &delta_table = table_entry->Cast<TableCatalogEntry>();
 	return delta_table.GetScanFunction(context, bind_data, lookup_info);

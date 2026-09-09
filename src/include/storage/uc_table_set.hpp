@@ -11,6 +11,7 @@
 #include "storage/uc_table_entry.hpp"
 #include "uc_mutex_protected.hpp"
 #include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/pair.hpp"
 
 namespace duckdb {
 struct CreateTableInfo;
@@ -50,7 +51,13 @@ public:
 	// from InternalDetach). commit_state moved to a MutexProtected member below.
 	void MarkDirty(const lock_guard<mutex> &_attach_lock);
 
+	void ThrowIfUnreadableColumns() const;
+	void ThrowNoDeltaTable() const;
+
 private:
+	//! location holds no Delta table -> null; other failures throw
+	unique_ptr<CatalogEntry> EntryFromDeltaLog(ClientContext &context, const EntryLookupInfo &lookup_info);
+	string EntryKey(optional_idx version = optional_idx()) const;
 	string AttachedCatalogName() const;
 	// Copies outstanding staged commits to _delta_log/ (file I/O, NOT under commit_state's lock).
 	// Takes the current watermark, returns the highest version successfully copied.
@@ -68,8 +75,6 @@ public:
 	shared_ptr<AttachedDatabase> internal_attached_database;
 	optional_ptr<Transaction> active_transaction;
 
-	//! Guards schema_versions and dummy
-	mutex entry_lock;
 	//! Guards is_dirty and internal_attached_database (commit_state is now self-guarding above)
 	//
 	// TODO(locks): widen the MutexProtected pattern used by commit_state to also cover is_dirty and
@@ -78,11 +83,16 @@ public:
 	// internal_attached_database in GetInternalCatalog/InternalCheckpoint). It MUST stay ONE protected
 	// struct to preserve InternalAttach's single critical section across all three.
 	mutex attach_lock;
-	//! Map of delta version to TableCatalogEntry for the table
-	unordered_map<idx_t, unique_ptr<CatalogEntry>> schema_versions;
-	//! Dummy entry created from the "List tables" API result, presumably the latest schema version
-	//! Only used for things like SHOW TABLES
-	unique_ptr<CatalogEntry> dummy;
+
+	// UC reported schema; from the "List tables" API result, used when the resolved schema is
+	// unavailable, e.g. SHOW TABLES; resolved schema from the Delta log is authoritative, and
+	// owned by the UCTransaction.
+	//
+	// Written once before this TableInformation is reachable, and never reassigned: safe to read.
+	unique_ptr<CatalogEntry> reported;
+
+	// Columns of `reported` marked UNKNOWN since we cannot handle them; used for error text.
+	vector<pair<string, string>> unreadable_columns;
 };
 
 class UCTableSet {
