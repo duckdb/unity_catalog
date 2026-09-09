@@ -17,6 +17,7 @@
 #include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/parser/constraints/list.hpp"
 #include "storage/uc_schema_entry.hpp"
+#include "storage/uc_transaction.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
@@ -38,49 +39,154 @@ static idx_t ParseDeltaVersionFromAtClause(const BoundAtClause &at_clause) {
 UCTableSet::UCTableSet(UCSchemaEntry &schema) : catalog(schema.ParentCatalog().Cast<UnityCatalog>()), schema(schema) {
 }
 
-static ColumnDefinition CreateColumnDefinition(ClientContext &context, UCAPIColumnDefinition &coldef) {
-	return {Identifier(coldef.name), UCUtils::TypeToLogicalType(context, coldef.type_text)};
+// A type we cannot parse becomes UNKNOWN, as duckdb-iceberg does for a table it has not loaded: the
+// listing keeps its row, and a read cannot bind the column to a guess. The caller records which
+// columns these were, so the refusal can name them.
+static ColumnDefinition CreateColumnDefinition(ClientContext &context, UCAPIColumnDefinition &coldef,
+                                               vector<pair<string, string>> &unreadable) {
+	try {
+		return {Identifier(coldef.name), UCUtils::ColumnTypeFromDefinition(coldef)};
+	} catch (const std::exception &e) {
+		UC_LOG_WARNING(context, "schema.Describe column=%s type_text=%s unreadable: %s", coldef.name, coldef.type_text,
+		               e.what());
+		unreadable.emplace_back(coldef.name, coldef.type_text);
+		return {Identifier(coldef.name), LogicalType::UNKNOWN};
+	}
+}
+
+static string DescribeColumns(const TableCatalogEntry &entry) {
+	string result;
+	for (auto &column : entry.GetColumns().Logical()) {
+		if (!result.empty()) {
+			result += ", ";
+		}
+		result += column.GetName().GetIdentifierName() + " " + column.GetType().ToString();
+	}
+	return result;
+}
+
+static bool SameColumns(const CatalogEntry &left, const CatalogEntry &right) {
+	auto &left_columns = left.Cast<TableCatalogEntry>().GetColumns();
+	auto &right_columns = right.Cast<TableCatalogEntry>().GetColumns();
+	if (left_columns.LogicalColumnCount() != right_columns.LogicalColumnCount()) {
+		return false;
+	}
+	for (idx_t i = 0; i < left_columns.LogicalColumnCount(); i++) {
+		auto &left_column = left_columns.GetColumn(LogicalIndex(i));
+		auto &right_column = right_columns.GetColumn(LogicalIndex(i));
+		if (left_column.GetName().GetIdentifierName() != right_column.GetName().GetIdentifierName() ||
+		    left_column.GetType() != right_column.GetType()) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static void WarnOnSchemaDivergence(ClientContext &context, const CatalogEntry &reported, const CatalogEntry &resolved) {
+	if (SameColumns(reported, resolved)) {
+		return;
+	}
+	auto &reported_table = reported.Cast<TableCatalogEntry>();
+	auto &resolved_table = resolved.Cast<TableCatalogEntry>();
+	UC_LOG_WARNING(context,
+	               "schema.Resolve %s: the catalog reports (%s) but the Delta log holds (%s); reading the log. A "
+	               "commit the catalog has not caught up with resolves itself; repeated, the registration is stale "
+	               "or the table was written by an engine the catalog does not see",
+	               resolved_table.name.GetIdentifierName(), DescribeColumns(reported_table),
+	               DescribeColumns(resolved_table));
+}
+
+unique_ptr<CatalogEntry> TableInformation::EntryFromDeltaLog(ClientContext &context,
+                                                             const EntryLookupInfo &lookup_info) {
+	// RefreshCredentials first: InternalAttach may flush pending backfills, thus needing the credentials.
+	RefreshCredentials(context);
+	InternalAttach(context);
+	auto &delta_catalog = *GetInternalCatalog();
+	auto &delta_schema = delta_catalog.GetSchema(context, Identifier::DefaultSchema());
+	auto transaction = delta_schema.GetCatalogTransaction(context);
+	auto table_entry = delta_schema.LookupEntry(transaction, lookup_info);
+	if (!table_entry) {
+		return nullptr;
+	}
+	auto create_info = table_entry->GetInfo();
+	auto &info = create_info->Cast<CreateTableInfo>();
+	info.SetTableName(Identifier(table_data->name));
+	return make_uniq<UCTableEntry>(catalog, schema, *this, info);
 }
 
 optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, const EntryLookupInfo &lookup_info) {
 	auto at = lookup_info.GetAtClause();
 	if (!at) {
-		//! No version provided, just return the dummy entry (should represent latest version)
-		lock_guard<mutex> l(entry_lock);
-		return dummy.get();
+		// Neither ScanPlan/non-delta has a log to resolve against, return reported a la UCTableEntry::GetScanFunction.
+		if (reported && (catalog.ShouldTryScanPlan() || table_data->data_source_format != "DELTA")) {
+			ThrowIfUnreadableColumns();
+			return reported.get();
+		}
+
+		// Reads bind against the log, not the catalog's description of it -- including nested
+		// children, which resolve by position. Per transaction, matching the child catalog, which
+		// rebuilds its own entry per transaction from the commits after the snapshot it holds.
+		auto &transaction = UCTransaction::Get(context, catalog);
+		auto key = EntryKey();
+		auto bound = transaction.GetTableEntry(key);
+		if (bound) {
+			return bound;
+		}
+
+		// Registered but never written to: nothing to resolve against yet. A credential or transport
+		// failure is a different thing and must not quietly downgrade the schema, so it propagates.
+		auto entry = EntryFromDeltaLog(context, lookup_info);
+		if (!entry) {
+			if (!reported) {
+				ThrowNoDeltaTable();
+			}
+			ThrowIfUnreadableColumns();
+			UC_LOG_WARNING(context, "schema.Resolve %s: no schema in the Delta log; using the catalog's report",
+			               table_data->name);
+			return reported.get();
+		}
+		if (reported) {
+			WarnOnSchemaDivergence(context, *reported, *entry);
+		}
+		return transaction.SetTableEntry(key, std::move(entry));
 	}
 
 	auto version = ParseDeltaVersionFromAtClause(*at);
-
-	// Fast path: already cached
-	{
-		lock_guard<mutex> l(entry_lock);
-		auto it = schema_versions.find(version);
-		if (it != schema_versions.end()) {
-			return it->second.get();
-		}
+	auto &transaction = UCTransaction::Get(context, catalog);
+	auto key = EntryKey(version);
+	auto bound = transaction.GetTableEntry(key);
+	if (bound) {
+		return bound;
 	}
-
-	// Not cached: attach and fetch schema — done outside entry_lock since it may block on I/O
-	// RefreshCredentials first: InternalAttach may flush pending backfills, thus needing the credentials.
-	RefreshCredentials(context);
-	InternalAttach(context);
-	auto &delta_catalog = *GetInternalCatalog();
-	auto &schema = delta_catalog.GetSchema(context, Identifier(table_data->schema_name));
-	auto transaction = schema.GetCatalogTransaction(context);
-	auto table_entry = schema.LookupEntry(transaction, lookup_info);
-	auto create_info = table_entry->GetInfo();
-
-	lock_guard<mutex> l(entry_lock);
-	// Re-check under lock in case another thread raced us here
-	auto it = schema_versions.find(version);
-	if (it != schema_versions.end()) {
-		return it->second.get();
+	auto entry = EntryFromDeltaLog(context, lookup_info);
+	if (!entry) {
+		ThrowNoDeltaTable();
 	}
-	auto res = schema_versions.emplace(
-	    version, make_uniq<UCTableEntry>(catalog, schema, *this, create_info->Cast<CreateTableInfo>()));
-	return res.first->second.get();
+	return transaction.SetTableEntry(key, std::move(entry));
 };
+
+//! Qualified name, plus the version where the query named one; unversioned means latest.
+string TableInformation::EntryKey(optional_idx version) const {
+	auto key = schema.name.GetIdentifierName() + "." + table_data->name;
+	return version.IsValid() ? key + "@" + to_string(version.GetIndex()) : key;
+}
+
+// `reported` describes a table, and tracks unrepresentables; this throws at bind with nice error
+void TableInformation::ThrowIfUnreadableColumns() const {
+	if (unreadable_columns.empty()) {
+		return;
+	}
+	auto &column = unreadable_columns.front();
+	throw NotImplementedException("Table '%s' has %llu column(s) with a type this build cannot read; the first is "
+	                              "'%s', which Unity Catalog reports as '%s'",
+	                              table_data->name, static_cast<uint64_t>(unreadable_columns.size()), column.first,
+	                              column.second);
+}
+
+void TableInformation::ThrowNoDeltaTable() const {
+	throw CatalogException("Table '%s' is registered in Unity Catalog at '%s', but no Delta table was found there",
+	                       table_data->name, table_data->storage_location);
+}
 
 optional_ptr<Catalog> TableInformation::GetInternalCatalog() {
 	// TODO(race): unsynchronized read of internal_attached_database — a concurrent InternalDetach
@@ -345,8 +451,15 @@ void UCTableSet::LoadEntries(ClientContext &context, const lock_guard<mutex> &_e
 	for (auto &table : get_tables_result) {
 		D_ASSERT(schema.name == table.schema_name);
 		CreateTableInfo info;
+		vector<pair<string, string>> unreadable;
+		// `position` is the API's ordering contract; the response's array order says nothing. Stable,
+		// so columns sharing a position (or carrying none) keep their listed order.
+		std::stable_sort(table.columns.begin(), table.columns.end(),
+		                 [](const UCAPIColumnDefinition &left, const UCAPIColumnDefinition &right) {
+			                 return left.position < right.position;
+		                 });
 		for (auto &col : table.columns) {
-			info.columns.AddColumn(CreateColumnDefinition(context, col));
+			info.columns.AddColumn(CreateColumnDefinition(context, col, unreadable));
 		}
 
 		lock_guard<mutex> l(entry_lock);
@@ -366,7 +479,8 @@ void UCTableSet::LoadEntries(ClientContext &context, const lock_guard<mutex> &_e
 		auto table_entry = make_uniq<UCTableEntry>(catalog, schema, table_info, info);
 
 		table_info.table_data = make_uniq<UCAPITable>(table);
-		table_info.dummy = std::move(table_entry);
+		table_info.reported = std::move(table_entry);
+		table_info.unreadable_columns = std::move(unreadable);
 	}
 }
 
@@ -429,7 +543,7 @@ void UCTableSet::Scan(ClientContext &context, const std::function<void(CatalogEn
 	EnsureLoaded(context);
 	lock_guard<mutex> l(entry_lock);
 	for (auto &table : tables) {
-		callback(*table.second.dummy);
+		callback(*table.second.reported);
 	}
 }
 
