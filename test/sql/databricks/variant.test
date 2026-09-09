@@ -1,0 +1,37 @@
+# name: test/sql/databricks/variant.test
+# description: test reading tables with variant columns
+# group: [databricks]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN '${DATABRICKS_TOKEN}',
+    ENDPOINT '${DATABRICKS_ENDPOINT}',
+    AWS_REGION '${DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH 'duckdb_testing' (TYPE UNITY_CATALOG, READ_ONLY, DEFAULT_SCHEMA 'main');
+
+query II
+SELECT id, data FROM duckdb_testing.main.variant_table ORDER BY id;
+----
+1	{"value": 1}
+2	{"value": 2}
+3	{"value": 3}
+4	{"value": 4}
+5	{"value": 5}
