@@ -64,6 +64,7 @@ from databricks_gen import (  # noqa: E402  (needs _SCRIPTS_DIR on path)
     create_table,
     drop_schema,
     execute,
+    external_location,
     insert,
     run_sql_file,
 )
@@ -397,14 +398,8 @@ class DatabricksProvisioner(_BaseProvisioner):
                 self._duckdb_insert(insert_path, target)
 
     def _s3_location(self, target):
-        """The S3 LOCATION for an `external` target:
-        s3://<bucket>/external/<cat>/<schema>/<table>.
-
-        Only external tables get a LOCATION from us; the bucket's `managed/` half is the
-        catalog's own managed root, which UC fills in server-side.
-        """
-        cat, schema, table = _split_source(target)
-        return f"s3://{config.S3_BUCKET}/external/{cat}/{schema}/{table}"
+        """The S3 LOCATION for an `external` target (see databricks_gen.external_location)."""
+        return external_location(config.S3_BUCKET, *_split_source(target))
 
     def _duckdb_shell(self):
         """The duckdb shell from the same build the driver resolves the unittest binary from."""

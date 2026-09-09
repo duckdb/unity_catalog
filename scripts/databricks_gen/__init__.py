@@ -20,6 +20,8 @@ from .sql import (  # noqa: F401
     build_insert,
     split_statements,
     run_sql_file,
+    external_location,
+    split_fqn,
 )
 
 __all__ = [
@@ -38,4 +40,6 @@ __all__ = [
     "build_insert",
     "split_statements",
     "run_sql_file",
+    "external_location",
+    "split_fqn",
 ]
