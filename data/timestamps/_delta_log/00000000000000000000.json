@@ -1,0 +1,3 @@
+{"commitInfo":{"timestamp":1788967748100,"operation":"CREATE TABLE","operationParameters":{},"kernelVersion":"v0.26.0","engineInfo":"DuckDB","txnId":"777e8e1a-2b52-4d92-8a70-fe8699999ca6"}}
+{"protocol":{"minReaderVersion":3,"minWriterVersion":7,"readerFeatures":["timestampNtz"],"writerFeatures":["timestampNtz"]}}
+{"metaData":{"id":"43e65c0b-1f1b-473a-b6a4-6c593e44a711","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"integer\",\"nullable\":true,\"metadata\":{}},{\"name\":\"event_time\",\"type\":\"timestamp_ntz\",\"nullable\":true,\"metadata\":{}},{\"name\":\"event_tz\",\"type\":\"timestamp\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"createdTime":1788967748100,"configuration":{}}}
