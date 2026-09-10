@@ -187,6 +187,7 @@ LogicalType UCUtils::TypeToLogicalType(const string &type_text) {
 	} else if (type_text == "boolean") {
 		return LogicalType::BOOLEAN;
 	} else if (type_text == "timestamp") {
+		// UC's naming inverts DuckDB's: its `timestamp` is the zoned type.
 		return LogicalType::TIMESTAMP_TZ;
 	} else if (type_text == "timestamp_ntz") {
 		return LogicalType::TIMESTAMP;
