@@ -141,7 +141,11 @@ _CASES = {
         why="reported orders a struct's children differently, typed; the read still follows resolved",
         fixture=_NESTED,
         table="nested_projection",
-        reported_schema=[_col("id", _INT), _col("records", _array(_struct(value=_INT, name=_STR))), _col("multi", _MULTI)],
+        reported_schema=[
+            _col("id", _INT),
+            _col("records", _array(_struct(value=_INT, name=_STR))),
+            _col("multi", _MULTI),
+        ],
         query=_NESTED_QUERY,
         expect=_Rows(_NESTED_ROWS),
     ),
