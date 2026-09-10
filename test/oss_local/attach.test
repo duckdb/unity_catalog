@@ -64,3 +64,15 @@ query II
 SELECT id, name FROM {UC_TEST_TABLE} LIMIT 1;
 ----
 2	two
+
+# -----------------------------------------------------------------------------
+# duckdb_indexes() over an attached catalog
+#
+# It asks every attached catalog to enumerate its indexes. UC has none, so the answer is no rows --
+# but claiming INDEX_ENTRY as a supported type made that throw instead.
+#
+
+query I
+SELECT count(*) FROM duckdb_indexes() WHERE database_name = 'duck';
+----
+0
