@@ -1,0 +1,37 @@
+# name: test/sql/databricks/timestamp_ntz.test
+# description: test reading tables with timestamp_ntz columns
+# group: [databricks]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN '${DATABRICKS_TOKEN}',
+    ENDPOINT '${DATABRICKS_ENDPOINT}',
+    AWS_REGION '${DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH 'duckdb_testing' (TYPE UNITY_CATALOG, READ_ONLY, DEFAULT_SCHEMA 'main');
+
+query II
+SELECT id, created_at FROM duckdb_testing.main.timestamp_ntz_table ORDER BY id;
+----
+1	2024-01-01 01:00:00
+2	2024-01-01 02:00:00
+3	2024-01-01 03:00:00
+4	2024-01-01 04:00:00
+5	2024-01-01 05:00:00

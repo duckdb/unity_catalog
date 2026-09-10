@@ -10,4 +10,5 @@ scripts/uc-script.sh
 unitycatalogga
 test/sql/tmp.test
 venv
+.cache/
 __pycache__

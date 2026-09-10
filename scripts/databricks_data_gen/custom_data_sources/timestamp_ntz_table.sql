@@ -1,0 +1,6 @@
+CREATE OR REPLACE TABLE {table_name}
+LOCATION '{location}'
+AS SELECT
+    id,
+    CAST(TIMESTAMP '2024-01-01 00:00:00' + INTERVAL id HOURS AS TIMESTAMP_NTZ) AS created_at
+FROM range(1, 6) AS t(id)

@@ -188,6 +188,8 @@ LogicalType UCUtils::TypeToLogicalType(const string &type_text) {
 		return LogicalType::BOOLEAN;
 	} else if (type_text == "timestamp") {
 		return LogicalType::TIMESTAMP_TZ;
+	} else if (type_text == "timestamp_ntz") {
+		return LogicalType::TIMESTAMP;
 	} else if (type_text == "binary") {
 		return LogicalType::BLOB;
 	} else if (type_text == "date") {
