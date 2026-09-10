@@ -1,0 +1,35 @@
+# name: test/oss_local/todo/default_schema.test
+# description: NEGATIVE TEST -- OSS UC exposes no default namespace, so a UC catalog attached without DEFAULT_SCHEMA has no auto-detected default schema, and reads fail (even fully qualified) with "auto-detection of default schema failed". KEEP until default-schema auto-detection is implemented, then flip to a positive case. Paired default_schema.py declares the server (uc_server) and provisions a unique empty duck.cmt.{UC_TEST_TABLE}.
+# group: [todo]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_TABLE
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' (TYPE unity_catalog);
+
+# id_name exists in duck.cmt, but reading it -- even fully qualified -- needs the
+# catalog's default schema, which auto-detection can't determine on OSS UC. The
+# companion attach/read/write tests show the same access succeeds once DEFAULT_SCHEMA
+# is supplied; this asserts the gap until auto-detection lands.
+statement error
+FROM duck.cmt.{UC_TEST_TABLE};
+----
+Default schema for catalog 'duck' not found. This means auto-detection of default schema failed.

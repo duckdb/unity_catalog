@@ -1,4 +1,5 @@
 #include "storage/uc_transaction.hpp"
+#include "duckdb/transaction/transaction_manager.hpp"
 #include "storage/unity_catalog.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/catalog/catalog_entry/index_catalog_entry.hpp"
@@ -53,6 +54,23 @@ void UCTransaction::Rollback() {
 //	}
 //	return connection.Query(query);
 //}
+
+optional_ptr<CatalogEntry> UCTransaction::GetTableEntry(const string &qualified_name) {
+	return table_entries.with_locked([&](unordered_map<string, unique_ptr<CatalogEntry>> &entries) {
+		auto entry = entries.find(qualified_name);
+		return entry == entries.end() ? optional_ptr<CatalogEntry>() : optional_ptr<CatalogEntry>(*entry->second);
+	});
+}
+
+CatalogEntry &UCTransaction::SetTableEntry(const string &qualified_name, unique_ptr<CatalogEntry> entry) {
+	return table_entries.with_locked([&](unordered_map<string, unique_ptr<CatalogEntry>> &entries) -> CatalogEntry & {
+		auto &stored = entries[qualified_name];
+		if (!stored) {
+			stored = std::move(entry);
+		}
+		return *stored;
+	});
+}
 
 UCTransaction &UCTransaction::Get(ClientContext &context, Catalog &catalog) {
 	return Transaction::Get(context, catalog).Cast<UCTransaction>();

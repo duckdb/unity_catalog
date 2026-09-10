@@ -1,4 +1,6 @@
 #include "storage/unity_catalog.hpp"
+#include "duckdb/planner/logical_operator.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
@@ -13,7 +15,7 @@
 namespace duckdb {
 
 UnityCatalog::UnityCatalog(AttachedDatabase &db_p, const string &internal_name, AttachOptions &attach_options,
-                           UCCredentials credentials, const string &default_schema, string catalog_name_p)
+                           UCCredentials credentials, const Identifier &default_schema, string catalog_name_p)
     : Catalog(db_p), internal_name(internal_name), access_mode(attach_options.access_mode),
       credentials(std::move(credentials)), catalog_name(std::move(catalog_name_p)), schemas(*this),
       default_schema(default_schema) {
@@ -28,7 +30,7 @@ optional_ptr<CatalogEntry> UnityCatalog::CreateSchema(CatalogTransaction transac
 	if (info.on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
 		DropInfo try_drop;
 		try_drop.type = CatalogType::SCHEMA_ENTRY;
-		try_drop.name = info.schema;
+		try_drop.SetName(info.GetQualifiedName().Schema());
 		try_drop.if_not_found = OnEntryNotFound::RETURN_NULL;
 		try_drop.cascade = false;
 		schemas.DropEntry(transaction.GetContext(), try_drop);
@@ -52,7 +54,7 @@ optional_ptr<SchemaCatalogEntry> UnityCatalog::LookupSchema(CatalogTransaction t
 			throw InvalidInputException(
 			    "Default schema for catalog '%s' not found. This means auto-detection of default schema failed. Please "
 			    "specify a DEFAULT_SCHEMA on ATTACH: `ATTACH '..' (TYPE unity_catalog, DEFAULT_SCHEMA 'my_schema')`",
-			    GetName());
+			    GetName().GetIdentifierName());
 		}
 		return GetSchema(transaction, default_schema, if_not_found);
 	}
@@ -71,7 +73,12 @@ string UnityCatalog::GetDBPath() {
 	return internal_name;
 }
 
-string UnityCatalog::GetDefaultSchema() const {
+optional<Identifier> UnityCatalog::GetDefaultSchema() const {
+	// Auto-detection can leave this unset, and core reads an empty Identifier as "unspecified"
+	// rather than as a schema named "".
+	if (default_schema.empty()) {
+		return {};
+	}
 	return default_schema;
 }
 
@@ -96,6 +103,33 @@ void UnityCatalog::ClearCache() {
 	schemas.ClearEntries();
 }
 
+// --- IRC scan-plan gating (see docs/sp/scan-plan-gating.md) ---
+
+bool UnityCatalog::ShouldTryScanPlan() {
+	if (!credentials.use_irc_scan_plan) {
+		return false;
+	}
+	lock_guard<mutex> l(scan_plan_lock);
+	if (scan_plan_state == ScanPlanAvailability::UNAVAILABLE) {
+		if (std::chrono::steady_clock::now() - scan_plan_unavailable_since < SCAN_PLAN_RE_PROBE) {
+			return false; // still within the re-probe window
+		}
+		scan_plan_state = ScanPlanAvailability::UNKNOWN; // aged out -> allow one re-probe
+	}
+	return true; // UNKNOWN or AVAILABLE
+}
+
+void UnityCatalog::MarkScanPlanAvailable() {
+	lock_guard<mutex> l(scan_plan_lock);
+	scan_plan_state = ScanPlanAvailability::AVAILABLE;
+}
+
+void UnityCatalog::MarkScanPlanUnavailable() {
+	lock_guard<mutex> l(scan_plan_lock);
+	scan_plan_state = ScanPlanAvailability::UNAVAILABLE;
+	scan_plan_unavailable_since = std::chrono::steady_clock::now();
+}
+
 PhysicalOperator &UnityCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
                                                   LogicalCreateTable &op, PhysicalOperator &plan) {
 	throw NotImplementedException("UnityCatalog PlanCreateTableAs");
@@ -106,8 +140,9 @@ PhysicalOperator &UnityCatalog::PlanInsert(ClientContext &context, PhysicalPlanG
 	auto &table_entry = op.table.Cast<UCTableEntry>();
 	auto &table = table_entry.table;
 
-	table.InternalAttach(context);
+	// Credentials before Attach, since attach may backfill and need them.
 	table.RefreshCredentials(context);
+	table.InternalAttach(context);
 
 	auto internal_catalog = table.GetInternalCatalog();
 	return internal_catalog->PlanInsert(context, planner, op, plan);

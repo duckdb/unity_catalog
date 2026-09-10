@@ -1,0 +1,115 @@
+# name: test/oss_local/table-cmt/checkpoint.test
+# description: catalog-managed (CMT) checkpoint variant -- unity_catalog_checkpoint_table forwarding against a SINGLE catalog-managed table (duck.cmt.{UC_TEST_TABLE}) -- error cases, then checkpoint via FQ / USE-cat+qualified / USE-cat + bare / USE-cat.schema + bare, advancing one version between each, then assert the checkpoint files landed under the cmt schema dir. Reuses id_name (no bespoke tables). The cmt half of the contrast with table-plain/checkpoint. Paired checkpoint.py provisions the table + injects {UC_TEST_DATA}.
+# group: [table-cmt]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_TABLE
+
+require-env UC_TEST_DATA
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS my_catalog (TYPE unity_catalog, DEFAULT_SCHEMA 'cmt');
+
+# -----------------------------------------------------------------------------
+# Error cases BEFORE any USE (they depend on no default catalog being set)
+#
+
+# CHECKPOINT keyword is not supported through UC
+statement error
+CHECKPOINT my_catalog;
+----
+Unsupported
+
+# bare table, no catalog default
+statement error
+CALL unity_catalog_checkpoint_table('{UC_TEST_TABLE}');
+----
+No catalog specified
+
+# schema-qualified, still no catalog default
+statement error
+CALL unity_catalog_checkpoint_table('cmt.{UC_TEST_TABLE}');
+----
+No catalog specified
+
+# -----------------------------------------------------------------------------
+# Checkpoint the SAME table via each name-resolution form, advancing one version
+# between calls so each forced checkpoint lands at a distinct version (create = v0).
+#
+
+# v1 -- fully qualified
+statement ok
+INSERT INTO my_catalog.cmt.{UC_TEST_TABLE} VALUES (1, 'a');
+
+statement ok
+CALL unity_catalog_checkpoint_table('my_catalog.cmt.{UC_TEST_TABLE}');
+
+# v2 -- USE catalog + schema-qualified remainder
+statement ok
+INSERT INTO my_catalog.cmt.{UC_TEST_TABLE} VALUES (2, 'b');
+
+statement ok
+USE my_catalog;
+
+# empty table name -- reachable now that a default catalog is set (resolution gets past
+# the "no catalog" stage to the empty-name check).
+statement error
+CALL unity_catalog_checkpoint_table('');
+----
+empty
+
+statement ok
+CALL unity_catalog_checkpoint_table('cmt.{UC_TEST_TABLE}');
+
+# v3 -- USE catalog + bare name (DEFAULT_SCHEMA = cmt)
+statement ok
+INSERT INTO my_catalog.cmt.{UC_TEST_TABLE} VALUES (3, 'c');
+
+statement ok
+CALL unity_catalog_checkpoint_table('{UC_TEST_TABLE}');
+
+# v4 -- USE catalog.schema + bare name
+statement ok
+INSERT INTO my_catalog.cmt.{UC_TEST_TABLE} VALUES (4, 'd');
+
+statement ok
+USE my_catalog.cmt;
+
+statement ok
+CALL unity_catalog_checkpoint_table('{UC_TEST_TABLE}');
+
+# -----------------------------------------------------------------------------
+# Each of the 4 forced checkpoints wrote a <version>.checkpoint.parquet under the
+# cmt table's _delta_log/, plus a single _last_checkpoint pointer. cmt tables
+# nest under .../duck/cmt/__unitystorage/<uuid>/_delta_log/, so parse_path(file)[-3]
+# is a UUID (not id_name) -- scope the glob to duck/cmt/ and COUNT instead. This
+# excludes the plain test's duck/plain/ checkpoints in the same session-shared data
+# dir; other cmt tests don't force/auto-checkpoint, so 4 is just this test's.
+#
+
+query I
+SELECT count(*) FROM glob('{UC_TEST_DATA}/duck/cmt/**/*.checkpoint.parquet');
+----
+4
+
+query I
+SELECT count(*) FROM glob('{UC_TEST_DATA}/duck/cmt/**/_last_checkpoint');
+----
+1

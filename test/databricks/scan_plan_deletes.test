@@ -1,0 +1,114 @@
+# name: test/databricks/scan_plan_deletes.test
+# description: scan-plan delete-file resolution (BuildUCDeleteFilter) against a table with actual deletes.
+# group: [databricks]
+
+#
+# Live-verified. scan_plan_days_deletes is 5 files, one row per file deleted after a
+# deletion-vector-enabling DELETE. Against the iceberg-rest endpoint Databricks pre-applies the
+# delete SERVER-SIDE -- the scan-plan returns only surviving-row files, so no client-side delete
+# path runs here (see "On the delete path" below). This test therefore validates the END RESULT.
+#
+# Expected values come from a COMMITTED, REGENERABLE oracle rather than hand-enumerated ids: the
+# exact post-delete result is materialized once to data/scan_plan_days_deletes_oracle.parquet, and
+# every row-level assertion below is a two-sided differential diff -- the live catalog query vs
+# read_parquet() of the oracle, tied by a matching `nosort` label (results_N; the duckdb-iceberg
+# #1204 pattern). Any delete-application error surfaces as a label mismatch. Scaling the table (more
+# files/rows, a different DELETE set) is cheap: edit data/scan_plan_days_deletes.sql to match, rerun
+# `python test/databricks/data/scan_plan_days_deletes_oracle.py`, and commit the new parquet -- never
+# hand-enumerate deleted ids again.
+#
+# The DELETE that defines the deleted rows lives in the fixture (data/scan_plan_days_deletes.sql)
+# because it must run server-side at provision time to materialize the post-delete state this
+# read-only .test reads back -- it can't move into the test body.
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+require-env CATALOG
+
+require-env SCHEMA
+
+statement ok
+CALL enable_logging(level='DEBUG');
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}',
+    use_irc_scan_plan true);
+
+statement ok
+USE unity;
+
+# -----------------------------------------------------------------------------
+# Full post-delete row set -- differential vs the committed oracle
+#
+# 50 rows written; ids 5, 15, 25, 35, 45 deleted (the last row of each weekday file, via the
+# provision-time DELETE) -> 45 remain. The live scan and the oracle share label results_1: their
+# rows must be identical. A wrong delete (extra/missing row, wrong day) is a label mismatch.
+#
+
+query IT nosort results_1
+SELECT id, day FROM scan_plan_days_deletes ORDER BY id;
+
+query IT nosort results_1
+SELECT id, day FROM read_parquet('test/databricks/data/scan_plan_days_deletes_oracle.parquet') ORDER BY id;
+
+# -----------------------------------------------------------------------------
+# On the delete path
+#
+# The differential diff above is the correctness gate: the deleted rows are gone regardless of HOW
+# the delete was applied. Against the iceberg-rest endpoint Databricks pre-applies the delete
+# server-side -- the scan-plan returns only surviving-row files, so NO client-side delete-file path
+# (DV-puffin ScanDeletionVectorFile / parquet-positional) runs here. Those client paths are covered
+# by the offline unit tests (dv_decode FromBlob decode, unittest_cpp position-set); a live server
+# that hands back delete files would exercise them end-to-end, and the oracle would still validate.
+
+# -----------------------------------------------------------------------------
+# Filter pushdown + delete application together -- differential vs the same predicate on the oracle
+#
+# day = 'Mon' prunes to the single Mon file server-side, AND the deleted id (5) must not reappear
+# even though the file-level filter is unrelated to the delete. The live scan and the oracle share
+# label results_2 (each with the SAME day = 'Mon' predicate): the pruned+deleted rows must match,
+# so id 5's absence is asserted by the diff, not by a hand-listed id. The log check confirms the
+# server still pruned to one file.
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query IT nosort results_2
+SELECT id, day FROM scan_plan_days_deletes WHERE day = 'Mon' ORDER BY id;
+
+query IT nosort results_2
+SELECT id, day FROM read_parquet('test/databricks/data/scan_plan_days_deletes_oracle.parquet')
+WHERE day = 'Mon' ORDER BY id;
+
+query I
+SELECT count(*) FROM duckdb_logs()
+WHERE message LIKE 'api-irc.PlanTableScan% inline=1% plan_tasks=0%';
+----
+1
+
+statement ok
+USE memory;
+
+statement ok
+DETACH unity;

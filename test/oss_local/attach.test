@@ -1,0 +1,66 @@
+# name: test/oss_local/attach.test
+# description: attach/detach/USE semantics for the unity_catalog extension against the OSS UC ducktest image. Paired attach.py declares the server (uc_server) and provisions a unique empty duck.cmt.{UC_TEST_TABLE}.
+# group: [oss_local]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_TABLE
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+# -----------------------------------------------------------------------------
+# Attach without a default schema
+#
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' (TYPE unity_catalog);
+
+# USE <catalog> alone fails: OSS UC exposes no default schema to resolve to.
+statement error
+USE duck;
+----
+Catalog Error: SET schema: No catalog + schema named "duck" found.
+
+# ... but a fully-qualified catalog.schema works.
+statement ok
+USE duck.cmt;
+
+statement ok
+USE memory;
+
+statement ok
+DETACH duck;
+
+# -----------------------------------------------------------------------------
+# Attach with DEFAULT_SCHEMA
+#
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' (TYPE unity_catalog, DEFAULT_SCHEMA 'cmt');
+
+statement ok
+USE duck;
+
+# Write a row through the catalog-managed path, then read it back (id_name is
+# seeded empty by attach.py).
+statement ok
+INSERT INTO {UC_TEST_TABLE} VALUES (2, 'two');
+
+query II
+SELECT id, name FROM {UC_TEST_TABLE} LIMIT 1;
+----
+2	two

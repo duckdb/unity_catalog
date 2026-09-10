@@ -1,4 +1,5 @@
 #include "storage/uc_transaction_manager.hpp"
+#include "duckdb/transaction/transaction_manager.hpp"
 #include "duckdb/common/exception.hpp"
 #include "storage/uc_schema_entry.hpp"
 #include "duckdb/main/attached_database.hpp"

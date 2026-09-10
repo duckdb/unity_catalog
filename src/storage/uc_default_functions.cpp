@@ -3,6 +3,7 @@
 #include "duckdb/catalog/catalog_entry/table_macro_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
+#include "duckdb/common/sql_identifier.hpp"
 #include "functions/uc_table_functions.hpp"
 #include "storage/uc_transaction_manager.hpp"
 
@@ -16,8 +17,8 @@ static const DefaultTableMacro uc_table_macros[] = {
 
 optional_ptr<CatalogEntry> UCSchemaEntry::LoadBuiltInFunction(DefaultTableMacro macro) {
 	string macro_def = macro.macro;
-	macro_def = StringUtil::Replace(macro_def, "{CATALOG}", KeywordHelper::WriteQuoted(catalog.GetName(), '\''));
-	macro_def = StringUtil::Replace(macro_def, "{SCHEMA}", KeywordHelper::WriteQuoted(name, '\''));
+	macro_def = StringUtil::Replace(macro_def, "{CATALOG}", SQLString::ToString(catalog.GetName().GetIdentifierName()));
+	macro_def = StringUtil::Replace(macro_def, "{SCHEMA}", SQLString::ToString(name.GetIdentifierName()));
 	macro.macro = macro_def.c_str();
 	auto info = DefaultTableFunctionGenerator::CreateTableMacroInfo(macro);
 	auto table_macro =

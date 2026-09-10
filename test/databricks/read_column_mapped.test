@@ -1,0 +1,129 @@
+# name: test/databricks/read_column_mapped.test
+# description: read-only reads of schema-evolved Delta tables (name-mode column mapping + plain add-column) via Unity Catalog.
+# group: [databricks]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+require-env CATALOG
+
+require-env SCHEMA
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}');
+
+statement ok
+USE unity;
+
+# -----------------------------------------------------------------------------
+# name-mode column mapping: added `val` reads NULL for the pre-existing rows
+#
+
+query III
+SELECT id, name, val FROM id_name__alter_colmap_name ORDER BY id
+----
+1	one	NULL
+2	two	NULL
+3	three	NULL
+4	four	NULL
+5	five	NULL
+6	six	6
+
+# -----------------------------------------------------------------------------
+# plain add-column (no mapping): same shape, read must agree
+#
+
+query III
+SELECT id, name, val FROM id_name__alter_plain ORDER BY id
+----
+1	one	NULL
+2	two	NULL
+3	three	NULL
+4	four	NULL
+5	five	NULL
+6	six	6
+
+# -----------------------------------------------------------------------------
+# The same reads with the scan-plan path enabled
+#
+# A negative test. Despite enabling scan planning this does NOT cover column mapping on that path:
+# Databricks rejects the table outright --
+#   HTTP 400, "Table requested is not scan-plan compatible. [ErrorCode: 4001]"
+# -- so the read falls back to Delta. What it covers is that the fallback stays correct for a
+# mapped, schema-evolved table, and that an incompatible table degrades rather than errors.
+#
+# The open question it cannot answer: under name-mode mapping the parquet columns carry opaque ids
+# and `val` is absent entirely from the files written before it existed, while the scan-plan path
+# binds a bare parquet_scan and projects by logical column index. A logical-vs-physical divergence
+# would surface as wrong or missing values rather than an error. Answering that needs a
+# catalog-managed mapped fixture, which does not exist yet.
+#
+# The same UC catalog cannot be attached twice while both read one table: the hidden per-table
+# Delta attach is named from catalog.schema.table with no alias, so the second collides. Detach
+# first -- the Delta assertions above are already done.
+statement ok
+USE memory;
+
+statement ok
+DETACH unity;
+
+statement ok
+ATTACH '{CATALOG}' AS sp (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}',
+    use_irc_scan_plan true);
+
+statement ok
+USE sp;
+
+statement ok
+CALL enable_logging(level='DEBUG');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query III
+SELECT id, name, val FROM id_name__alter_colmap_name ORDER BY id
+----
+1	one	NULL
+2	two	NULL
+3	three	NULL
+4	four	NULL
+5	five	NULL
+6	six	6
+
+# Columns are (attempted, fell back). Pinning both means a change on either side shows up here
+# rather than silently altering what this test covers -- notably if Databricks ever makes this
+# table shape scan-plan compatible, at which point the read above starts exercising mapping.
+query II
+SELECT count(*) FILTER (WHERE message LIKE 'api-irc.PlanTableScan% filter=%'),
+       count(*) FILTER (WHERE message LIKE 'api-irc.PlanTableScan% failed, falling back to Delta%')
+FROM duckdb_logs();
+----
+1	1
+
+statement ok
+USE memory;
+
+statement ok
+DETACH sp;

@@ -1,0 +1,148 @@
+# name: test/oss_local/partition_encoding_write.test
+# description: a partitioned write through the UC catalog path keeps NULL distinct from the empty string and escapes add.path -- partition_encoding_write.py hand-seeds the _delta_log and drives this body
+# group: [oss_local]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require json
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_SCHEMA
+
+require-env UC_TEST_NULL_TABLE
+
+require-env UC_TEST_NULL_LOCATION
+
+require-env UC_TEST_ENC_TABLE
+
+require-env UC_TEST_ENC_LOCATION
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+statement ok
+USE duck.{UC_TEST_SCHEMA};
+
+# One INSERT per partition throughout: a single statement spanning multiple partitions currently
+# raises an internal error, which is a separate bug.
+
+# -----------------------------------------------------------------------------
+# NULL and the empty string stay apart
+#
+
+statement ok
+INSERT INTO {UC_TEST_NULL_TABLE} VALUES (1, 'ABC', 'p1');
+
+statement ok
+INSERT INTO {UC_TEST_NULL_TABLE} VALUES (2, 'XYZ', NULL);
+
+statement ok
+INSERT INTO {UC_TEST_NULL_TABLE} VALUES (3, 'EMPTY', '');
+
+query I
+SELECT id FROM {UC_TEST_NULL_TABLE} WHERE p IS NULL;
+----
+2
+
+query I
+SELECT id FROM {UC_TEST_NULL_TABLE} WHERE p = '';
+----
+3
+
+query II
+SELECT count(*), count(p) FROM {UC_TEST_NULL_TABLE};
+----
+3	2
+
+# The commits are the contract: our reader and our writer share one convention, so the round trip
+# above agrees with us whether or not that convention is the one other engines follow.
+#
+# read_json_objects reads the raw commit line, because read_json types partitionValues as a struct
+# whose shape follows the data, and json_extract_string folds JSON null onto the same SQL NULL as an
+# absent key. The text form of json_extract keeps null, "" and absent apart.
+#
+# Null may be written as an absent key or a JSON null -- the kernel drops null-valued entries when it
+# materializes the map, so both mean null. Neither shape is pinned; only "" is wrong.
+
+query T
+SELECT json_extract(json, '$.add.partitionValues.p')::VARCHAR
+FROM read_json_objects('{UC_TEST_NULL_LOCATION}/_delta_log/00000000000000000003.json')
+WHERE json_exists(json, '$.add');
+----
+""
+
+query T
+SELECT json_extract(json, '$.add.partitionValues.p')::VARCHAR IS DISTINCT FROM '""'
+FROM read_json_objects('{UC_TEST_NULL_LOCATION}/_delta_log/00000000000000000002.json')
+WHERE json_exists(json, '$.add');
+----
+true
+
+# -----------------------------------------------------------------------------
+# add.path survives being decoded
+#
+
+statement ok
+INSERT INTO {UC_TEST_ENC_TABLE} VALUES (1, 'plain', 'plain');
+
+statement ok
+INSERT INTO {UC_TEST_ENC_TABLE} VALUES (2, 'equals', 'a=b');
+
+statement ok
+INSERT INTO {UC_TEST_ENC_TABLE} VALUES (3, 'space', 'a b');
+
+statement ok
+INSERT INTO {UC_TEST_ENC_TABLE} VALUES (4, 'slash', 'a/b');
+
+statement ok
+INSERT INTO {UC_TEST_ENC_TABLE} VALUES (5, 'percent', 'a%b');
+
+statement ok
+INSERT INTO {UC_TEST_ENC_TABLE} VALUES (6, 'nonascii', 'ä');
+
+# Membership rather than printed values, because sqllogictest cannot express a result containing a
+# space.
+query II
+SELECT count(*) FILTER (WHERE p IN ('plain', 'a=b', 'a b', 'a/b', 'a%b', 'ä')), count(DISTINCT p)
+FROM {UC_TEST_ENC_TABLE};
+----
+6	6
+
+# add.path is a URI, so decoding it must name a file that exists. The directory on disk is p=a%3Db,
+# and decoding an unescaped copy of that name yields p=a=b, which is never created.
+query I
+SELECT count(*) FROM (
+    SELECT url_decode(json_extract_string(json, '$.add.path')) AS rel
+    FROM read_json_objects('{UC_TEST_ENC_LOCATION}/_delta_log/*.json') WHERE json_exists(json, '$.add')
+) WHERE EXISTS (SELECT 1 FROM glob('{UC_TEST_ENC_LOCATION}/*/*.parquet') g WHERE ends_with(g.file, '/' || rel));
+----
+6
+
+# partitionValues carries the value verbatim -- it is a JSON string, not a URI.
+query I
+SELECT count(*) FROM read_json_objects('{UC_TEST_ENC_LOCATION}/_delta_log/*.json')
+WHERE json_extract_string(json, '$.add.partitionValues.p') IN ('plain', 'a=b', 'a b', 'a/b', 'a%b', 'ä');
+----
+6
+
+# `USE` above made duck the default database, which cannot be detached while selected
+statement ok
+USE memory;
+
+statement ok
+DETACH duck;

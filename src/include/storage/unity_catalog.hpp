@@ -13,6 +13,10 @@
 #include "duckdb/common/enums/access_mode.hpp"
 #include "storage/uc_schema_set.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/common/mutex.hpp"
+#include "duckdb/common/string_util.hpp"
+
+#include <chrono>
 
 namespace duckdb {
 class UCSchemaEntry;
@@ -20,9 +24,9 @@ class UCSchemaEntry;
 struct UCCredentials {
 	string endpoint;
 	string token;
-
-	// Not really part of the credentials, but required to query s3 tables
-	string aws_region;
+	string aws_region;              // not really credentials; required to query S3 tables
+	bool use_irc_scan_plan = false; // opt-in to the IRC server-side scan-plan read path
+	string irc_endpoint_override;   // hidden test override; empty => derive from endpoint
 };
 
 class UCClearCacheFunction : public TableFunction {
@@ -35,9 +39,9 @@ public:
 class UnityCatalog : public Catalog {
 public:
 	explicit UnityCatalog(AttachedDatabase &db_p, const string &internal_name, AttachOptions &attach_options,
-	                      UCCredentials credentials, const string &default_schema,
+	                      UCCredentials credentials, const Identifier &default_schema,
 	                      string catalog_name = "unity_catalog");
-	~UnityCatalog();
+	~UnityCatalog() override;
 
 	string internal_name;
 	AccessMode access_mode;
@@ -81,7 +85,7 @@ public:
 	                                            unique_ptr<LogicalOperator> plan) override;
 
 	DatabaseSize GetDatabaseSize(ClientContext &context) override;
-	string GetDefaultSchema() const override;
+	optional<Identifier> GetDefaultSchema() const override;
 	void OnDetach(ClientContext &context) override;
 
 	//! Whether or not this is an in-memory UC database
@@ -90,12 +94,40 @@ public:
 
 	void ClearCache();
 
+	// --- IRC scan-plan gating (opt-in; see docs/sp/scan-plan-gating.md) ---
+
+	// The IRC base URL for this catalog: the hidden override, else derived from the UC endpoint.
+	// Only meaningful when credentials.use_irc_scan_plan is set.
+	string GetIRCEndpoint() const {
+		if (!credentials.irc_endpoint_override.empty()) {
+			return credentials.irc_endpoint_override;
+		}
+		string base = credentials.endpoint;
+		StringUtil::RTrim(base, "/"); // the override is trimmed at parse time; the UC endpoint isn't
+		return base + "/api/2.1/unity-catalog/iceberg-rest";
+	}
+
+	// Whether a scan should attempt the scan-plan path: opt-in AND not currently known-unavailable.
+	// A UNAVAILABLE that has aged past the re-probe window decays back to UNKNOWN here.
+	bool ShouldTryScanPlan();
+	// The `/plan` call is the probe -- record its outcome. AVAILABLE is sticky; UNAVAILABLE is
+	// re-probed after SCAN_PLAN_RE_PROBE.
+	void MarkScanPlanAvailable();
+	void MarkScanPlanUnavailable();
+
 private:
 	void DropSchema(ClientContext &context, DropInfo &info) override;
 
 private:
 	UCSchemaSet schemas;
-	string default_schema;
+	Identifier default_schema;
+
+	// Per-ATTACH scan-plan availability, guarded by scan_plan_lock.
+	enum class ScanPlanAvailability : uint8_t { UNKNOWN, AVAILABLE, UNAVAILABLE };
+	static constexpr std::chrono::minutes SCAN_PLAN_RE_PROBE {15};
+	mutable mutex scan_plan_lock;
+	ScanPlanAvailability scan_plan_state = ScanPlanAvailability::UNKNOWN;
+	std::chrono::steady_clock::time_point scan_plan_unavailable_since {};
 };
 
 } // namespace duckdb

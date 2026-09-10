@@ -1,0 +1,101 @@
+# name: test/databricks/attach.test
+# description: ATTACH/DETACH/USE semantics for a Unity Catalog catalog, incl. the `TYPE UC` secret-type alias (merged basic + aliases).
+# group: [databricks]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+require-env CATALOG
+
+require-env SCHEMA
+
+# -----------------------------------------------------------------------------
+# Attach + read via a `TYPE unity_catalog` secret. The `expected_res` label ties
+# the FQ, default-schema, and bare reads together -- all must return the same rows.
+#
+
+statement ok
+CREATE OR REPLACE SECRET databricks (
+    TYPE unity_catalog,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}');
+
+query II nosort expected_res
+SELECT id, name FROM unity.{SCHEMA}.id_name ORDER BY id;
+
+statement ok
+use unity
+
+query II nosort expected_res
+SELECT id, name FROM id_name ORDER BY id;
+
+statement ok
+use memory
+
+statement ok
+DETACH unity
+
+# -----------------------------------------------------------------------------
+# The `TYPE UC` secret-type alias resolves identically (was aliases.test)
+#
+
+statement ok
+CREATE OR REPLACE SECRET databricks (
+    TYPE UC,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}');
+
+query II nosort expected_res
+SELECT id, name FROM unity.{SCHEMA}.id_name ORDER BY id;
+
+statement ok
+use memory
+
+statement ok
+DETACH unity
+
+# -----------------------------------------------------------------------------
+# Attach WITHOUT a default schema (FIXME: unqualified `use <catalog>` should resolve)
+#
+
+# FIXME
+mode skip
+
+statement ok
+ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY);
+
+query II nosort expected_res
+SELECT id, name FROM unity.{SCHEMA}.id_name ORDER BY id;
+
+# TODO: can we fix this? Or at least throw a nicer error
+statement error
+use unity
+----
+Catalog Error: SET schema: No catalog + schema named found.
+
+statement ok
+use unity.{SCHEMA}
+
+query II nosort expected_res
+SELECT id, name FROM id_name ORDER BY id;

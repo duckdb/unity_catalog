@@ -1,0 +1,55 @@
+# name: test/oss_local/table-plain/catalog_managed.test
+# description: catalog-managed PROTOCOL contrast (absence) -- duck.plain tables are plain Delta logs with no UC commit coordination, so reading does NOT call LoadTable and writing does NOT call UpdateTable. The shared data round-trip lives in oss_local/rw.test; this asserts ONLY the absence of the protocol calls (the plain half of the contrast with table-cmt/catalog_managed). Paired catalog_managed.py provisions a unique empty duck.plain.{UC_TEST_TABLE}.
+# group: [table-plain]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_TABLE
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'plain');
+
+statement ok
+CALL enable_logging(level='DEBUG');
+
+# -----------------------------------------------------------------------------
+# Plain read path: id_name is EXTERNAL (not catalog-managed), so LoadTable is NOT called.
+#
+
+statement ok
+FROM duck.plain.{UC_TEST_TABLE};
+
+query I
+SELECT count(*) FROM duckdb_logs()
+WHERE message LIKE 'api.LoadTable duck.plain.{UC_TEST_TABLE}%';
+----
+0
+
+# -----------------------------------------------------------------------------
+# Plain write path: INSERT commits straight to the Delta log, so UpdateTable is NOT called.
+#
+
+statement ok
+INSERT INTO duck.plain.{UC_TEST_TABLE} VALUES (1, 'blabla');
+
+query I
+SELECT count(*) FROM duckdb_logs()
+WHERE message LIKE 'api.UpdateTable duck.plain.{UC_TEST_TABLE}%';
+----
+0

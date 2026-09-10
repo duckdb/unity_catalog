@@ -1,0 +1,151 @@
+# name: test/databricks/write_tests/write_catalog_managed.test
+# description: write path (catalog-managed cell) -- INSERT into a provisioned catalog-managed table and verify staged-commit backfill (delta.yaml v1).
+# group: [write_tests]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+require-env CATALOG
+
+require-env SCHEMA
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, DEFAULT_SCHEMA '{SCHEMA}');
+
+statement ok
+USE unity;
+
+statement ok
+CALL enable_logging(level='debug');
+
+statement ok
+SET VARIABLE table_path = (FROM unity.table_data_path('id_name'));
+
+# The provisioner seeded id_name via CREATE (empty, catalog-managed) + one INSERT of the 5
+# fixture rows -> that seed INSERT is staged commit v1. The body's writes below are v2..v6.
+# NOTE (verify on first live run): all staged-commit indices assume seed = 1 commit (v1); if
+# the seed commits differently, shift these numbers.
+query II
+SELECT id, name FROM id_name ORDER BY id;
+----
+1	one
+2	two
+3	three
+4	four
+5	five
+
+statement ok
+INSERT INTO id_name VALUES (10, 'ten');
+
+statement ok
+INSERT INTO id_name VALUES (11, 'eleven');
+
+query II
+SELECT id, name FROM id_name ORDER BY id
+----
+1	one
+2	two
+3	three
+4	four
+5	five
+10	ten
+11	eleven
+
+# Staged commits so far: v1 (seed) + v2 (ten) + v3 (eleven)
+query I
+SELECT parse_filename(file)[0:21] AS f FROM GLOB(getvariable('table_path') || '/_delta_log/_staged_commits/**/*') ORDER BY f;
+----
+00000000000000000001.
+00000000000000000002.
+00000000000000000003.
+
+# -----------------------------------------------------------------------------
+# Backfill verification (delta.yaml v1).
+# Under v1 each add-commit POST carries the table UUID (assert-table-uuid) and, once a
+# watermark exists, a set-latest-backfilled-version update (UCAPI::UpdateTable). A read marks
+# the table dirty, the next InternalAttach calls LoadTable, and BackfillCommits copies each
+# outstanding staged commit into _delta_log/ while advancing the backfilled_through watermark.
+#
+
+loop i 0 3
+
+statement ok
+INSERT INTO id_name VALUES (1000 + {i}, 'loop');
+
+endloop
+
+# count(*) = 10 confirms all writes are visible: 5 seed + 2 (ten, eleven) + 3 (loop).
+query I
+SELECT count(*) FROM id_name;
+----
+10
+
+# All 6 staged commits present (v1 seed, v2-v3 inserts, v4-v6 loop). Staged files are copied
+# (not moved) on backfill, so they remain until VACUUM.
+query I
+SELECT parse_filename(file)[0:21] AS f FROM GLOB(getvariable('table_path') || '/_delta_log/_staged_commits/**/*') ORDER BY f;
+----
+00000000000000000001.
+00000000000000000002.
+00000000000000000003.
+00000000000000000004.
+00000000000000000005.
+00000000000000000006.
+
+# v1 backfill effect: each staged commit is copied to a regular (non-staged) _delta_log/NNN.json
+# entry (clean %020llu.json name, no UUID suffix). The version-0 creation commit is excluded by
+# the f filter.
+query I
+SELECT parse_filename(file)[0:21] AS f FROM GLOB(getvariable('table_path') || '/_delta_log/*.json')
+WHERE f >= '00000000000000000001.' ORDER BY f;
+----
+00000000000000000001.
+00000000000000000002.
+00000000000000000003.
+00000000000000000004.
+00000000000000000005.
+00000000000000000006.
+
+# -----------------------------------------------------------------------------
+# v1 add-commit protocol -- assert-table-uuid + set-latest-backfilled-version. These ride in
+# the UpdateTable POST body and surface only in the enriched api.UpdateTable debug log line.
+#
+
+# Every add-commit carries the table UUID (assert-table-uuid requirement).
+query I
+SELECT count(*) > 0 FROM duckdb_logs()
+WHERE message LIKE 'api.UpdateTable %id_name %table_id=%'
+  AND message NOT LIKE '%table_id=(none)%';
+----
+true
+
+# Once a read advances the backfill watermark, later commits carry
+# set-latest-backfilled-version (numeric backfill_version, not "(none)").
+query I
+SELECT count(*) > 0 FROM duckdb_logs()
+WHERE message LIKE 'api.UpdateTable %id_name %backfill_version=%'
+  AND message NOT LIKE '%backfill_version=(none)%';
+----
+true

@@ -1,0 +1,62 @@
+name: publish-uc-image
+
+# Manual, owner-only -- build + publish the OSS Unity Catalog "duck" test image to ghcr on demand.
+# Mirrors the driver's publish-images.yml auth (GHCR_PAT), so only the namespace owner holding that
+# secret can push. The image is BUILT from unitycatalog source (sbt) via scripts/oss_uc_image/build_image.
+#
+# CI publishes the amd64 slice only -- that's all the ubuntu-latest test runners (and Ducktest.yml) pull.
+# For a multi-arch :ci, build the arm64 slice on an Apple-Silicon Mac and re-merge -- the same build_image
+# flow, no GitHub arm runner needed:
+#   UC_REPO=/path/to/unitycatalog IMAGE_NS=ghcr.io/benfleis scripts/oss_uc_image/build_image --push
+#   IMAGE_NS=ghcr.io/benfleis scripts/oss_uc_image/build_image --merge --alias ci   # restitch across arches
+#
+# Guarded to the owner + the default branch below (landed, non-PR code): workflow_dispatch never fires on
+# a PR, and the `if` blocks a stray dispatch by anyone else or from a feature branch. For HARD enforcement
+# make this a protected Environment with yourself as the required reviewer.
+on:
+  workflow_dispatch:
+    inputs:
+      uc_ref:
+        description: "unitycatalog source ref to build from (overrides the pinned default)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NS: ghcr.io/benfleis
+  UC_SOURCE_REPO: unitycatalog/unitycatalog
+  # The UC source ref is PINNED in scripts/oss_uc_image/build_image (single source of truth). This only
+  # forwards a dispatch-time override; empty falls through to build_image's default.
+  UC_REF: ${{ github.event.inputs.uc_ref }}
+  PUBLISH_ALIAS: ci
+
+jobs:
+  publish:
+    # Owner-only + default-branch-only. Adjust 'benfleis'/'main' if your GH login or landed branch differ.
+    if: github.actor == 'benfleis' && github.ref == 'refs/heads/main'
+    # Secret-scoping: once you create a protected `publish` environment (GHCR_PAT moved there as an
+    # ENVIRONMENT secret + required reviewer = you), this line gates every run behind your approval.
+    environment: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 90  # first publish runs the full unitycatalog sbt base build; later ones reuse it
+    steps:
+      - name: Checkout this repo (build scripts) at repo root
+        uses: actions/checkout@v4
+      - name: Checkout unitycatalog source at uc-src/ (build_image fetches+switches it to UC_REF)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UC_SOURCE_REPO }}
+          path: uc-src
+      - name: Log in to ghcr
+        # GHCR_PAT: a classic PAT with write:packages owned by benfleis (the ghcr.io/benfleis namespace).
+        run: echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u benfleis --password-stdin
+      - name: Build + push amd64 slice (base sbt build is the slow part; reused on republish)
+        env:
+          UC_REPO: ${{ github.workspace }}/uc-src
+        run: scripts/oss_uc_image/build_image --push
+      - name: Merge slice(s) into canonical :<tag> + move :ci alias
+        env:
+          UC_REPO: ${{ github.workspace }}/uc-src
+        run: scripts/oss_uc_image/build_image --merge --alias "$PUBLISH_ALIAS"

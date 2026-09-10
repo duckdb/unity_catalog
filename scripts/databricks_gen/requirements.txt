@@ -1,0 +1,4 @@
+# The databricks provisioning + databricks-gen path is pure SQL over the Statement
+# Execution API -- a light HTTP client, no Spark/pandas. (The duckdb-pytest-driver itself
+# is installed editable separately; xdist comes via its [xdist] extra.)
+databricks-sdk

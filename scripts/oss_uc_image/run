@@ -1,0 +1,47 @@
+#!/bin/bash
+# Single source of truth for the `docker run` line. Starts the duck UC server
+# detached, binding the in-container data dir to a host dir.
+#
+#   ./run [HOSTDIR]
+#
+# HOSTDIR  host dir for table data, bind-mounted at the SAME absolute path inside
+#          the container (so UC's absolute file:// table locations resolve for a
+#          HOST client too). Defaults to a fresh temp dir (printed below).
+#
+# Env overrides: DUCKTEST_UC_CONTAINER (default ducktest-uc), DUCKTEST_UC_PORT (default 8080),
+#                FINAL_IMAGE (default ghcr.io/benfleis/ducktest-unitycatalog:local -- the local build build_image tags. The driver overrides FINAL_IMAGE=...:ci
+#                to boot the published image; set it yourself to do the same by hand.
+set -euo pipefail
+
+CONTAINER="${DUCKTEST_UC_CONTAINER:-ducktest-uc}"
+PORT="${DUCKTEST_UC_PORT:-8080}"
+IMAGE="${FINAL_IMAGE:-ghcr.io/benfleis/ducktest-unitycatalog:local}"
+HOSTDIR="${1:-$(mktemp -d -t ducktest-uc-data-XXXXXX)}"
+
+# Absolute path required for bind mounts.
+HOSTDIR="$(cd "$HOSTDIR" && pwd)"
+
+# Mount host==container path and point the server at it: UC records absolute
+# file:// locations, which only resolve for a host client if the path matches.
+docker run --rm -d \
+  --user "$(id -u):2008" \
+  --name "$CONTAINER" \
+  -p "$PORT:8080" \
+  -v "$HOSTDIR:$HOSTDIR" \
+  -e "DUCKTEST_UC_DATA_DIR=$HOSTDIR" \
+  "$IMAGE" >/dev/null
+
+cat <<EOF
+started container : $CONTAINER
+image             : $IMAGE
+api               : http://localhost:$PORT
+data dir (host)   : $HOSTDIR
+  duck.cmt   data -> $HOSTDIR/duck/cmt/__unitystorage/...
+  duck.plain data -> $HOSTDIR/duck/plain/<table>/...
+
+manage tables     : ./uctl create cmt   id_name "id INT, name STRING"
+                    ./uctl create plain id_name "id INT, name STRING"
+                    ./uctl list  cmt
+                    ./uctl drop  cmt id_name
+stop              : docker stop $CONTAINER
+EOF

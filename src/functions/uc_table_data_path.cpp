@@ -18,7 +18,7 @@ struct UCTableDataPathBindData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> UCTableDataPathBind(ClientContext &context, TableFunctionBindInput &input,
-                                                    vector<LogicalType> &return_types, vector<string> &names) {
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (!input.info) {
 		throw InternalException("table_data_path: missing function info");
 	}
@@ -27,7 +27,7 @@ static unique_ptr<FunctionData> UCTableDataPathBind(ClientContext &context, Tabl
 
 	auto table_name = input.inputs[0].GetValue<string>();
 
-	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name);
+	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)));
 	auto entry = schema.tables.GetEntry(context, lookup_info);
 	if (!entry) {
 		throw BinderException("table_data_path: table '%s' not found", table_name);
@@ -51,8 +51,11 @@ static void UCTableDataPathExecute(ClientContext &context, TableFunctionInput &d
 	if (data.finished) {
 		return;
 	}
-	output.SetCardinality(1);
-	output.SetValue(0, 0, Value(data.storage_location));
+	// Write the value at row 0, then set cardinality. SetChildCardinality (not the deprecated
+	// SetCardinality) sizes the child vectors via FlatVector::SetSize -- preserving the written
+	// value -- and sets the chunk count.
+	output.data[0].SetValue(0, Value(data.storage_location));
+	output.SetChildCardinality(1);
 	data.finished = true;
 }
 

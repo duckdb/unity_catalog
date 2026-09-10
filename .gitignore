@@ -11,3 +11,4 @@ unitycatalogga
 test/sql/tmp.test
 venv
 .cache/
+__pycache__

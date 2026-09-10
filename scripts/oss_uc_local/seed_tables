@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Seed the `duck` test catalog into a LOCAL (non-docker) OSS Unity Catalog server.
+#
+# Two schemas, mirroring the two Delta paths the extension supports:
+#   duck.managed  — MANAGED tables. In this UC build MANAGED ⇒ catalog-managed (CMT): the
+#                   CLI commits via UCCatalogManagedClient, so these exercise the delta.yaml
+#                   v1 path (LoadTable / UpdateTable). Bundled `unity.default.*` samples are
+#                   NOT catalog-managed, so they cannot cover this.
+#   duck.external — EXTERNAL tables. Plain (non-CMT) Delta; the no-backfill write path.
+#
+# Each schema gets two tables, by role:
+#   <table>_ro — read-only fixture, seeded with rows below (read tests attach READ_ONLY).
+#   <table>_rw — empty write target, owned by write tests.
+# Keeping reads and writes on disjoint tables stops write tests polluting read fixtures on
+# this stateful (no per-test reset) server.
+#
+# Idempotency model (so repeated local runs and CI both behave):
+#   _rw — ALWAYS destroyed and recreated empty, so each run starts from a clean write target.
+#   _ro — left as-is by default (created only if absent, then row-seeded via WHERE NOT EXISTS).
+#         Pass --reset to also destroy + recreate + re-seed the _ro tables.
+#
+# `bin/uc table create` cannot insert data, so the _ro tables are populated by driving the
+# built duckdb CLI (unity_catalog auto-loads).
+#
+# No special server config needed: server.managed-table.enabled defaults to true and
+# server.authorization defaults to disable. MANAGED tables only require a storage_root,
+# set at schema-create (duck.managed) below; EXTERNAL tables get a per-table storage_location.
+# Just build + start the server:  (cd "$UC_REPO" && build/sbt package && bin/start-uc-server)
+#
+# Usage: seed_tables [--reset]
+#
+# Env:
+#   UC_REPO             UC checkout (default ~/src/d/unitycatalog)
+#   DUCKDB_UC_DATA_DIR  table data root (default $UC_REPO/etc/data)
+#   DUCKDB_BIN          built duckdb CLI (default <ext-repo>/build/release/duckdb)
+set -euo pipefail
+
+RESET=0
+for arg in "$@"; do
+	case "$arg" in
+	--reset) RESET=1 ;;
+	*)
+		echo "seed: unknown argument '$arg' (usage: seed_tables [--reset])" >&2
+		exit 2
+		;;
+	esac
+done
+
+# <ext-repo>/scripts/oss_uc_local/seed_tables → the built CLI is at <ext-repo>/build/*/duckdb.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXT_REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"
+DUCKDB_BIN="${DUCKDB_BIN:-$EXT_REPO/build/release/duckdb}"
+
+UC_REPO="${UC_REPO:-$HOME/src/d/unitycatalog}"
+DATA_DIR="${DUCKDB_UC_DATA_DIR:-$UC_REPO/etc/data}"
+MANAGED_ROOT="$DATA_DIR/duck/managed"
+EXTERNAL_ROOT="$DATA_DIR/duck/external"
+
+# Table identity. The duck image standardizes on table base `id_name` (id INT, name STRING);
+# change here (and in the tests) to re-point.
+TABLE="id_name"
+COLS="id INT, name STRING"
+
+[ -x "$DUCKDB_BIN" ] || {
+	echo "seed: duckdb CLI not found at $DUCKDB_BIN (build it, or set DUCKDB_BIN)" >&2
+	exit 1
+}
+
+mkdir -p "$MANAGED_ROOT" "$EXTERNAL_ROOT"
+cd "$UC_REPO"
+uc() { ./bin/uc "$@"; }
+
+# create_table SCHEMA TBL — managed (auto-allocated location) vs external (own subdir; a shared
+# location would alias one Delta log, so writing one table would corrupt the other).
+create_table() {
+	local schema=$1 tbl=$2
+	if [ "$schema" = external ]; then
+		uc table create --full_name "duck.$schema.$tbl" --columns "$COLS" \
+			--storage_location "$EXTERNAL_ROOT/$tbl"
+	else
+		uc table create --full_name "duck.$schema.$tbl" --columns "$COLS" --table_type MANAGED
+	fi
+}
+
+# drop_table SCHEMA TBL — remove the UC metadata AND (external only) the backing Delta data, so a
+# subsequent create yields a genuinely empty table. Managed tables get a fresh auto-allocated
+# location on recreate, so their old data is simply orphaned (harmless).
+drop_table() {
+	local schema=$1 tbl=$2
+	uc table delete --full_name "duck.$schema.$tbl" >/dev/null 2>&1 || true
+	[ "$schema" = external ] && rm -rf "$EXTERNAL_ROOT/$tbl"
+	return 0
+}
+
+# Idempotent: catalog `duck`.
+uc catalog get --name duck >/dev/null 2>&1 ||
+	uc catalog create --name duck --comment "DuckDB test catalog"
+
+# duck.managed — schema carries storage_root so UC allocates per-table managed locations.
+uc schema get --full_name "duck.managed" >/dev/null 2>&1 ||
+	uc schema create --catalog duck --name "managed" \
+		--comment "catalog-managed (MANAGED) Delta tables" --storage_root "$MANAGED_ROOT"
+
+# duck.external.
+uc schema get --full_name "duck.external" >/dev/null 2>&1 ||
+	uc schema create --catalog duck --name "external" \
+		--comment "plain (EXTERNAL) Delta tables"
+
+for schema in managed external; do
+	# _ro: default leaves it intact (create only if missing); --reset rebuilds it.
+	if [ "$RESET" = 1 ]; then
+		drop_table "$schema" "${TABLE}_ro"
+		create_table "$schema" "${TABLE}_ro"
+	else
+		uc table get --full_name "duck.$schema.${TABLE}_ro" >/dev/null 2>&1 ||
+			create_table "$schema" "${TABLE}_ro"
+	fi
+	# _rw: always rebuilt empty.
+	drop_table "$schema" "${TABLE}_rw"
+	create_table "$schema" "${TABLE}_rw"
+done
+
+# Populate the _ro tables (CLI can't insert). WHERE NOT EXISTS covers both cases: a freshly
+# (re)created _ro is empty and gets the 5 rows; an existing _ro is left untouched. _rw left empty.
+"$DUCKDB_BIN" <<'SQL'
+CREATE SECRET (TYPE unity_catalog, TOKEN 'not-used', ENDPOINT 'http://127.0.0.1:8080', AWS_REGION 'us-east-2');
+ATTACH 'duck' AS duck (TYPE unity_catalog, DEFAULT_SCHEMA 'managed');
+INSERT INTO duck.managed.id_name_ro
+  SELECT * FROM (VALUES (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four'), (5, 'five')) v(id, name)
+  WHERE NOT EXISTS (SELECT 1 FROM duck.managed.id_name_ro);
+INSERT INTO duck.external.id_name_ro
+  SELECT * FROM (VALUES (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four'), (5, 'five')) v(id, name)
+  WHERE NOT EXISTS (SELECT 1 FROM duck.external.id_name_ro);
+SQL
+
+echo "seed: duck.{managed,external}.${TABLE}_ro (5 rows$([ "$RESET" = 1 ] && echo ', reset')) + _rw (recreated empty) ready"

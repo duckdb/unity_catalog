@@ -1,0 +1,205 @@
+# name: test/databricks/scan_plan.test
+# description: IRC scan-plan API (server-side filter pushdown) against Databricks Unity Catalog,
+# group: [databricks]
+
+# plus the /plan-failure -> Delta fallback (a dead endpoint must not error the query).
+
+#
+# Table (test/databricks/data/scan_plan_days_managed.sql): id INT, day VARCHAR, 5 files
+# one-per-day, 10 rows/file, ids 1-50 -- catalog-managed (staged commits; only readable via
+# the scan-plan path).
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+require-env CATALOG
+
+require-env SCHEMA
+
+statement ok
+CALL enable_logging(level='DEBUG');
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}',
+    USE_IRC_SCAN_PLAN true);
+
+statement ok
+USE unity;
+
+# -----------------------------------------------------------------------------
+# scan_plan_days_managed — full scan (all 50 rows, 5 files)
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM scan_plan_days_managed;
+----
+50
+
+# -----------------------------------------------------------------------------
+# Filter pushdown — single day (EQ expression, fully serialized)
+#
+# day = 'Mon' → ids 1-10 (10 rows); server must prune to the Mon file only.
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM scan_plan_days_managed WHERE day = 'Mon';
+----
+10
+
+query II
+SELECT min(id), max(id) FROM scan_plan_days_managed WHERE day = 'Mon';
+----
+1	10
+
+# -----------------------------------------------------------------------------
+# Filter pushdown — compound predicate with residual
+#
+# day = 'Mon' AND id % 2 = 0:
+#   - day = 'Mon'   → serialized as IRC EQ; server prunes to 1 file
+#   - id % 2 = 0    → unsupported; dropped from IRC filter; DuckDB applies it as a residual
+# Expected: ids 2,4,6,8,10 → count = 5
+# If the residual is incorrectly discarded (filters.clear()), count would be 10.
+#
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM scan_plan_days_managed WHERE day = 'Mon' AND id % 2 = 0;
+----
+5
+
+# Exactly one plan call for the query. The pruning assertion below counts only results that
+# pruned, so on its own it would pass even if we called /plan repeatedly.
+query I
+SELECT count(*) FROM duckdb_logs() WHERE message LIKE 'api-irc.PlanTableScan% filter=%';
+----
+1
+
+# Server still pruned to 1 file (AND with true-fallback doesn't widen the server predicate)
+query I
+SELECT count(*) FROM duckdb_logs()
+WHERE message LIKE 'api-irc.PlanTableScan% inline=1% plan_tasks=0%';
+----
+1
+
+query I
+SELECT count(*) FROM scan_plan_days_managed WHERE day = 'Fri' AND id % 2 = 0;
+----
+5
+
+query II
+SELECT min(id), max(id) FROM scan_plan_days_managed WHERE day = 'Fri' AND id % 2 = 0;
+----
+42	50
+
+statement ok
+USE memory;
+
+statement ok
+DETACH unity;
+
+# -----------------------------------------------------------------------------
+# /plan-failure fallback: a dead IRC endpoint must fall back to the Delta read path
+# for the SAME query, not error (the delegate-swap in uc_table_entry.cpp). Reuses the
+# table already provisioned above -- a fresh attach whose availability starts UNKNOWN.
+#
+
+statement ok
+ATTACH '{CATALOG}' AS borked (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}',
+    USE_IRC_SCAN_PLAN true, api_irc_endpoint_override 'http://127.0.0.1:1');
+
+statement ok
+USE borked;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# Scan succeeds via the Delta fallback despite the dead /plan endpoint (5 files, 50 rows).
+query I
+SELECT count(*) FROM scan_plan_days_managed;
+----
+50
+
+# A predicate still returns the right rows (DuckDB's Filter operator applies it over the Delta scan).
+query I
+SELECT count(*) FROM scan_plan_days_managed WHERE day = 'Mon';
+----
+10
+
+# The fallback logged its WARNING naming the /plan failure.
+query I
+SELECT (count(*) > 0)::INT FROM duckdb_logs()
+WHERE message LIKE 'api-irc.PlanTableScan% failed, falling back to Delta%';
+----
+1
+
+statement ok
+USE memory;
+
+statement ok
+DETACH borked;
+
+# -----------------------------------------------------------------------------
+# USE_IRC_SCAN_PLAN gates the path: without it, /plan is never called
+#
+# Asserted as the ABSENCE of a plan attempt, because the Delta fallback would hide a gate that
+# failed open -- scan planning would be tried, fail or succeed, and the rows would look the same
+# either way.
+#
+
+statement ok
+ATTACH '{CATALOG}' AS plain (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}');
+
+statement ok
+USE plain;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM scan_plan_days_managed;
+----
+50
+
+# No plan attempt, and no HTTP request to the IRC endpoint.
+query I
+SELECT count(*) FROM duckdb_logs() WHERE message LIKE 'api-irc.%';
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_logs() WHERE message LIKE '%iceberg-rest%';
+----
+0
+
+statement ok
+USE memory;
+
+statement ok
+DETACH plain;

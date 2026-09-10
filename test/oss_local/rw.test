@@ -1,0 +1,57 @@
+# name: test/oss_local/rw.test
+# description: shared read/write round-trip that is IDENTICAL for catalog-managed (cmt) and plain (plain) tables -- the data behavior must not differ by table type. rw.py parametrizes this body over [cmt, plain] via {UC_TEST_SCHEMA}; the table-type-specific protocol assertions (LoadTable/UpdateTable called or not) live in table-cmt/ and table-plain/.
+# group: [oss_local]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_SCHEMA
+
+require-env UC_TEST_TABLE
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+statement ok
+USE duck.{UC_TEST_SCHEMA};
+
+# -----------------------------------------------------------------------------
+# Write then read back -- identical results regardless of table type
+#
+
+statement ok
+INSERT INTO {UC_TEST_TABLE} VALUES (1, 'blabla');
+
+# The second INSERT also exercises PlanInsert credential ordering (RefreshCredentials
+# before InternalAttach) on the catalog-managed path; harmless on plain.
+statement ok
+INSERT INTO {UC_TEST_TABLE} VALUES (2, 'blabla2');
+
+query II
+SELECT id, name FROM {UC_TEST_TABLE} WHERE id IN (1, 2) ORDER BY id;
+----
+1	blabla
+2	blabla2
+
+# Catalog metadata lists the attached table (both table types). Assert existence via a
+# constant count -- the table name is per-cell dynamic ({UC_TEST_TABLE}), so we don't
+# echo it in the expected-results block (env substitution there isn't guaranteed).
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'duck' AND table_name = '{UC_TEST_TABLE}';
+----
+1

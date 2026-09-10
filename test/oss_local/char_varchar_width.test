@@ -1,0 +1,89 @@
+# name: test/oss_local/char_varchar_width.test
+# description: CHAR(n)/VARCHAR(n) width is enforced on writes that go through the UC catalog path -- an over-length INSERT through ATTACH ... (TYPE unity_catalog) must raise a clean error. The bound lives in Delta field metadata that only Spark writes, so char_varchar_width.py hand-seeds the _delta_log.
+# group: [oss_local]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_SCHEMA
+
+require-env UC_TEST_TABLE
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+statement ok
+USE duck.{UC_TEST_SCHEMA};
+
+# -----------------------------------------------------------------------------
+# The bound is visible through the catalog as a plain string
+#
+# UC drops the width in its own type map, so the catalog view will never show char(5).
+# That is expected and is not what enforcement depends on.
+#
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'duck' AND table_name = '{UC_TEST_TABLE}';
+----
+1
+
+# -----------------------------------------------------------------------------
+# At the limit: accepted
+#
+
+statement ok
+INSERT INTO {UC_TEST_TABLE} VALUES (1, 'ABCDE');
+
+query II
+SELECT id, code FROM {UC_TEST_TABLE} ORDER BY id;
+----
+1	ABCDE
+
+# -----------------------------------------------------------------------------
+# Over the limit: rejected
+#
+# Reject rather than truncate: Spark refuses an over-length write, and truncating would
+# silently alter the value.
+#
+
+statement error
+INSERT INTO {UC_TEST_TABLE} VALUES (2, 'ABCDEFGH');
+----
+is declared as char(5)
+
+# Nothing from the rejected statement committed
+query I
+SELECT count(*) FROM {UC_TEST_TABLE};
+----
+1
+
+# NULLs are unbounded
+statement ok
+INSERT INTO {UC_TEST_TABLE} VALUES (3, NULL);
+
+query I
+SELECT count(*) FROM {UC_TEST_TABLE};
+----
+2
+
+# `USE` above made duck the default database, which cannot be detached while selected
+statement ok
+USE memory;
+
+statement ok
+DETACH duck;

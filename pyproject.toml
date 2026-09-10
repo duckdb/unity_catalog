@@ -1,0 +1,34 @@
+# pyproject.toml — the uc extension's TEST environment. First written by `ducktest configure`, now
+# maintained here. `uv run pytest` (from this dir) resolves everything the pytest process imports from a
+# single venv; the pytest *config* lives next door in pytest.ini. This consolidates what used to be split
+# across a separate editable driver install + scripts/databricks_gen/requirements.txt (see the Makefile).
+#
+# This repo is an EXTENSION, not a Python package, so `[tool.uv] package = false` keeps uv from building
+# it — you still get `uv run pytest`. Test-support Python (test/py/uc, scripts/databricks_gen) imports via
+# the driver's `duckdb_pythonpath`, not from here (see the driver README, "The Python layout").
+
+[project]
+name = "duckdb-uc-tests"
+version = "0"
+requires-python = ">=3.12,<3.15" # per the Makefile: Python 3.12–3.14
+
+[dependency-groups]
+# Everything the pytest process imports, in ONE place. NB: pyspark is deliberately absent — it runs
+# container-side (scripts/oss_uc_image/exec_spark_sql.py), never in the test runner.
+dev = [
+  "duckdb-pytest-driver[xdist]", # the driver; its [xdist] extra brings pytest + pytest-xdist
+  "databricks-sdk",              # the databricks_gen path (SQL over the Statement Execution API)
+  "pre-commit>=0.6.1",
+]
+
+[tool.uv]
+package = false
+
+# The driver isn't published yet — resolve it from the GitHub branch (was: ../driver sibling checkout).
+[tool.uv.sources]
+duckdb-pytest-driver = { git = "https://github.com/benfleis/duckdb-pytest-driver", branch = "dev/v0.3" }
+
+# Conform to duckdb's python black settings
+[tool.ruff]
+line-length = 120
+format.quote-style = "preserve"

@@ -1,0 +1,56 @@
+# name: test/oss_local/table-cmt/catalog_managed.test
+# description: catalog-managed PROTOCOL contrast -- duck.cmt tables ARE catalog-managed, so reading calls LoadTable and writing calls UpdateTable (delta.yaml v1). The shared data round-trip lives in oss_local/rw.test; this asserts ONLY the protocol calls (the cmt half of the contrast with table-plain/catalog_managed). Paired catalog_managed.py provisions an empty duck.cmt.{UC_TEST_TABLE}.
+# group: [table-cmt]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_TABLE
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'cmt');
+
+statement ok
+CALL enable_logging(level='DEBUG');
+
+# -----------------------------------------------------------------------------
+# CMT read path: the table carries delta.feature.catalogManaged, so InternalAttach
+# calls LoadTable (delta.yaml v1 GET .../tables/{table}).
+#
+
+statement ok
+FROM duck.cmt.{UC_TEST_TABLE};
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs()
+WHERE message LIKE 'api.LoadTable duck.cmt.{UC_TEST_TABLE}%';
+----
+true
+
+# -----------------------------------------------------------------------------
+# CMT write path: INSERT exercises UpdateTable (delta.yaml v1 add-commit).
+#
+
+statement ok
+INSERT INTO duck.cmt.{UC_TEST_TABLE} VALUES (1, 'blabla');
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs()
+WHERE message LIKE 'api.UpdateTable duck.cmt.{UC_TEST_TABLE}%';
+----
+true

@@ -1,71 +1,44 @@
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-# Configuration of extension
+# Extension config.
 EXT_NAME=unity_catalog
 EXT_CONFIG=${PROJ_DIR}extension_config.cmake
+# json: bodies that read a _delta_log commit back as JSON.
+DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs;tpch;tpcds;json
 
-# Core extensions that we need for crucial testing
-DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs;tpch;tpcds
+# Defaults default to the uv-built .venv (see `make venv`); override any on the CLI.
+UV      ?= uv
+VENV    ?= .venv
+PYTEST  ?= $(VENV)/bin/python -m pytest
+export DUCKTEST_UC_IMAGE ?= ghcr.io/benfleis/ducktest-unitycatalog:local
+UC_REPO ?= $(HOME)/src/d/unitycatalog
+ENV_DATABRICKS_CMD ?= scripts/env_databricks   # injects DATABRICKS_* creds -- read the script to hack at it
 
-#FULL_TEST_EXTENSION_DEPS=tpcds;tpch TODO: add
-
-ENV_DATABRICKS_CMD ?= scripts/run_databricks_env
-BUILD_DIR ?= ./build/release
-
-# Include the Makefile from extension-ci-tools
+# Build targets (release/debug/…).
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
+# Test venv from pyproject: uv sync installs the dev group (driver[xdist] + databricks-sdk); the driver's
+# pytest11 entry point registers the plugin. No `venv` symlink -- it's `.venv` all the way down.
+.PHONY: venv
 venv:
-	python3.12 --version | grep -q '^Python 3[.]12[.]'
-	python3.12 -m venv venv
-	./venv/bin/pip3 install -r scripts/databricks_data_gen/requirements.txt
+	$(UV) sync
 
-# This is to (re)gen the test data in the remote databricks, this does not need to be rerun unless remote data needs refreshing
-# Requires the same env variables from the write tests
-test_data_prepare: venv
-	for f in scripts/databricks_data_gen/custom_data_sources/*.sql; do \
-		./venv/bin/python3 scripts/databricks_data_gen/generate_databricks_test_data.py from-custom-sql $$f duckdb_testing.main; \
-	done
-	./venv/bin/python3 scripts/databricks_data_gen/generate_databricks_test_data.py from-duckdb-sql scripts/databricks_data_gen/duckdb_data_sources/tpcds_sf0_01.sql duckdb_testing.tpcds_sf0_01
-	./venv/bin/python3 scripts/databricks_data_gen/generate_databricks_test_data.py from-duckdb-sql scripts/databricks_data_gen/duckdb_data_sources/tpch_sf0_01.sql duckdb_testing.tpch_sf0_01
+# `make test` == default oss_local suite (smoke); hooks the ci-tools chain so the extension builds first.
+test_release_internal:
+	$(PYTEST) test/oss_local
 
-################################################
-# Databricks Tests
-################################################
+# `make test_all` == oss_local + the creds-gated databricks suite.
+.PHONY: test_all
+test_all: test test_databricks
 
-# Runs the regular databricks tests (non-write) with credentials from 1password
-run_databricks_tests:
-	${ENV_DATABRICKS_CMD} $(BUILD_DIR)/test/unittest "test/sql/databricks/*"
+.PHONY: test_databricks
+test_databricks:
+	$(ENV_DATABRICKS_CMD) $(PYTEST) test/databricks
 
-################################################
-# Databricks Write Tests
-################################################
-
-# These tests will automatically load some data into a fresh schema in databricks, then allows you to run some tests on it
-# NOTE: Easiest way is to just do make `run_write_tests` which runs all steps
-
-# TODO: test data in `source` schema is currently hand generated, this should be cleaned up
-
-# Before running this, ensure your env is configured:
-#    >   . scripts/run_databricks_env
-
-# Prepare the main write test files by copying the tables from the `source` schema to the `{DATABRICKS_WRITE_TEST_SCHEMA}` schema
-write_tests_prepare: venv
-	./venv/bin/python3 scripts/databricks_data_gen/generate_databricks_test_data.py copy ${DATABRICKS_WRITE_TEST_CATALOG}.source ${DATABRICKS_WRITE_TEST_CATALOG}.${DATABRICKS_WRITE_TEST_SCHEMA}
-	./venv/bin/python3 scripts/databricks_data_gen/generate_databricks_test_data.py copy ${DATABRICKS_WRITE_TEST_CATALOG}.source ${DATABRICKS_WRITE_TEST_CATALOG}.${DATABRICKS_WRITE_TEST_SCHEMA} --catalog-managed
-
-write_tests_run:
-	$(BUILD_DIR)/test/unittest "test/sql/databricks/write_tests/*"
-
-write_tests_cleanup:
-	./venv/bin/python3 scripts/databricks_data_gen/clean_test_data.py ${DATABRICKS_WRITE_TEST_CATALOG}.${DATABRICKS_WRITE_TEST_SCHEMA}
-
-# - fetches credentials from 1password
-# - generates new schema name
-# - sets all env variables
-# - copies data into fresh table
-# - runs write tests
-# - cleans up data
-# NOTE: may leave some data around on s3, needs investigation!
-run_write_tests: venv
-	RUN_WRITE_TESTS=1 ${ENV_DATABRICKS_CMD} $(MAKE) -k write_tests_prepare write_tests_run write_tests_cleanup
+# `make publish_image` == the 3-step promote in scripts/oss_uc_image/README.md (docker login ghcr first).
+.PHONY: publish_image
+publish_image:
+	@test -f "$(UC_REPO)/build.sbt" || { echo "set UC_REPO=/path/to/unitycatalog (no build.sbt at '$(UC_REPO)')" >&2; exit 1; }
+	UC_REPO="$(UC_REPO)" scripts/oss_uc_image/build_image --push
+	scripts/oss_uc_image/smoke_test
+	UC_REPO="$(UC_REPO)" scripts/oss_uc_image/build_image --merge --alias ci

@@ -1,0 +1,78 @@
+# syntax=docker.io/docker/dockerfile:1.7-labs@sha256:b99fecfe00268a8b556fad7d9c37ee25d716ae08a5d7320e6d51c4dd83246894
+# NB: the `# syntax=` line above MUST be the first line of the file, otherwise the
+# labs frontend (needed for `COPY --parents`) is not loaded.
+#
+# Patched copy of unitycatalog's own Dockerfile, used by build with a UC
+# source checkout ($UC_REPO) as build context. The ONLY change vs upstream is the
+# COURSIER_CACHE line in the build stage (see comment below): upstream builds as
+# root, so coursier caches dependency jars under /root/.cache, but the runtime
+# stage only copies $HOME/.cache -- leaving every dependency jar (vertx, etc.)
+# out of the final image and breaking startup with NoClassDefFoundError. Pinning
+# the cache under $HOME/.cache makes the copied cache match the classpath file.
+ARG HOME="/home/unitycatalog"
+
+# Build stage, using Amazon Corretto jdk 17 on alpine with arm64 support
+FROM amazoncorretto:17-alpine3.20-jdk@sha256:c045f0537bc890f9e61924f33f35e9667f696b4f372dad4a73861a9396b5d0b5 as base
+
+# Dependencies are installed in $HOME/.cache by sbt
+ARG HOME
+ENV HOME=$HOME
+
+# --- the fix: keep coursier's cache under $HOME/.cache so the runtime stage's
+# `COPY $HOME/.cache/` actually captures the dependency jars (build runs as root,
+# whose default coursier cache would otherwise be /root/.cache, which is not copied).
+ENV COURSIER_CACHE="${HOME}/.cache/coursier"
+
+WORKDIR $HOME
+
+COPY --parents dev/ build/ project/ examples/ server/ api/ clients/ version.sbt build.sbt ./
+
+RUN apk add --no-cache bash && ./build/sbt -info clean package
+
+# Small runtime image
+FROM alpine:3.20@sha256:a4f4213abb84c497377b8544c81b3564f313746700372ec4fe84653e4fb03805 as runtime
+
+# Specific JAVA_HOME from Amazon Corretto
+ARG JAVA_HOME="/usr/lib/jvm/default-jvm"
+ARG USER="unitycatalog"
+ARG HOME
+
+# Copy Java from base
+COPY --from=base $JAVA_HOME $JAVA_HOME
+
+ENV HOME=$HOME \
+    JAVA_HOME=$JAVA_HOME \
+    PATH="${JAVA_HOME}/bin:${PATH}"
+
+# Copy build artifacts from base stage
+COPY --from=base --parents \
+    $HOME/examples/ \
+    $HOME/server/ \
+    $HOME/api/ \
+    $HOME/clients/ \
+    $HOME/target/ \
+    $HOME/.cache/ \
+    /
+
+# Create the service user/group with a PINNED uid+gid of 2008 (deliberately eyeball-obvious in `stat`).
+# Callers run `--user $(id -u):2008`: the process writes bind-mounted host dirs as the invoking host uid
+# (so the HOST owns the files -> clean host reads / cleanup / temp-dir sweep), while gid 2008 keeps group
+# rwx on this 550/770 $HOME so the server can still write its etc/ (H2 metastore + config).
+RUN <<EOF
+apk add --no-cache bash
+addgroup -g 2008 $USER
+adduser -S -u 2008 -G $USER $USER
+chmod -R 550 $HOME
+mkdir -p $HOME/etc/
+chmod -R 770 $HOME/etc/
+chown -R $USER:$USER $HOME
+EOF
+
+USER $USER
+
+# Copy remaining directories here for caching optimization
+COPY --chown=$USER:$USER --parents bin/ etc/ $HOME/
+
+WORKDIR $HOME
+
+CMD ["./bin/start-uc-server"]

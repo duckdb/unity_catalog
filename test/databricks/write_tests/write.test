@@ -1,0 +1,61 @@
+# name: test/databricks/write_tests/write.test
+# description: write path -- seed the id_name fixture into a plain/external cell, round-trip an INSERT.
+# group: [write_tests]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+require-env CATALOG
+
+require-env SCHEMA
+
+# Do not ignore 'HTTP' error messages!
+set ignore_error_messages
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, DEFAULT_SCHEMA '{SCHEMA}');
+
+statement ok
+USE unity;
+
+# The provisioner seeded id_name (5 rows) into the cell; read it back, then round-trip an INSERT.
+query II
+SELECT id, name FROM id_name ORDER BY id;
+----
+1	one
+2	two
+3	three
+4	four
+5	five
+
+statement ok
+INSERT INTO id_name VALUES (10, 'ten');
+
+query II
+SELECT id, name FROM id_name ORDER BY id;
+----
+1	one
+2	two
+3	three
+4	four
+5	five
+10	ten
