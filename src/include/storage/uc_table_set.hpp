@@ -52,6 +52,7 @@ public:
 	void MarkDirty(const lock_guard<mutex> &_attach_lock);
 
 	void ThrowIfUnreadableColumns() const;
+	void ThrowIfIntervalColumns() const;
 	void ThrowNoDeltaTable() const;
 
 private:
