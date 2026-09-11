@@ -374,12 +374,12 @@ def test_unreadable_column_without_a_log_is_refused(tmp_path):
 
 
 # Types Unity Catalog can report that this build has no mapping for, spelled as Databricks writes
-# them. GEOGRAPHY and GEOMETRY are Databricks extensions; OSS Unity Catalog cannot name them.
+# them. Both are Databricks extensions; OSS Unity Catalog cannot name them.
 _UNMAPPED_TYPES = {
-    "interval": _Type("interval day to second", '"interval day to second"'),
     "geography": _Type("geography(4326)", '"geography(4326)"'),
     "geometry": _Type("geometry(4326)", '"geometry(4326)"'),
 }
+_INTERVAL = _Type("interval day to second", '"interval day to second"')
 
 
 @pytest.mark.parametrize("name", sorted(_UNMAPPED_TYPES))
@@ -401,6 +401,51 @@ def test_unmapped_type_lists_but_is_refused_on_read(name, tmp_path):
     assert read.returncode != 0, combined
     assert "cannot read" in read.stderr, combined
     assert f"'v', which Unity Catalog reports as '{typ.text}'" in read.stderr, combined
+
+
+def _write_log(location, spec):
+    """A zero-row Delta table at `location`: one commit holding the protocol and a schema built from
+    `spec`, and no data files."""
+    fields = [{"name": name, "type": json.loads(typ.json), "nullable": True, "metadata": {}} for name, typ in spec]
+    metadata = {
+        "id": "00000000-0000-0000-0000-000000000002",
+        "format": {"provider": "parquet", "options": {}},
+        "schemaString": json.dumps({"type": "struct", "fields": fields}),
+        "partitionColumns": [],
+        "configuration": {},
+        "createdTime": 0,
+    }
+    actions = [{"protocol": {"minReaderVersion": 1, "minWriterVersion": 2}}, {"metaData": metadata}]
+    log = location / "_delta_log"
+    log.mkdir(parents=True)
+    (log / "00000000000000000000.json").write_text("\n".join(json.dumps(a) for a in actions) + "\n")
+
+
+@pytest.mark.parametrize("with_log", [True, False], ids=["with_log", "without_log"])
+def test_interval_column_is_refused(with_log, tmp_path):
+    """Every read of a table with an interval column is refused, naming the column, time travel
+    included. With a log the resolved schema would not even show it: the kernel drops interval fields
+    without an error, and the read would return the table minus the column."""
+    spec = [_col("id", _INT), _col("v", _INTERVAL)]
+    if with_log:
+        _write_log(tmp_path, spec)
+    with _MockUnityCatalog(_columns(spec), tmp_path, "intervals") as mock:
+        listed, listed_out = _run(mock, "SELECT column_types FROM (SHOW ALL TABLES) WHERE name = 'intervals';")
+        reads = [
+            _run(mock, sql)
+            for sql in (
+                "SELECT * FROM unity.plain.intervals;",
+                "SELECT id FROM unity.plain.intervals;",
+                "SELECT id FROM unity.plain.intervals AT (VERSION => 0);",
+            )
+        ]
+
+    assert listed.returncode == 0, listed_out + listed.stderr
+    assert "[INTEGER, UNKNOWN]" in listed_out, listed_out
+    for read, read_out in reads:
+        combined = read_out + read.stderr
+        assert read.returncode != 0, combined
+        assert f"interval column 'v', which Unity Catalog reports as '{_INTERVAL.text}'" in read.stderr, combined
 
 
 def test_timestamp_text_types_agree_with_the_log():

@@ -21,6 +21,7 @@
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
 
@@ -115,6 +116,9 @@ unique_ptr<CatalogEntry> TableInformation::EntryFromDeltaLog(ClientContext &cont
 }
 
 optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, const EntryLookupInfo &lookup_info) {
+	// The kernel drops interval fields from the log's schema without an error, so the report is the only
+	// place they show: refuse ahead of both branches and the per-transaction cache.
+	ThrowIfIntervalColumns();
 	auto at = lookup_info.GetAtClause();
 	if (!at) {
 		// Neither ScanPlan/non-delta has a log to resolve against, return reported a la UCTableEntry::GetScanFunction.
@@ -181,6 +185,33 @@ void TableInformation::ThrowIfUnreadableColumns() const {
 	                              "'%s', which Unity Catalog reports as '%s'",
 	                              table_data->name, static_cast<uint64_t>(unreadable_columns.size()), column.first,
 	                              column.second);
+}
+
+// Delta keeps year-month and day-time intervals apart, as a count of months or of microseconds; DuckDB's
+// INTERVAL mixes months, days and micros and compares a month as 30 days, so neither maps without changing
+// meaning. Searching the type text also catches a nested field, e.g. `struct<gap:interval day to second>`.
+static bool TypeTextHasInterval(const string &type_text) {
+	static const char *const UNITS[] = {"year", "month", "day", "hour", "minute", "second"};
+	auto text = StringUtil::Lower(type_text);
+	for (auto pos = text.find("interval "); pos != string::npos; pos = text.find("interval ", pos + 1)) {
+		auto rest = text.substr(pos + 9);
+		for (auto unit : UNITS) {
+			if (StringUtil::StartsWith(rest, unit)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void TableInformation::ThrowIfIntervalColumns() const {
+	for (auto &column : table_data->columns) {
+		if (TypeTextHasInterval(column.type_text)) {
+			throw NotImplementedException("Table '%s' has interval column '%s', which Unity Catalog reports as "
+			                              "'%s'; Delta interval semantics differ from DuckDB's INTERVAL",
+			                              table_data->name, column.name, column.type_text);
+		}
+	}
 }
 
 void TableInformation::ThrowNoDeltaTable() const {
