@@ -373,6 +373,36 @@ def test_unreadable_column_without_a_log_is_refused(tmp_path):
     assert "parameter" not in read.stderr.lower(), combined
 
 
+# Types Unity Catalog can report that this build has no mapping for, spelled as Databricks writes
+# them. GEOGRAPHY and GEOMETRY are Databricks extensions; OSS Unity Catalog cannot name them.
+_UNMAPPED_TYPES = {
+    "interval": _Type("interval day to second", '"interval day to second"'),
+    "geography": _Type("geography(4326)", '"geography(4326)"'),
+    "geometry": _Type("geometry(4326)", '"geometry(4326)"'),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_UNMAPPED_TYPES))
+def test_unmapped_type_lists_but_is_refused_on_read(name, tmp_path):
+    """Listing never fails over a type this build cannot map: the column lists as UNKNOWN. A read
+    whose schema comes from the reported schema is refused, naming the column and the type UC
+    reported. With a log, a read binds to the resolved schema instead, so what happens there depends
+    on what the log holds."""
+    typ = _UNMAPPED_TYPES[name]
+    spec = [_col("id", _INT), _col("v", typ)]
+    with _MockUnityCatalog(_columns(spec), tmp_path, "unmapped") as mock:
+        listed, listed_out = _run(mock, "SELECT column_types FROM (SHOW ALL TABLES) WHERE name = 'unmapped';")
+        read, read_out = _run(mock, "SELECT v FROM unity.plain.unmapped;")
+
+    assert listed.returncode == 0, listed_out + listed.stderr
+    assert "[INTEGER, UNKNOWN]" in listed_out, listed_out
+
+    combined = read_out + read.stderr
+    assert read.returncode != 0, combined
+    assert "cannot read" in read.stderr, combined
+    assert f"'v', which Unity Catalog reports as '{typ.text}'" in read.stderr, combined
+
+
 def test_timestamp_text_types_agree_with_the_log():
     """Both timestamps reported in text alone: reported types them as resolved does, so the listing
     is accurate and no read reports a divergence. Values are asserted here rather than as a case
