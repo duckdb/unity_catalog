@@ -21,7 +21,7 @@ defaults:
     shell: bash
 
 env:
-  VCPKG_COMMIT_ID: 84bab45d415d22042bd0b9081aea57f362da3f35
+  VCPKG_COMMIT_ID: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.24
   # Flip release <-> relassert here. Threaded below as $BUILD_KIND in run: and ${{ env.BUILD_KIND }}
   # in with:. (GH quirk: env isn't usable in a job `name:` or job-level `env:`, so job names stay
   # generic and BUILD_DIR is set inline in the run.) NB: relassert is a non-Release build -> it also
