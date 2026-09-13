@@ -365,6 +365,10 @@ static void ReadStorageCredentials(duckdb_yyjson::yyjson_val *root, UCAPITableCr
 	result.key_id = TryGetStrFromObject(cfg, "s3.access-key-id", false);
 	result.secret = TryGetStrFromObject(cfg, "s3.secret-access-key", false);
 	result.session_token = TryGetStrFromObject(cfg, "s3.session-token", false);
+	// The delta/v1 endpoints namespace per cloud rather than nesting like the
+	// temporary-table-credentials response does.
+	result.bearer_token = TryGetStrFromObject(cfg, "gcs.oauth-token", false);
+	result.sas_token = TryGetStrFromObject(cfg, "adls.sas-token", false);
 }
 
 //! The wire name for a Delta schema key. UC's API spells multi-word keys with dashes, and a schema's
@@ -649,11 +653,20 @@ UCAPITableCredentials UCAPI::GetTableCredentials(ClientContext &ctx, const strin
 			error.ThrowError(StringUtil::Format("Failed to get table credentials for %s.%s.%s", catalog_name,
 			                                    schema_name, table_name));
 		}
+		// Exactly one of these is present, matching the cloud the table's storage lives in.
 		auto *aws = yyjson_obj_get(root, "aws_temp_credentials");
 		if (aws && yyjson_is_obj(aws)) {
 			result.key_id = TryGetStrFromObject(aws, "access_key_id", false);
 			result.secret = TryGetStrFromObject(aws, "secret_access_key", false);
 			result.session_token = TryGetStrFromObject(aws, "session_token", false);
+		}
+		auto *gcp = yyjson_obj_get(root, "gcp_oauth_token");
+		if (gcp && yyjson_is_obj(gcp)) {
+			result.bearer_token = TryGetStrFromObject(gcp, "oauth_token", false);
+		}
+		auto *azure = yyjson_obj_get(root, "azure_user_delegation_sas");
+		if (azure && yyjson_is_obj(azure)) {
+			result.sas_token = TryGetStrFromObject(azure, "sas_token", false);
 		}
 		return result;
 	}
