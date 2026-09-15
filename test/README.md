@@ -74,6 +74,11 @@ Databricks (live):
 - VARIANT read (`variant.test`) of a **Spark-written** column: the OSS test's payloads, with
   Databricks' column types and on-disk encoding.
 
+Server-free (`functions/`):
+
+- The type text map a column falls back to without `type_json` (`test_uc_type_mapping.cpp`, tag
+  `[uc][types]`): scalars, `decimal(p,s)`, nested `array`/`map`/`struct` spellings, and malformed text.
+
 ## Testing gaps / TODO
 
 These exercise code paths that the **file://-backed local OSS server can't reach today**. The shared
