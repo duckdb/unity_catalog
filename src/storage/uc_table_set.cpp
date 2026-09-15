@@ -269,14 +269,14 @@ void TableInformation::InternalAttach(ClientContext &context) {
 		// read-only attach: a RO attach must not mutate table storage (it also holds only read-scoped
 		// credentials). Reads still see staged commits via the log_tail + max_catalog_version above.
 		bool read_only = uc_catalog.access_mode == AccessMode::READ_ONLY;
-		optional_idx start_wm = commit_state.with_locked([](const CommitState &s) { return s.backfilled_version; });
+		optional_idx start_wm = commit_state.with_locked([](const UCCommitState &s) { return s.backfilled_version; });
 		if (read_only) {
 			UC_LOG_DEBUG(context,
 			             "uc.InternalAttach %s.%s.%s read-only: skipping backfill (%zu backfillable commit(s))",
 			             table_data->catalog_name, table_data->schema_name, table_data->name, commits.commits.size());
 		}
 		optional_idx new_wm = read_only ? start_wm : BackfillCommits(context, commits.commits, start_wm);
-		commit_state.with_locked([&](CommitState &s) {
+		commit_state.with_locked([&](UCCommitState &s) {
 			s.etag = commits.etag;
 			s.backfilled_version = new_wm;
 		});

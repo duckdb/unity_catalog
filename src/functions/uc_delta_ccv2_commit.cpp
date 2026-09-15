@@ -48,7 +48,7 @@ void UCDeltaCCV2CommitExecute(ClientContext &context, TableFunctionInput &data_p
 	// the same locked read, else a concurrent re-attach could tear them. Copy out via with_locked so
 	// the lock is NOT held across the UpdateTable HTTP call below.
 	auto &table = table_entry->table;
-	CommitState cs = table.commit_state.with_locked([](const CommitState &s) { return s; });
+	UCCommitState cs = table.commit_state.with_locked([](const UCCommitState &s) { return s; });
 	string new_etag = UCAPI::UpdateTable(context, td.catalog_name, td.schema_name, td.name, td.table_id, cs.etag,
 	                                     credentials, version, commit_timestamp, commit_file_name, commit_file_size,
 	                                     file_modification_timestamp, cs.backfilled_version);
@@ -59,7 +59,7 @@ void UCDeltaCCV2CommitExecute(ClientContext &context, TableFunctionInput &data_p
 		lock_guard<mutex> l(table.attach_lock);
 		table.MarkDirty(l);
 	}
-	table.commit_state.with_locked([&](CommitState &s) { s.etag = new_etag; });
+	table.commit_state.with_locked([&](UCCommitState &s) { s.etag = new_etag; });
 
 	output.SetCardinality(1);
 	output.SetValue(1, 0, Value::BOOLEAN(true));

@@ -24,7 +24,7 @@ class UCSchemaEntry;
 // must be read as a consistent snapshot: a torn read could pair a stale etag with a newer
 // watermark. Wrapped in MutexProtected (TableInformation::commit_state) so the pair is only ever
 // accessed under its lock — copy a snapshot out via with_locked() to use past the critical section.
-struct CommitState {
+struct UCCommitState {
 	string etag; // from LoadTable response; sent as assert-etag in UpdateTable (add-commit) calls
 	// Delta CMT backfill: on InternalAttach, LoadTable returns outstanding staged commits;
 	// BackfillCommits copies them into _delta_log/ and advances this watermark.
@@ -61,7 +61,7 @@ private:
 public:
 	// commit_state {etag, backfilled_version}: accessed only via with_locked(), so the pair is never
 	// torn and there is no unlocked path. Public is safe — MutexProtected gates every access.
-	MutexProtected<CommitState> commit_state;
+	MutexProtected<UCCommitState> commit_state;
 	UnityCatalog &catalog;
 	UCSchemaEntry &schema;
 	unique_ptr<UCAPITable> table_data;
