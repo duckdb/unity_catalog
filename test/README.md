@@ -63,12 +63,16 @@ Local OSS (`oss_local/`):
   `test_concurrent_rw.py` runs N racing writers (`INSERT … max(id)+1`, retrying on version
   conflict) + M readers, asserting the gapless commit invariant `max(id) == count(*) == version` at
   every snapshot.
+- **VARIANT columns** (`variant.test`): every payload shape (object, nested, scalar, array, variant
+  null) survives a duckdb-delta write/read round-trip and a DETACH/ATTACH.
 
 Databricks (live):
 
 - CMT delta read, column-mapped read, time-travel, attach, and a TPC-H read pass (`tpch.test` —
   hand-written scans / pushdown / join vs the premade sf0.01 tables); write + write-CMT under
   `write_tests/`.
+- VARIANT read (`variant.test`) of a **Spark-written** column: the OSS test's payloads, with
+  Databricks' column types and on-disk encoding.
 
 ## Testing gaps / TODO
 

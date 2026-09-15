@@ -1,0 +1,119 @@
+# name: test/oss_local/variant.test
+# description: UC `variant` columns against the OSS UC image -- the catalog lists the column as VARIANT, and every variant value shape round-trips through a Delta write and read. Paired variant.py provisions duck.cmt.{UC_TEST_TABLE} from the id_variant fixture.
+# group: [oss_local]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_SCHEMA
+
+require-env UC_TEST_TABLE
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+statement ok
+USE duck.{UC_TEST_SCHEMA};
+
+# -----------------------------------------------------------------------------
+# Column type
+#
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE {UC_TEST_TABLE});
+----
+id	INTEGER
+data	VARIANT
+
+# -----------------------------------------------------------------------------
+# Round-trip every variant value shape through the Delta write/read path
+#
+
+# Object keys are written pre-sorted: DuckDB renders a variant object with its keys in
+# sorted order, so an unsorted literal here would still read back sorted.
+statement ok
+INSERT INTO {UC_TEST_TABLE} VALUES
+    (1, {'tag': 'one', 'value': 1}),
+    (2, {'nested': {'deep': [1, 2, 3]}}),
+    (3, 'plain string'),
+    (4, 42),
+    (5, true),
+    (6, ['a'::VARIANT, 1, false, {'k': 'v'}]),
+    (7, NULL);
+
+query II
+SELECT id, data FROM {UC_TEST_TABLE} ORDER BY id;
+----
+1	{'tag': one, 'value': 1}
+2	{'nested': {'deep': [1, 2, 3]}}
+3	plain string
+4	42
+5	true
+6	[a, 1, false, {'k': v}]
+7	NULL
+
+# Per-row payload types, incl. the SQL NULL that lands as a variant null (VARIANT_NULL) rather
+# than a SQL NULL -- `data IS NULL` is false for row 7.
+query II
+SELECT id, variant_typeof(data) FROM {UC_TEST_TABLE} ORDER BY id;
+----
+1	OBJECT(tag, value)
+2	OBJECT(nested)
+3	VARCHAR
+4	INT32
+5	BOOL_TRUE
+6	ARRAY(4)
+7	VARIANT_NULL
+
+# -----------------------------------------------------------------------------
+# Payloads are addressable, not just renderable
+#
+
+query III
+SELECT (data.value)::INTEGER, data.tag::VARCHAR, variant_extract(data, 'value')
+FROM {UC_TEST_TABLE} WHERE id = 1;
+----
+1	one	1
+
+query II
+SELECT (data.nested.deep[2])::INTEGER, variant_typeof(data.nested.deep)
+FROM {UC_TEST_TABLE} WHERE id = 2;
+----
+2	ARRAY(3)
+
+# -----------------------------------------------------------------------------
+# Re-attach: a fresh listing over a table that now has data
+#
+
+statement ok
+USE memory;
+
+statement ok
+DETACH duck;
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+statement ok
+USE duck.{UC_TEST_SCHEMA};
+
+query II
+SELECT id, variant_typeof(data) FROM {UC_TEST_TABLE} WHERE id IN (1, 7) ORDER BY id;
+----
+1	OBJECT(tag, value)
+7	VARIANT_NULL

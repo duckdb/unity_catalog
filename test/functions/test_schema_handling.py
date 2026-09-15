@@ -232,8 +232,10 @@ def _columns(spec):
     return columns
 
 
-def _catalog(columns, fixture, table):
-    return MockUnityCatalog([delta_table(table, fixture, columns, schema=_SCHEMA)])
+def _catalog(columns, fixture, table, properties=None):
+    entry = delta_table(table, fixture, columns, schema=_SCHEMA)
+    entry["properties"] = properties or {}
+    return MockUnityCatalog([entry])
 
 
 def test_divergence_is_reported():
@@ -301,6 +303,7 @@ _UNMAPPED_TYPES = {
     "geometry": _Type("geometry(4326)", '"geometry(4326)"'),
 }
 _INTERVAL = _Type("interval day to second", '"interval day to second"')
+_VARIANT = _Type("variant", '"variant"')
 
 
 @pytest.mark.parametrize("name", sorted(_UNMAPPED_TYPES))
@@ -324,9 +327,9 @@ def test_unmapped_type_lists_but_is_refused_on_read(name, tmp_path):
     assert f"'v', which Unity Catalog reports as '{typ.text}'" in read.stderr, combined
 
 
-def _write_log(location, spec):
+def _write_log(location, spec, features=()):
     """A zero-row Delta table at `location`: one commit holding the protocol and a schema built from
-    `spec`, and no data files."""
+    `spec`, and no data files. `features` names reader-writer table features the schema needs."""
     fields = [{"name": name, "type": json.loads(typ.json), "nullable": True, "metadata": {}} for name, typ in spec]
     metadata = {
         "id": "00000000-0000-0000-0000-000000000002",
@@ -336,7 +339,15 @@ def _write_log(location, spec):
         "configuration": {},
         "createdTime": 0,
     }
-    actions = [{"protocol": {"minReaderVersion": 1, "minWriterVersion": 2}}, {"metaData": metadata}]
+    protocol = {"minReaderVersion": 1, "minWriterVersion": 2}
+    if features:
+        protocol = {
+            "minReaderVersion": 3,
+            "minWriterVersion": 7,
+            "readerFeatures": list(features),
+            "writerFeatures": list(features),
+        }
+    actions = [{"protocol": protocol}, {"metaData": metadata}]
     log = location / "_delta_log"
     log.mkdir(parents=True)
     (log / "00000000000000000000.json").write_text("\n".join(json.dumps(a) for a in actions) + "\n")
@@ -367,6 +378,55 @@ def test_interval_column_is_refused(with_log, tmp_path):
         combined = read_out + read.stderr
         assert read.returncode != 0, combined
         assert f"interval column 'v', which Unity Catalog reports as '{_INTERVAL.text}'" in read.stderr, combined
+
+
+def test_variant_types_agree_with_the_log(tmp_path):
+    """Variant columns reported in type_json or in text alone, nested included, list as VARIANT and
+    type as the log does, so the read binds with no divergence warning. The log holds no rows;
+    oss_local/variant.test reads values."""
+    _write_log(
+        tmp_path,
+        [_col("id", _INT), _col("v", _VARIANT), _col("t", _VARIANT), _col("vs", _array(_VARIANT))],
+        features=["variantType"],
+    )
+    reported = [_col("id", _INT), _col("v", _VARIANT), _col("t", _text("variant")), _col("vs", _array(_VARIANT))]
+    with _catalog(_columns(reported), tmp_path, "variants") as mock:
+        result, stdout = run(
+            mock,
+            "SELECT column_types FROM (SHOW ALL TABLES) WHERE name = 'variants';"
+            "SELECT count(*), 'rows' FROM unity.plain.variants;",
+        )
+
+    combined = stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "[INTEGER, VARIANT, VARIANT, VARIANT[]]" in stdout, combined
+    assert "0|rows" in stdout, combined
+    assert "schema.Resolve" not in stdout, combined
+
+
+@pytest.mark.parametrize("feature", ["variantShredding", "variantShredding-preview"])
+def test_variant_shredding_is_refused(feature, tmp_path):
+    """Every read of a table whose catalog properties enable variant shredding is refused, time travel
+    included, though its log alone would bind. Listing still maps the column."""
+    spec = [_col("id", _INT), _col("v", _VARIANT)]
+    _write_log(tmp_path, spec, features=["variantType"])
+    properties = {f"delta.feature.{feature}": "supported"}
+    with _catalog(_columns(spec), tmp_path, "shredded", properties) as mock:
+        listed, listed_out = run(mock, "SELECT column_types FROM (SHOW ALL TABLES) WHERE name = 'shredded';")
+        reads = [
+            run(mock, sql)
+            for sql in (
+                "SELECT id FROM unity.plain.shredded;",
+                "SELECT id FROM unity.plain.shredded AT (VERSION => 0);",
+            )
+        ]
+
+    assert listed.returncode == 0, listed_out + listed.stderr
+    assert "[INTEGER, VARIANT]" in listed_out, listed_out
+    for read, read_out in reads:
+        combined = read_out + read.stderr
+        assert read.returncode != 0, combined
+        assert f"Delta table feature '{feature}'" in read.stderr, combined
 
 
 def test_timestamp_text_types_agree_with_the_log():
