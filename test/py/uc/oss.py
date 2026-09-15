@@ -48,6 +48,7 @@ UC_TYPE_MAP = {
     "DATE": "DATE",
     "TIMESTAMP": "TIMESTAMP",
     "DECIMAL": "DECIMAL",
+    "VARIANT": "VARIANT",
 }
 
 

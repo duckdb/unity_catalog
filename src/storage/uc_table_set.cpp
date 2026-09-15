@@ -124,6 +124,7 @@ optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, 
 	// The kernel drops interval fields from the log's schema without an error, so the report is the only
 	// place they show: refuse ahead of both branches and the per-transaction cache.
 	ThrowIfIntervalColumns();
+	ThrowIfVariantShredding();
 	auto at = lookup_info.GetAtClause();
 	if (!at) {
 		// Neither ScanPlan/non-delta has a log to resolve against, return reported a la UCTableEntry::GetScanFunction.
@@ -214,6 +215,18 @@ void TableInformation::ThrowIfIntervalColumns() const {
 			throw NotImplementedException("Table '%s' has interval column '%s', which Unity Catalog reports as "
 			                              "'%s'; Delta interval semantics differ from DuckDB's INTERVAL",
 			                              table_data->name, column.name, column.type_text);
+		}
+	}
+}
+
+// Reading shredded variant files is not validated yet. The feature only permits shredding, so this
+// refuses tables whose files may all be unshredded too.
+void TableInformation::ThrowIfVariantShredding() const {
+	for (auto feature : {"variantShredding", "variantShredding-preview"}) {
+		if (HasDeltaFeature(feature)) {
+			throw NotImplementedException("Table '%s' has the Delta table feature '%s'; reading shredded variants is "
+			                              "not supported",
+			                              table_data->name, feature);
 		}
 	}
 }
@@ -345,15 +358,18 @@ void TableInformation::MarkDirty(const lock_guard<mutex> &_attach_lock) {
 	is_dirty = true;
 }
 
+bool TableInformation::HasDeltaFeature(const string &feature) const {
+	auto it = table_data->properties.find("delta.feature." + feature);
+	return it != table_data->properties.end() && it->second == "supported";
+}
+
 bool TableInformation::IsCatalogManaged() const {
 	// Databricks preview property (pre-GA)
-	auto it = table_data->properties.find("delta.feature.catalogOwned-preview");
-	if (it != table_data->properties.end() && it->second == "supported") {
+	if (HasDeltaFeature("catalogOwned-preview")) {
 		return true;
 	}
 	// Databricks GA + OSS UC v0.5+: set for tables that use the Delta CMT protocol
-	it = table_data->properties.find("delta.feature.catalogManaged");
-	return it != table_data->properties.end() && it->second == "supported";
+	return HasDeltaFeature("catalogManaged");
 }
 
 static Value BuildLogTailFromCommits(const UCAPICommitsResult &commits, const string &storage_location) {

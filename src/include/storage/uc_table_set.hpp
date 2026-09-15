@@ -54,9 +54,12 @@ public:
 
 	void ThrowIfUnreadableColumns() const;
 	void ThrowIfIntervalColumns() const;
+	void ThrowIfVariantShredding() const;
 	void ThrowNoDeltaTable() const;
 
 private:
+	//! Whether the catalog, not the Delta log, reports the table feature as `supported`
+	bool HasDeltaFeature(const string &feature) const;
 	//! location holds no Delta table -> null; other failures throw
 	unique_ptr<CatalogEntry> EntryFromDeltaLog(ClientContext &context, const EntryLookupInfo &lookup_info);
 	string EntryKey(optional_ptr<BoundAtClause> at = nullptr) const;

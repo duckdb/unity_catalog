@@ -84,6 +84,8 @@ LogicalType PrimitiveFromDeltaName(const string &name) {
 		return LogicalType::TIMESTAMP_TZ;
 	} else if (name == "timestamp_ntz") {
 		return LogicalType::TIMESTAMP;
+	} else if (name == "variant") {
+		return LogicalType::VARIANT();
 	} else if (name == "void") {
 		return LogicalType::SQLNULL;
 	} else if (name.find("decimal(") == 0) {
@@ -191,6 +193,8 @@ LogicalType UCUtils::TypeToLogicalType(const string &type_text) {
 		return LogicalType::TIMESTAMP_TZ;
 	} else if (type_text == "timestamp_ntz") {
 		return LogicalType::TIMESTAMP;
+	} else if (type_text == "variant") {
+		return LogicalType::VARIANT();
 	} else if (type_text == "binary") {
 		return LogicalType::BLOB;
 	} else if (type_text == "date") {
