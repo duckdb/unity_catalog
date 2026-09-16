@@ -1,5 +1,5 @@
 # name: test/oss_local/variant.test
-# description: UC `variant` columns against the OSS UC image -- the catalog lists the column as VARIANT, and every variant value shape round-trips through a Delta write and read. Paired variant.py provisions duck.cmt.{UC_TEST_TABLE} from the id_variant fixture.
+# description: UC `variant` columns against the OSS UC image -- every variant value shape round-trips through a Delta write and read, and survives a re-attach. Paired variant.py stages the committed data/variant log into an EXTERNAL table's location, because duckdb-delta cannot create a variant column itself.
 # group: [oss_local]
 
 require parquet
@@ -67,8 +67,7 @@ SELECT id, data FROM {UC_TEST_TABLE} ORDER BY id;
 6	[a, 1, false, {'k': v}]
 7	NULL
 
-# Per-row payload types, incl. the SQL NULL that lands as a variant null (VARIANT_NULL) rather
-# than a SQL NULL -- `data IS NULL` is false for row 7.
+# variant_typeof answers VARIANT_NULL for a SQL NULL too, so row 7 is not a type of its own.
 query II
 SELECT id, variant_typeof(data) FROM {UC_TEST_TABLE} ORDER BY id;
 ----

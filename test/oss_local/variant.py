@@ -1,20 +1,48 @@
-"""Driver for variant.test (same-stem pairing -> one test).
+"""Driver for variant.test: VARIANT columns written and read through the UC catalog path.
 
-@requires provisions a unique empty duck.cmt.{UC_TEST_TABLE} from the `id_variant`
-fixture (id INTEGER, data VARIANT); the body asserts the column type and round-trips every
-variant value shape through the Delta write/read path.
+The fixture is a committed Delta log rather than a TableSpec, and has to be: duckdb-delta refuses
+`CREATE TABLE` with a VARIANT column, so the column can only reach the log some other way. Inserts
+into a table that already declares one work, which is what the body does. We copy `data/variant`
+into the table's storage location (a copy, so the INSERTs never mutate the committed tree) and
+register that location with UC.
 
 Not matrixed over the commit axis (cf. rw.py): the variant type does not depend on whether the
 catalog or the filesystem owns commits.
 """
 
-from ducktest import TableSpec, requires, run_paired
+import os
+import pathlib
+import shutil
+import uuid
+
+import pytest
+
+from ducktest import run_paired
+from uc import plain_table_location, uctl
+
+CATALOG = "duck"
+SCHEMA = "plain"  # EXTERNAL -> uctl gives the table a location we can stage into
+FIXTURE = pathlib.Path(__file__).resolve().parents[2] / "data" / "variant"
 
 
-@requires(
-    source=TableSpec("id_variant").Seed(None),
-    access="rw",
-    properties={"commit": "cmt", "storage": "managed"},
-)
-def test_variant(request, uc_server, resources):
-    run_paired(request, env=resources.env)
+@pytest.mark.oss_local
+def test_variant(request, uc_server):
+    # Unique per run: a container shared across sessions (--existing-service) would otherwise
+    # collide on the table name and its storage location.
+    table = f"variant_{uuid.uuid4().hex[:8]}"
+    location = plain_table_location(uc_server, table, CATALOG, SCHEMA)
+    shutil.copytree(FIXTURE, location)
+
+    uctl("create", SCHEMA, table, "id INT, data VARIANT")
+
+    env = {
+        **os.environ,
+        "UC_TEST_CATALOG": CATALOG,
+        "UC_TEST_SCHEMA": SCHEMA,
+        "UC_TEST_TABLE": table,
+    }
+    try:
+        run_paired(request, env=env)
+    finally:
+        uctl("drop", SCHEMA, table, check=False)
+        shutil.rmtree(location, ignore_errors=True)
