@@ -1,0 +1,43 @@
+# name: test/sql/local_oss_unity_catalog/catalog_functions.test
+# description: core catalog functions scan an attached UC catalog without an internal error
+# group: [local_oss_unity_catalog]
+
+#
+# duckdb_indexes() asks every attached catalog for its index entries. UC claimed to hold some and
+# then threw when asked for them, so any attached catalog made the function fail.
+#
+
+require parquet
+
+require httpfs
+
+require delta
+
+require unity_catalog
+
+require-env UC_TEST_SERVER_RUNNING
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH 'duck' AS duck (TYPE unity_catalog, DEFAULT_SCHEMA 'external');
+
+# A UC catalog holds no indexes, so the count comes from the other attached databases alone.
+query I
+SELECT count(*) FROM duckdb_indexes() WHERE database_name = 'duck';
+----
+0
+
+statement ok
+SELECT count(*) FROM duckdb_views();
+
+query I
+SELECT count(*) >= 1 FROM duckdb_tables() WHERE database_name = 'duck';
+----
+true

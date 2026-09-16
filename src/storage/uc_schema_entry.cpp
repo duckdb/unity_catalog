@@ -112,7 +112,6 @@ void UCSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 
 bool CatalogTypeIsSupported(CatalogType type) {
 	switch (type) {
-	case CatalogType::INDEX_ENTRY:
 	case CatalogType::TABLE_ENTRY:
 	case CatalogType::VIEW_ENTRY:
 		return true;
