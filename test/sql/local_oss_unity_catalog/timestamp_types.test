@@ -6,9 +6,10 @@
 # The naming inverts between the two systems: UC's timestamp_ntz is DuckDB's TIMESTAMP and UC's
 # timestamp is DuckDB's TIMESTAMP_TZ. One table carries both columns so the two cannot be conflated.
 #
-# duck.external.timestamp_types_rw is created empty by scripts/oss_uc_local/seed_tables; the rows
-# below are the only ones in it. Values are compared, never counted: a zone shift is the failure
-# this type invites and a count cannot see it. Nothing sets the session zone: that needs icu, which
+# duck.external.timestamp_types_rw is created empty by scripts/oss_uc_local/seed_tables. The reads
+# below are DISTINCT, so a re-run against a server that was not reseeded appends an identical row
+# and still sees one. Values are compared, never counted: a zone shift is the failure this type
+# invites and a count cannot see it. Nothing sets the session zone: that needs icu, which
 # this build does not carry.
 #
 
@@ -57,14 +58,14 @@ INSERT INTO duck.external.timestamp_types_rw
 VALUES (1, TIMESTAMP '2026-01-15 10:30:00', TIMESTAMPTZ '2026-01-15 10:30:00+02');
 
 query III
-SELECT id, ntz, tz FROM duck.external.timestamp_types_rw ORDER BY id;
+SELECT DISTINCT id, ntz, tz FROM duck.external.timestamp_types_rw ORDER BY id;
 ----
 1	2026-01-15 10:30:00	2026-01-15 08:30:00+00
 
 # Stated as a comparison as well as rendered text: the naive column keeps the wall-clock value it
 # was given, and the zoned one keeps the instant, whatever zone the reader prints it in.
 query II
-SELECT ntz = TIMESTAMP '2026-01-15 10:30:00', tz = TIMESTAMPTZ '2026-01-15 08:30:00+00'
-FROM duck.external.timestamp_types_rw ORDER BY id;
+SELECT DISTINCT ntz = TIMESTAMP '2026-01-15 10:30:00', tz = TIMESTAMPTZ '2026-01-15 08:30:00+00'
+FROM duck.external.timestamp_types_rw;
 ----
 true	true
