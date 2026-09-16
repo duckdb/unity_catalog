@@ -334,8 +334,9 @@ TableFunction UCTableEntry::GetScanFunction(ClientContext &context, unique_ptr<F
 	auto &table_data = table.table_data;
 	D_ASSERT(table_data);
 
-	// Opt-in, and skipped while this endpoint is known-unavailable (docs/sp/scan-plan-gating.md).
-	if (table.catalog.ShouldTryScanPlan()) {
+	// Opt-in, and skipped while this endpoint is known-unavailable (docs/sp/scan-plan-gating.md). A time-travel
+	// read takes the Delta path: the /plan request carries no version.
+	if (table.catalog.ShouldTryScanPlan() && !lookup_info.GetAtClause()) {
 		table.RefreshCredentials(context);
 		auto bd = make_uniq<UCScanPlanBindData>();
 		bd->catalog_name = table_data->catalog_name;
