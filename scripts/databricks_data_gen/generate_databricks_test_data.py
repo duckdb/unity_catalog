@@ -27,7 +27,7 @@
 #   1. Executes the SQL file in DuckDB (can define multiple tables)
 #   2. Every table in DuckDB's in-memory session gets exported to a local parquet file
 #   3. The parquet is read into pandas and pushed to Databricks as a Spark DataFrame (via gRPC, no S3 staging)
-#   4. A Delta table is created at s3://<S3_BUCKET>/<dest_catalog>/<dest_schema>/<table>
+#   4. A Delta table is created at s3://<S3_BUCKET>/external/<dest_catalog>/<dest_schema>/<table>
 #
 # from-custom-sql flow:
 #   1. The SQL file contains the full CREATE TABLE statement with {table_name} and {location} placeholders
@@ -46,7 +46,9 @@ import duckdb
 import pandas as pd
 
 
-S3_BUCKET = "duckdb-databricks-testing-ccv2"
+# The workspace was rebuilt onto its own buckets; `external/` is this one's half for table
+# LOCATIONs, the other being the catalogs' managed root.
+S3_BUCKET = os.environ.get("DATABRICKS_S3_BUCKET", "ducklabs-uc-testing-rw")
 
 CATALOG_MANAGED_TBLPROPERTIES = (
     'TBLPROPERTIES ('
@@ -92,7 +94,7 @@ def copy_tables(source, destination, dry_run=False, catalog_managed=False):
     for table in tables:
         source_table_name = table.tableName
         dest_table_name = f"{source_table_name}_catalog_managed" if catalog_managed else source_table_name
-        location = f"s3://{S3_BUCKET}/{dest_catalog}/{dest_schema}/{dest_table_name}"
+        location = f"s3://{S3_BUCKET}/external/{dest_catalog}/{dest_schema}/{dest_table_name}"
         create_sql = build_create_sql(
             f"{dest_catalog}.{dest_schema}.{dest_table_name}",
             location,
@@ -133,7 +135,7 @@ def duckdb_sql_to_tables(sql_file, destination, dry_run=False, catalog_managed=F
             print(f"  Exported '{table_name}' -> {parquet_path}")
 
             full_table_name = f"{dest_catalog}.{dest_schema}.{table_name}"
-            table_location = f"s3://{S3_BUCKET}/{dest_catalog}/{dest_schema}/{table_name}"
+            table_location = f"s3://{S3_BUCKET}/external/{dest_catalog}/{dest_schema}/{table_name}"
             temp_view = f"_tmp_{table_name}"
 
             create_sql = build_create_sql(full_table_name, table_location, temp_view, catalog_managed)
@@ -164,7 +166,7 @@ def custom_sql_to_table(sql_file, destination, dry_run=False):
         sql_template = f.read()
 
     full_table_name = f"{dest_catalog}.{dest_schema}.{table_name}"
-    table_location = f"s3://{S3_BUCKET}/{dest_catalog}/{dest_schema}/{table_name}"
+    table_location = f"s3://{S3_BUCKET}/external/{dest_catalog}/{dest_schema}/{table_name}"
 
     substituted = sql_template.replace("{table_name}", full_table_name).replace("{location}", table_location)
     statements = [s.strip() for s in substituted.split(';') if s.strip()]
