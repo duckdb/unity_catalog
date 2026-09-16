@@ -1,4 +1,4 @@
-# name: test/sql/databricks/timestamp_ntz.test
+# name: test/databricks/timestamp_ntz.test
 # description: test reading tables with timestamp_ntz columns
 # group: [databricks]
 
