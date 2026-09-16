@@ -1,7 +1,8 @@
 """Driver for transaction_history.test (same-stem pairing).
 
-Matrixed over the commit axis: a catalog-managed commit marks the table's attached Delta catalog for
-reattachment, which a plain commit does not, so the plain cell is the control for the cmt one.
+The same body runs against both table types. Writing to a catalog-managed table makes every reader
+re-open that table's Delta catalog, and re-opening it while a transaction is already reading the
+table is what failed; writing to a plain table does not, so that cell is the control.
 """
 
 from ducktest import TableSpec, requires_matrix, run_paired
