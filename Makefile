@@ -14,6 +14,10 @@ DEFAULT_TEST_EXTENSION_DEPS=parquet;httpfs;tpch;tpcds;json
 PYTHON_PIP=venv/bin/python3 -m pip
 PYTHON_BIN=venv/bin/python3
 
+# The OSS tests take their server address from the environment, so a run can point at a server
+# that is not on this host. Exported, since the tests read it as a sqllogictest env variable.
+export UC_TEST_ENDPOINT ?= http://127.0.0.1:8080
+
 ENV_DATABRICKS_CMD ?= scripts/run_databricks_env
 BUILD_DIR ?= ./build/release
 

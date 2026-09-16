@@ -18,11 +18,13 @@ require unity_catalog
 
 require-env UC_TEST_SERVER_RUNNING
 
+require-env UC_TEST_ENDPOINT
+
 statement ok
 CREATE SECRET (
     TYPE unity_catalog,
     TOKEN 'not-used',
-    ENDPOINT 'http://127.0.0.1:8080',
+    ENDPOINT '{UC_TEST_ENDPOINT}',
     AWS_REGION 'us-east-2'
 );
 

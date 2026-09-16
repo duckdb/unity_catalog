@@ -34,6 +34,7 @@
 #   DUCKDB_UC_DATA_DIR  table data root (default: UC_TEST_DATA, else $UC_REPO/etc/data). The tests
 #                       read the staged tables back from UC_TEST_DATA, so the two must agree.
 #   DUCKDB_BIN          built duckdb CLI (default <ext-repo>/build/release/duckdb)
+#   UC_TEST_ENDPOINT    UC server address (default http://127.0.0.1:8080), matching the tests
 set -euo pipefail
 
 RESET=0
@@ -53,6 +54,7 @@ EXT_REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DUCKDB_BIN="${DUCKDB_BIN:-$EXT_REPO/build/release/duckdb}"
 
 UC_REPO="${UC_REPO:-$HOME/src/d/unitycatalog}"
+UC_TEST_ENDPOINT="${UC_TEST_ENDPOINT:-http://127.0.0.1:8080}"
 DATA_DIR="${DUCKDB_UC_DATA_DIR:-${UC_TEST_DATA:-$UC_REPO/etc/data}}"
 MANAGED_ROOT="$DATA_DIR/duck/managed"
 EXTERNAL_ROOT="$DATA_DIR/duck/external"
@@ -146,8 +148,9 @@ uc table create --full_name "duck.external.timestamp_types_rw" \
 
 # Populate the _ro tables (CLI can't insert). WHERE NOT EXISTS covers both cases: a freshly
 # (re)created _ro is empty and gets the 5 rows; an existing _ro is left untouched. _rw left empty.
-"$DUCKDB_BIN" <<'SQL'
-CREATE SECRET (TYPE unity_catalog, TOKEN 'not-used', ENDPOINT 'http://127.0.0.1:8080', AWS_REGION 'us-east-2');
+# Unquoted heredoc: the endpoint below is the only thing the shell expands here.
+"$DUCKDB_BIN" <<SQL
+CREATE SECRET (TYPE unity_catalog, TOKEN 'not-used', ENDPOINT '$UC_TEST_ENDPOINT', AWS_REGION 'us-east-2');
 ATTACH 'duck' AS duck (TYPE unity_catalog, DEFAULT_SCHEMA 'managed');
 INSERT INTO duck.managed.id_name_ro
   SELECT * FROM (VALUES (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four'), (5, 'five')) v(id, name)
