@@ -64,7 +64,9 @@ Local OSS (`oss_local/`):
   conflict) + M readers, asserting the gapless commit invariant `max(id) == count(*) == version` at
   every snapshot.
 - **VARIANT columns** (`variant.test`): every payload shape (object, nested, scalar, array, variant
-  null) survives a duckdb-delta write/read round-trip and a DETACH/ATTACH.
+  null) survives a duckdb-delta write/read round-trip and a DETACH/ATTACH. The schema comes from the
+  committed `data/variant` log: duckdb-delta refuses `CREATE TABLE` with a VARIANT column, so the
+  driver stages that log into the table's location.
 
 Databricks (live):
 
