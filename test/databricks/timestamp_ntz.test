@@ -1,5 +1,5 @@
 # name: test/databricks/timestamp_ntz.test
-# description: test reading tables with timestamp_ntz columns
+# description: read a TIMESTAMP_NTZ column through Unity Catalog against a premade table.
 # group: [databricks]
 
 require parquet
@@ -16,19 +16,26 @@ require-env DATABRICKS_ENDPOINT
 
 require-env DATABRICKS_REGION
 
+require-env CATALOG
+
+require-env SCHEMA
+
 statement ok
 CREATE SECRET (
-    TYPE UNITY_CATALOG,
-    TOKEN '${DATABRICKS_TOKEN}',
-    ENDPOINT '${DATABRICKS_ENDPOINT}',
-    AWS_REGION '${DATABRICKS_REGION}'
+    TYPE unity_catalog,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
 );
 
 statement ok
-ATTACH 'duckdb_testing' (TYPE UNITY_CATALOG, READ_ONLY, DEFAULT_SCHEMA 'main');
+ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}');
+
+statement ok
+USE unity;
 
 query II
-SELECT id, created_at FROM duckdb_testing.main.timestamp_ntz_table ORDER BY id;
+SELECT id, created_at FROM timestamp_ntz ORDER BY id;
 ----
 1	2024-01-01 01:00:00
 2	2024-01-01 02:00:00
