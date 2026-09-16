@@ -399,7 +399,7 @@ def test_variant_types_agree_with_the_log(tmp_path):
 
     combined = stdout + result.stderr
     assert result.returncode == 0, combined
-    assert "[INTEGER, VARIANT, VARIANT, VARIANT[]]" in stdout, combined
+    assert "[INTEGER, VARIANT, VARIANT, 'VARIANT[]']" in stdout, combined
     assert "0|rows" in stdout, combined
     assert "schema.Resolve" not in stdout, combined
 
