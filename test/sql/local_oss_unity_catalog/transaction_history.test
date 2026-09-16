@@ -1,0 +1,69 @@
+# name: test/sql/local_oss_unity_catalog/transaction_history.test
+# description: a transaction keeps reading the table it first read when another connection commits to it
+# group: [local_oss_unity_catalog]
+
+#
+# A write to a catalog-managed table makes every reader re-open that table's Delta catalog, and
+# re-opening it under a transaction that has already read the table is what failed. A write to a
+# plain table does not, so that run is the control.
+#
+# Counts are taken against a baseline, so the suite can run again without a fresh seed.
+#
+
+require parquet
+
+require httpfs
+
+require delta
+
+require unity_catalog
+
+require-env UC_TEST_SERVER_RUNNING
+
+require-env UC_TEST_ENDPOINT
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN 'not-used',
+    ENDPOINT '{UC_TEST_ENDPOINT}',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH 'duck' AS duck (TYPE unity_catalog);
+
+foreach schema managed external
+
+statement ok con1
+SET VARIABLE base = (SELECT count(*) FROM duck.{schema}.id_name_rw);
+
+# -----------------------------------------------------------------------------
+# A commit from another connection is invisible to a transaction that already read the table
+#
+
+statement ok con1
+BEGIN;
+
+query I con1
+SELECT count(*) - getvariable('base') FROM duck.{schema}.id_name_rw;
+----
+0
+
+statement ok con2
+INSERT INTO duck.{schema}.id_name_rw VALUES (1, 'transaction_history');
+
+query I con1
+SELECT count(*) - getvariable('base') FROM duck.{schema}.id_name_rw;
+----
+0
+
+statement ok con1
+COMMIT;
+
+query I con1
+SELECT count(*) - getvariable('base') FROM duck.{schema}.id_name_rw;
+----
+1
+
+endloop

@@ -2,6 +2,7 @@
 
 #include "uc_api.hpp"
 #include "uc_logging.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
 #include "uc_utils.hpp"
 
 #include "storage/unity_catalog.hpp"
@@ -339,7 +340,12 @@ static Value BuildLogTailFromCommits(const UCAPICommitsResult &commits, const st
 
 void TableInformation::InternalAttach(ClientContext &context) {
 	lock_guard<mutex> l(attach_lock);
-	if (is_dirty) {
+	// A transaction that already read this table keeps the catalog it read: the meta transaction refuses a
+	// second database under a name it holds, and the reads either side of the swap would straddle two
+	// commits. The next transaction reattaches, since is_dirty stays set.
+	bool read_by_this_transaction =
+	    internal_attached_database && MetaTransaction::Get(context).TryGetTransaction(*internal_attached_database);
+	if (is_dirty && !read_by_this_transaction) {
 		InternalDetach(context, l);
 		is_dirty = false;
 	}
