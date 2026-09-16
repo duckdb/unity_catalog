@@ -12,13 +12,15 @@ require httpfs
 
 require-env UC_TEST_SERVER_RUNNING
 
+require-env UC_TEST_ENDPOINT
+
 require-env UC_TEST_DATA
 
 statement ok
 CREATE SECRET (
     TYPE UNITY_CATALOG,
     TOKEN 'not-used',
-    ENDPOINT 'http://127.0.0.1:8080',
+    ENDPOINT '{UC_TEST_ENDPOINT}',
     AWS_REGION 'us-east-2'
 );
 

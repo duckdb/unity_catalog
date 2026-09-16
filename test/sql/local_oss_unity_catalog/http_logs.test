@@ -12,6 +12,8 @@ require httpfs
 
 require-env UC_TEST_SERVER_RUNNING
 
+require-env UC_TEST_ENDPOINT
+
 statement ok
 CALL enable_logging('HTTP');
 
@@ -19,7 +21,7 @@ statement ok
 CREATE SECRET (
     TYPE UC,
     TOKEN 'not-used',
-    ENDPOINT 'http://127.0.0.1:8080',
+    ENDPOINT '{UC_TEST_ENDPOINT}',
     AWS_REGION 'us-east-2'
 );
 
