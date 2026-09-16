@@ -50,6 +50,9 @@ LogicalType UCUtils::TypeToLogicalType(ClientContext &context, const string &typ
 		return LogicalType::BOOLEAN;
 	} else if (type_text == "timestamp") {
 		return LogicalType::TIMESTAMP_TZ;
+	} else if (type_text == "timestamp_ntz") {
+		// The naming inverts: UC's timestamp carries a zone, its timestamp_ntz does not.
+		return LogicalType::TIMESTAMP;
 	} else if (type_text == "binary") {
 		return LogicalType::BLOB;
 	} else if (type_text == "date") {

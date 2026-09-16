@@ -137,6 +137,13 @@ done
 stage_table column_mapping_rw "id INT, code STRING" column_mapping/id_mode
 stage_table partition_values_rw "id INT, code STRING, p STRING" partition_encoding
 
+# Write target for the timestamp type test. The naming inverts between the two systems, so the
+# table carries both: UC's timestamp_ntz is DuckDB's naive TIMESTAMP, UC's timestamp is TIMESTAMP_TZ.
+drop_table external timestamp_types_rw
+uc table create --full_name "duck.external.timestamp_types_rw" \
+	--columns "id INT, ntz TIMESTAMP_NTZ, tz TIMESTAMP" \
+	--storage_location "$EXTERNAL_ROOT/timestamp_types_rw"
+
 # Populate the _ro tables (CLI can't insert). WHERE NOT EXISTS covers both cases: a freshly
 # (re)created _ro is empty and gets the 5 rows; an existing _ro is left untouched. _rw left empty.
 "$DUCKDB_BIN" <<'SQL'
@@ -152,3 +159,4 @@ SQL
 
 echo "seed: duck.{managed,external}.${TABLE}_ro (5 rows$([ "$RESET" = 1 ] && echo ', reset')) + _rw (recreated empty) ready"
 echo "seed: duck.external.{column_mapping,partition_values}_rw staged from data/ (recreated) ready"
+echo "seed: duck.external.timestamp_types_rw (recreated empty) ready"
