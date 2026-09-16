@@ -63,6 +63,12 @@ run_databricks_tests:
 #    >   . scripts/run_databricks_env
 
 # Prepare the main write test files by copying the tables from the `source` schema to the `{DATABRICKS_WRITE_TEST_SCHEMA}` schema
+# One-off, run by hand: rebuild the `source` schema the per-run copy below reads from. The workspace
+# rebuild took that schema with it, and it is a fixture, not something a test run should mint.
+write_source_install: venv
+	${PYTHON_BIN} scripts/databricks_data_gen/generate_databricks_test_data.py from-custom-sql \
+		scripts/databricks_data_gen/custom_data_sources/simple_table.sql ${DATABRICKS_WRITE_TEST_CATALOG}.source
+
 write_tests_prepare: venv
 	${PYTHON_BIN} scripts/databricks_data_gen/generate_databricks_test_data.py copy ${DATABRICKS_WRITE_TEST_CATALOG}.source ${DATABRICKS_WRITE_TEST_CATALOG}.${DATABRICKS_WRITE_TEST_SCHEMA}
 	${PYTHON_BIN} scripts/databricks_data_gen/generate_databricks_test_data.py copy ${DATABRICKS_WRITE_TEST_CATALOG}.source ${DATABRICKS_WRITE_TEST_CATALOG}.${DATABRICKS_WRITE_TEST_SCHEMA} --catalog-managed
