@@ -9,6 +9,8 @@
 # runs for real. No manual unskip to remember.
 require-env UC_TEST_CATALOG
 
+require-env UC_TEST_ENDPOINT
+
 require parquet
 
 require unity_catalog
@@ -24,7 +26,7 @@ statement ok
 CREATE SECRET (
     TYPE UNITY_CATALOG,
     TOKEN 'not-used',
-    ENDPOINT 'http://127.0.0.1:8080',
+    ENDPOINT '{UC_TEST_ENDPOINT}',
     AWS_REGION 'us-east-2'
 );
 
