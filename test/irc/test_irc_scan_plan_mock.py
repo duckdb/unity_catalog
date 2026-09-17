@@ -172,6 +172,11 @@ class MockUC:
     def plan_bodies(self):
         return [json.loads(r["body"]) for r in self.requests if r["path"].endswith("/plan") and r["body"]]
 
+    def serve_delta_table(self, location, columns):
+        """Point the served table at a real Delta table (before the first query)."""
+        self._httpd.table_info["storage_location"] = f"file://{location}"
+        self._httpd.table_info["columns"] = columns
+
     def rename_column(self, idx, name):
         """Rename a column in the served /tables response (before the first query)."""
         self._httpd.table_info["columns"][idx]["name"] = name
@@ -308,6 +313,35 @@ def test_scan_plan_not_attempted_unless_opted_in(data_files, scan_plan):
         # the IRC endpoint to plan.
         srv.query(f"SELECT count(*) FROM {TABLE};", scan_plan=scan_plan)
         assert srv.plan_requests() == [], f"scan plan attempted without opt-in ({scan_plan=})"
+
+
+# -----------------------------------------------------------------------------
+# Time travel
+#
+# The /plan request carries no version, so a read with an AT clause must take the Delta path.
+# REGRESSION: unfixed, /plan answers with the latest files while the read binds the requested version's
+# schema. The served table is a small Delta fixture whose v0 holds 10 rows; the plan's files hold 50, so
+# the two paths cannot be confused.
+#
+
+_ICT_COLUMNS = [{"name": "i", "type_text": "bigint", "type_name": "LONG", "position": 0, "nullable": True}]
+
+
+@pytest.mark.parametrize(
+    "at_clause", ["VERSION => 0", "TIMESTAMP => TIMESTAMPTZ '2023-11-14 22:13:20+00'"], ids=["version", "timestamp"]
+)
+def test_time_travel_reads_the_delta_log_not_the_plan(data_files, at_clause):
+    def script(method, path, requests):
+        if path.endswith("/plan"):
+            return {"status": "completed", "plan-id": "p1", "file-scan-tasks": [_file_scan_task(f) for f in data_files]}
+        return {}
+
+    with MockUC(script) as srv:
+        srv.serve_delta_table(REPO / "data" / "ict_timetravel", _ICT_COLUMNS)
+        r = srv.query(f"SELECT count(*) FROM {TABLE} AT ({at_clause});")
+        assert r.returncode == 0, r.stderr
+        assert scalar(r) == "10", r.stdout
+        assert srv.plan_requests() == [], "a time-travel read was planned through /plan"
 
 
 # -----------------------------------------------------------------------------

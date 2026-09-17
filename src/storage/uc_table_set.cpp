@@ -21,21 +21,25 @@
 #include "storage/uc_transaction.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
 
-static idx_t ParseDeltaVersionFromAtClause(const BoundAtClause &at_clause) {
-	if (at_clause.Unit() != "version") {
-		throw InvalidConfigurationException("Delta tables only support at_clause with unit 'version'");
+// Casts exactly like the Delta extension does, so a key and Delta's read agree on the instant, to the millisecond
+// Delta commit timestamps carry. Delta holds a resolved timestamp for the rest of the transaction, which is
+// what lets the timestamp itself key the entry.
+static string AtClauseKeySuffix(const BoundAtClause &at_clause) {
+	auto &unit = at_clause.Unit();
+	if (unit == "version") {
+		return "@" + to_string(at_clause.GetValue().DefaultCastAs(LogicalType::UBIGINT).GetValue<idx_t>());
 	}
-	auto version_value = at_clause.GetValue().DefaultTryCastAs(LogicalType::UBIGINT);
-	if (!version_value) {
-		throw InvalidInputException("Failed to parse version number '%s' into a valid version",
-		                            at_clause.GetValue().ToString().c_str());
+	if (unit == "timestamp") {
+		auto timestamp = at_clause.GetValue().DefaultCastAs(LogicalType::TIMESTAMP_TZ).GetValue<timestamp_tz_t>();
+		return "@ts:" + to_string(Timestamp::GetEpochMs(timestamp_t(timestamp)));
 	}
-	return version_value->GetValue<idx_t>();
+	throw InvalidConfigurationException("Delta tables only support at_clause with unit 'version' or 'timestamp'");
 }
 
 UCTableSet::UCTableSet(UCSchemaEntry &schema) : catalog(schema.ParentCatalog().Cast<UnityCatalog>()), schema(schema) {
@@ -156,9 +160,8 @@ optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, 
 		return transaction.SetTableEntry(key, std::move(entry));
 	}
 
-	auto version = ParseDeltaVersionFromAtClause(*at);
 	auto &transaction = UCTransaction::Get(context, catalog);
-	auto key = EntryKey(version);
+	auto key = EntryKey(at);
 	auto bound = transaction.GetTableEntry(key);
 	if (bound) {
 		return bound;
@@ -170,10 +173,10 @@ optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, 
 	return transaction.SetTableEntry(key, std::move(entry));
 };
 
-//! Qualified name, plus the version where the query named one; unversioned means latest.
-string TableInformation::EntryKey(optional_idx version) const {
+//! Qualified name, plus the version or timestamp where the query named one; neither means latest.
+string TableInformation::EntryKey(optional_ptr<BoundAtClause> at) const {
 	auto key = schema.name.GetIdentifierName() + "." + table_data->name;
-	return version.IsValid() ? key + "@" + to_string(version.GetIndex()) : key;
+	return at ? key + AtClauseKeySuffix(*at) : key;
 }
 
 // `reported` describes a table, and tracks unrepresentables; this throws at bind with nice error

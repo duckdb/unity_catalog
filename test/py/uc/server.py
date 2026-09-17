@@ -29,7 +29,6 @@ import pytest
 from ducktest import provision_service, service, step
 from uc import SCRIPTS_DIR
 
-
 # Fixed name/port (by-lifecycle isolation). A host client resolves the server's absolute
 # file:// table paths only if the bind-mount path matches, which the kit `run` script
 # guarantees (identical host==container data dir); hence we provision via `run`.

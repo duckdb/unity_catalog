@@ -1,5 +1,5 @@
 # name: test/oss_local/transaction_history.test
-# description: a transaction keeps reading the table it first read when another connection commits to it
+# description: every read of a table in a transaction sees the same history when another connection commits to it
 # group: [oss_local]
 
 require parquet
@@ -33,12 +33,20 @@ INSERT INTO duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE} VALUES (1, 'one');
 # -----------------------------------------------------------------------------
 # A commit from another connection is invisible to a transaction that already read the table
 #
+# now() is the transaction's own clock, so it names the same instant in every statement con1 runs, and
+# con2's commit lands after it.
+#
 
 statement ok con1
 BEGIN;
 
 query I con1
 SELECT count(*) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE};
+----
+1
+
+query I con1
+SELECT count(*) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE} AT (TIMESTAMP => now());
 ----
 1
 
@@ -50,10 +58,15 @@ SELECT count(*) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE};
 ----
 1
 
+query I con1
+SELECT count(*) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE} AT (TIMESTAMP => now());
+----
+1
+
 statement ok con1
 COMMIT;
 
 query I con1
-SELECT count(*) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE};
+SELECT count(*) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE} AT (TIMESTAMP => now());
 ----
 2
