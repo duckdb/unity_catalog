@@ -1,4 +1,5 @@
 #include "uc_utils.hpp"
+#include "uc_logging.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "yyjson.hpp"
 #include "storage/uc_schema_entry.hpp"
@@ -7,6 +8,49 @@
 #include <iostream>
 
 namespace duckdb {
+
+void ApplyVendedCredentials(ClientContext &context, CreateSecretInput &input, const string &storage_location,
+                            const UCAPITableCredentials &credentials, const string &aws_region) {
+	// Dispatch on the storage scheme rather than on which credential arrived: a mismatch between
+	// the two means the catalog and the table disagree, and silently building a secret of the
+	// wrong type would surface much later as an opaque auth failure.
+	if (StringUtil::StartsWith(storage_location, "gs://") || StringUtil::StartsWith(storage_location, "gcs://")) {
+		if (credentials.HasGcp()) {
+			input.type = "gcs";
+			input.options = {{"bearer_token", credentials.bearer_token}};
+			return;
+		}
+		// No GCP credential vended -- an older catalog, or one with vending disabled for this
+		// table. Fall through to the s3 secret this has always created: it is useless for GCS but
+		// harmless, and being the wrong type it never matches a gs:// lookup, so a gcs secret the
+		// user created himself (HMAC interoperability keys, say) is still found and still works.
+		// Failing here would take that away.
+		UC_LOG_WARNING(context,
+		               "credentials.Apply %s: Unity Catalog vended no GCP credential for this table, so no "
+		               "usable secret could be created. Create a gcs secret scoped to this path to read it.",
+		               storage_location);
+	}
+	if (StringUtil::StartsWith(storage_location, "abfss://") || StringUtil::StartsWith(storage_location, "abfs://") ||
+	    StringUtil::StartsWith(storage_location, "azure://") || StringUtil::StartsWith(storage_location, "az://")) {
+		// The SAS is vended and parsed, but building an azure secret from it is untested against a
+		// real Azure-backed catalog. Fall through to the s3 secret this has always created -- it is
+		// useless for Azure, but harmless, and it leaves any azure secret the user created himself
+		// in place to be found instead. Failing here would take that workaround away.
+		UC_LOG_WARNING(context,
+		               "credentials.Apply %s: Azure storage is not supported yet; the vended SAS is being "
+		               "ignored and no usable secret is created for this table. Create an azure secret "
+		               "scoped to this path to read it.",
+		               storage_location);
+	}
+	input.type = "s3";
+	input.options = {
+	    {"key_id", credentials.key_id},
+	    {"secret", credentials.secret},
+	    {"session_token", credentials.session_token},
+	    {"region", aws_region},
+	};
+}
+
 
 string UCUtils::TypeToString(const LogicalType &input) {
 	switch (input.id()) {

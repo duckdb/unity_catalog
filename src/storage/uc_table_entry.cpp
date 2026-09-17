@@ -9,6 +9,7 @@
 #include "duckdb/main/database.hpp"
 
 #include "uc_api.hpp"
+#include "uc_utils.hpp"
 #include "uc_logging.hpp"
 #include "uc_multi_file_list.hpp"
 #include "uc_irc_expression.hpp"
@@ -203,15 +204,19 @@ static unique_ptr<GlobalTableFunctionState> UCScanPlanInitGlobal(ClientContext &
 			sec.persist_type = SecretPersistType::TEMPORARY;
 			sec.name = Identifier("__internal_uc_scanplan__" + bd.catalog_name + "__" + bd.schema_name + "__" +
 			                      bd.table_name + "__" + to_string(i));
-			sec.type = "s3";
 			sec.provider = "config";
-			sec.options = {
-			    {"key_id", get_cfg("s3.access-key-id")},
-			    {"secret", get_cfg("s3.secret-access-key")},
-			    {"session_token", get_cfg("s3.session-token")},
-			    {"region", get_cfg("client.region")},
-			};
 			sec.scope = {prefix};
+			// The IRC StorageCredential config is cloud-namespaced the same way the delta/v1
+			// credentials response is, so it maps onto the shared vended-credential shape.
+			UCAPITableCredentials cred;
+			cred.key_id = get_cfg("s3.access-key-id");
+			cred.secret = get_cfg("s3.secret-access-key");
+			cred.session_token = get_cfg("s3.session-token");
+			cred.bearer_token = get_cfg("gcs.oauth-token");
+			cred.sas_token = get_cfg("adls.sas-token");
+			// Scope on the credential's own prefix: unlike the other call site there is no single
+			// table storage_location here -- one plan can carry credentials for several prefixes.
+			ApplyVendedCredentials(context, sec, prefix, cred, get_cfg("client.region"));
 			secret_manager.CreateSecret(context, sec);
 		}
 	}
