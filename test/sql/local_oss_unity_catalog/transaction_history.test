@@ -31,7 +31,7 @@ CREATE SECRET (
 );
 
 statement ok
-ATTACH 'duck' AS duck (TYPE unity_catalog);
+ATTACH 'duck' AS duck (TYPE unity_catalog, DEFAULT_SCHEMA 'external');
 
 foreach schema managed external
 
