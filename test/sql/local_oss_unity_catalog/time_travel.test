@@ -7,9 +7,9 @@
 # schema's name, which that catalog cannot answer for, and the unset answer was dereferenced --
 # the query took the process down rather than returning rows.
 #
-# duck.external.time_travel_rw is created empty by scripts/oss_uc_local/seed_tables, so the two
-# INSERTs below are versions 1 and 2 and the create is version 0. The assertions name those
-# numbers: reseed between runs.
+# duck.external.time_travel_ro is a read fixture: scripts/oss_uc_local/seed_tables creates it empty
+# and fills it with two INSERTs, so its versions are 0, 1 and 2. Reading rather than writing is what
+# keeps those numbers true on a second run of this suite.
 #
 
 require parquet
@@ -33,13 +33,7 @@ CREATE SECRET (
 );
 
 statement ok
-ATTACH 'duck' AS duck (TYPE unity_catalog, DEFAULT_SCHEMA 'external');
-
-statement ok
-INSERT INTO duck.external.time_travel_rw VALUES (1, 'one'), (2, 'two'), (3, 'three');
-
-statement ok
-INSERT INTO duck.external.time_travel_rw VALUES (4, 'four'), (5, 'five');
+ATTACH 'duck' AS duck (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA 'external');
 
 # -----------------------------------------------------------------------------
 # The version spread
@@ -49,19 +43,19 @@ INSERT INTO duck.external.time_travel_rw VALUES (4, 'four'), (5, 'five');
 #
 
 query I
-SELECT count(*) FROM duck.external.time_travel_rw AT (VERSION => 0);
+SELECT count(*) FROM duck.external.time_travel_ro AT (VERSION => 0);
 ----
 0
 
 query II
-SELECT id, name FROM duck.external.time_travel_rw AT (VERSION => 1) ORDER BY id;
+SELECT id, name FROM duck.external.time_travel_ro AT (VERSION => 1) ORDER BY id;
 ----
 1	one
 2	two
 3	three
 
 query II
-SELECT id, name FROM duck.external.time_travel_rw AT (VERSION => 2) ORDER BY id;
+SELECT id, name FROM duck.external.time_travel_ro AT (VERSION => 2) ORDER BY id;
 ----
 1	one
 2	two
@@ -69,11 +63,15 @@ SELECT id, name FROM duck.external.time_travel_rw AT (VERSION => 2) ORDER BY id;
 4	four
 5	five
 
-# Without an AT clause the read is the latest version, which is version 2 here.
-query I
-SELECT count(*) FROM duck.external.time_travel_rw;
+# Without an AT clause the read is the latest version, which holds every row the fixture carries.
+query II
+SELECT id, name FROM duck.external.time_travel_ro ORDER BY id;
 ----
-5
+1	one
+2	two
+3	three
+4	four
+5	five
 
 # -----------------------------------------------------------------------------
 # A version that does not exist
@@ -82,5 +80,5 @@ SELECT count(*) FROM duck.external.time_travel_rw;
 #
 
 statement error
-SELECT count(*) FROM duck.external.time_travel_rw AT (VERSION => 99);
+SELECT count(*) FROM duck.external.time_travel_ro AT (VERSION => 99);
 ----
