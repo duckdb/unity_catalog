@@ -23,7 +23,12 @@ FIXTURE = REPO_ROOT / "data" / "nested_projection"
 
 # Mirrors the Delta log's schemaString.
 COLUMNS = [
-    ("id", "int", "INT", '{"name":"id","type":"integer","nullable":true,"metadata":{}}'),
+    (
+        "id",
+        "int",
+        "INT",
+        '{"name":"id","type":"integer","nullable":true,"metadata":{}}',
+    ),
     (
         "records",
         "array<struct<name:string,value:int>>",

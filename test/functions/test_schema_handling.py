@@ -56,12 +56,16 @@ def _text(spelling):
 def _struct(**fields):
     body = ",".join(f'{{"name":"{n}","type":{t.json},"nullable":true,"metadata":{{}}}}' for n, t in fields.items())
     return _Type(
-        "struct<" + ",".join(f"{n}:{t.text}" for n, t in fields.items()) + ">", f'{{"type":"struct","fields":[{body}]}}'
+        "struct<" + ",".join(f"{n}:{t.text}" for n, t in fields.items()) + ">",
+        f'{{"type":"struct","fields":[{body}]}}',
     )
 
 
 def _array(element):
-    return _Type(f"array<{element.text}>", f'{{"type":"array","elementType":{element.json},"containsNull":true}}')
+    return _Type(
+        f"array<{element.text}>",
+        f'{{"type":"array","elementType":{element.json},"containsNull":true}}',
+    )
 
 
 def _map(key, value):
@@ -125,7 +129,11 @@ _CASES = {
         why="reported aligns with resolved; the baseline before the misaligned cases",
         fixture=_NESTED,
         table="nested_projection",
-        reported_schema=[_col("id", _INT), _col("records", _RECORDS), _col("multi", _MULTI)],
+        reported_schema=[
+            _col("id", _INT),
+            _col("records", _RECORDS),
+            _col("multi", _MULTI),
+        ],
         query=_NESTED_QUERY,
         expect=_Rows(_NESTED_ROWS),
     ),
@@ -133,7 +141,11 @@ _CASES = {
         why="reported lists its columns out of order but `position` is correct; the read follows position, not list order",
         fixture=_NESTED,
         table="nested_projection",
-        reported_schema=[_col("multi", _MULTI), _col("id", _INT), _col("records", _RECORDS)],
+        reported_schema=[
+            _col("multi", _MULTI),
+            _col("id", _INT),
+            _col("records", _RECORDS),
+        ],
         query=_NESTED_QUERY,
         expect=_Rows(_NESTED_ROWS),
     ),
@@ -153,7 +165,10 @@ _CASES = {
         why="children reordered but both strings, so reported and resolved agree on type and nothing stops the read",
         fixture=_PAIRS,
         table="pairs",
-        reported_schema=[_col("id", _INT), _col("rec", _struct(second=_STR, first=_STR))],
+        reported_schema=[
+            _col("id", _INT),
+            _col("rec", _struct(second=_STR, first=_STR)),
+        ],
         query=_PAIRS_QUERY,
         expect=_Rows(_PAIRS_ROWS),
     ),
@@ -177,7 +192,10 @@ _CASES = {
         why="reported has no type_json and text the fallback parser cannot read; the read falls back to resolved",
         fixture=_PAIRS,
         table="pairs",
-        reported_schema=[_col("id", _text("int")), _col("rec", _text("struct<first: string, second: string>"))],
+        reported_schema=[
+            _col("id", _text("int")),
+            _col("rec", _text("struct<first: string, second: string>")),
+        ],
         query=_PAIRS_QUERY,
         expect=_Rows(_PAIRS_ROWS),
     ),
@@ -185,7 +203,10 @@ _CASES = {
         why="reported gives unreadable type_text but correct type_json; the JSON map wins",
         fixture=_PAIRS,
         table="pairs",
-        reported_schema=[_col("id", _INT), _col("rec", _struct(first=_STR, second=_STR).as_text("bogus<not:a:type>"))],
+        reported_schema=[
+            _col("id", _INT),
+            _col("rec", _struct(first=_STR, second=_STR).as_text("bogus<not:a:type>")),
+        ],
         query=_PAIRS_QUERY,
         expect=_Rows(_PAIRS_ROWS),
     ),
@@ -359,7 +380,10 @@ def test_unreadable_column_without_a_log_is_refused(tmp_path):
     """The reported schema stands in only where every column it names resolves to a type. A column
     whose type neither the JSON nor the text parser could read binds to nothing, so the read is refused
     naming the column and the type UC gave it -- not with the binder's "parameter types could not be resolved"."""
-    spec = [_col("id", _INT), _col("rec", _text("struct<first: string, second: string>"))]
+    spec = [
+        _col("id", _INT),
+        _col("rec", _text("struct<first: string, second: string>")),
+    ]
     with _MockUnityCatalog(_columns(spec), tmp_path, "pairs") as mock:
         listed, listed_out = _run(mock, "SELECT column_names FROM (SHOW ALL TABLES) WHERE name = 'pairs';")
         read, read_out = _run(mock, "SELECT id FROM unity.plain.pairs;")
@@ -415,7 +439,10 @@ def _write_log(location, spec):
         "configuration": {},
         "createdTime": 0,
     }
-    actions = [{"protocol": {"minReaderVersion": 1, "minWriterVersion": 2}}, {"metaData": metadata}]
+    actions = [
+        {"protocol": {"minReaderVersion": 1, "minWriterVersion": 2}},
+        {"metaData": metadata},
+    ]
     log = location / "_delta_log"
     log.mkdir(parents=True)
     (log / "00000000000000000000.json").write_text("\n".join(json.dumps(a) for a in actions) + "\n")
