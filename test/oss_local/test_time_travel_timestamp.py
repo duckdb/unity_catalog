@@ -48,10 +48,11 @@ def test_time_travel_timestamp(request, uc_server, resources):
     # One transaction reading several timestamps of one table. The same instant at another offset reads
     # what the first spelling does.
     after_one_elsewhere = datetime.fromisoformat(after_one).astimezone(timezone(timedelta(hours=5, minutes=30)))
-    assert db.query(f"""
+    sql = f"""
         SELECT
             (SELECT count(*) FROM {t} AT (TIMESTAMP => TIMESTAMPTZ '{after_one}')) AS after_one,
             (SELECT count(*) FROM {t} AT (TIMESTAMP => '{after_one_elsewhere.isoformat()}')) AS after_one_elsewhere,
             (SELECT count(*) FROM {t} AT (TIMESTAMP => TIMESTAMPTZ '{after_two}')) AS after_two,
             (SELECT count(*) FROM {t}) AS latest
-    """) == [{"after_one": 1, "after_one_elsewhere": 1, "after_two": 2, "latest": 3}]
+    """
+    assert db.query(sql) == [{"after_one": 1, "after_one_elsewhere": 1, "after_two": 2, "latest": 3}]
