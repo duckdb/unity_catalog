@@ -74,8 +74,7 @@ static bool SameColumns(const CatalogEntry &left, const CatalogEntry &right) {
 	for (idx_t i = 0; i < left_columns.LogicalColumnCount(); i++) {
 		auto &left_column = left_columns.GetColumn(LogicalIndex(i));
 		auto &right_column = right_columns.GetColumn(LogicalIndex(i));
-		if (left_column.GetName() != right_column.GetName() ||
-		    left_column.GetType() != right_column.GetType()) {
+		if (left_column.GetName() != right_column.GetName() || left_column.GetType() != right_column.GetType()) {
 			return false;
 		}
 	}
@@ -92,8 +91,7 @@ static void WarnOnSchemaDivergence(ClientContext &context, const CatalogEntry &r
 	               "schema.Resolve %s: the catalog reports (%s) but the Delta log holds (%s); reading the log. A "
 	               "commit the catalog has not caught up with resolves itself; repeated, the registration is stale "
 	               "or the table was written by an engine the catalog does not see",
-	               resolved_table.name, DescribeColumns(reported_table),
-	               DescribeColumns(resolved_table));
+	               resolved_table.name, DescribeColumns(reported_table), DescribeColumns(resolved_table));
 }
 
 unique_ptr<CatalogEntry> TableInformation::EntryFromDeltaLog(ClientContext &context,
