@@ -2,6 +2,7 @@
 
 #include "uc_api.hpp"
 #include "uc_logging.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
 #include "uc_utils.hpp"
 
 #include "storage/unity_catalog.hpp"
@@ -15,9 +16,11 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/constraints/list.hpp"
 #include "storage/uc_schema_entry.hpp"
+#include "storage/uc_transaction.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
 
@@ -36,49 +39,184 @@ static idx_t ParseDeltaVersionFromAtClause(const BoundAtClause &at_clause) {
 UCTableSet::UCTableSet(UCSchemaEntry &schema) : catalog(schema.ParentCatalog().Cast<UnityCatalog>()), schema(schema) {
 }
 
-static ColumnDefinition CreateColumnDefinition(ClientContext &context, UCAPIColumnDefinition &coldef) {
-	return {coldef.name, UCUtils::TypeToLogicalType(context, coldef.type_text)};
+// A type we cannot parse becomes UNKNOWN, as duckdb-iceberg does for a table it has not loaded: the
+// listing keeps its row, and a read cannot bind the column to a guess. The caller records which
+// columns these were, so the refusal can name them.
+static ColumnDefinition CreateColumnDefinition(ClientContext &context, UCAPIColumnDefinition &coldef,
+                                               vector<pair<string, string>> &unreadable) {
+	try {
+		return {Identifier(coldef.name), UCUtils::ColumnTypeFromDefinition(coldef)};
+	} catch (const std::exception &e) {
+		UC_LOG_WARNING(context, "schema.Describe column=%s type_text=%s unreadable: %s", coldef.name, coldef.type_text,
+		               e.what());
+		unreadable.emplace_back(coldef.name, coldef.type_text);
+		return {Identifier(coldef.name), LogicalType::UNKNOWN};
+	}
 }
 
-optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, const EntryLookupInfo &lookup_info) {
-	auto at = lookup_info.GetAtClause();
-	if (!at) {
-		//! No version provided, just return the dummy entry (should represent latest version)
-		lock_guard<mutex> l(entry_lock);
-		return dummy.get();
+static string DescribeColumns(const TableCatalogEntry &entry) {
+	string result;
+	for (auto &column : entry.GetColumns().Logical()) {
+		if (!result.empty()) {
+			result += ", ";
+		}
+		result += column.GetName() + " " + column.GetType().ToString();
 	}
+	return result;
+}
 
-	auto version = ParseDeltaVersionFromAtClause(*at);
-
-	// Fast path: already cached
-	{
-		lock_guard<mutex> l(entry_lock);
-		auto it = schema_versions.find(version);
-		if (it != schema_versions.end()) {
-			return it->second.get();
+static bool SameColumns(const CatalogEntry &left, const CatalogEntry &right) {
+	auto &left_columns = left.Cast<TableCatalogEntry>().GetColumns();
+	auto &right_columns = right.Cast<TableCatalogEntry>().GetColumns();
+	if (left_columns.LogicalColumnCount() != right_columns.LogicalColumnCount()) {
+		return false;
+	}
+	for (idx_t i = 0; i < left_columns.LogicalColumnCount(); i++) {
+		auto &left_column = left_columns.GetColumn(LogicalIndex(i));
+		auto &right_column = right_columns.GetColumn(LogicalIndex(i));
+		if (left_column.GetName() != right_column.GetName() ||
+		    left_column.GetType() != right_column.GetType()) {
+			return false;
 		}
 	}
+	return true;
+}
 
-	// Not cached: attach and fetch schema — done outside entry_lock since it may block on I/O
+static void WarnOnSchemaDivergence(ClientContext &context, const CatalogEntry &reported, const CatalogEntry &resolved) {
+	if (SameColumns(reported, resolved)) {
+		return;
+	}
+	auto &reported_table = reported.Cast<TableCatalogEntry>();
+	auto &resolved_table = resolved.Cast<TableCatalogEntry>();
+	UC_LOG_WARNING(context,
+	               "schema.Resolve %s: the catalog reports (%s) but the Delta log holds (%s); reading the log. A "
+	               "commit the catalog has not caught up with resolves itself; repeated, the registration is stale "
+	               "or the table was written by an engine the catalog does not see",
+	               resolved_table.name, DescribeColumns(reported_table),
+	               DescribeColumns(resolved_table));
+}
+
+unique_ptr<CatalogEntry> TableInformation::EntryFromDeltaLog(ClientContext &context,
+                                                             const EntryLookupInfo &lookup_info) {
 	// RefreshCredentials first: InternalAttach may flush pending backfills, thus needing the credentials.
 	RefreshCredentials(context);
 	InternalAttach(context);
 	auto &delta_catalog = *GetInternalCatalog();
-	auto &schema = delta_catalog.GetSchema(context, table_data->schema_name);
-	auto transaction = schema.GetCatalogTransaction(context);
-	auto table_entry = schema.LookupEntry(transaction, lookup_info);
-	auto create_info = table_entry->GetInfo();
-
-	lock_guard<mutex> l(entry_lock);
-	// Re-check under lock in case another thread raced us here
-	auto it = schema_versions.find(version);
-	if (it != schema_versions.end()) {
-		return it->second.get();
+	auto &delta_schema = delta_catalog.GetSchema(context, Identifier::DefaultSchema());
+	auto transaction = delta_schema.GetCatalogTransaction(context);
+	auto table_entry = delta_schema.LookupEntry(transaction, lookup_info);
+	if (!table_entry) {
+		return nullptr;
 	}
-	auto res = schema_versions.emplace(
-	    version, make_uniq<UCTableEntry>(catalog, schema, *this, create_info->Cast<CreateTableInfo>()));
-	return res.first->second.get();
+	auto create_info = table_entry->GetInfo();
+	auto &info = create_info->Cast<CreateTableInfo>();
+	info.SetTableName(Identifier(table_data->name));
+	return make_uniq<UCTableEntry>(catalog, schema, *this, info);
+}
+
+optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, const EntryLookupInfo &lookup_info) {
+	// The kernel drops interval fields from the log's schema without an error, so the report is the only
+	// place they show: refuse ahead of both branches and the per-transaction cache.
+	ThrowIfIntervalColumns();
+	auto at = lookup_info.GetAtClause();
+	if (!at) {
+		// A non-Delta table has no log to resolve against, so the catalog's report is all there is.
+		if (reported && table_data->data_source_format != "DELTA") {
+			ThrowIfUnreadableColumns();
+			return reported.get();
+		}
+
+		// Reads bind against the log, not the catalog's description of it -- including nested
+		// children, which resolve by position. Per transaction, matching the child catalog, which
+		// rebuilds its own entry per transaction from the commits after the snapshot it holds.
+		auto &transaction = UCTransaction::Get(context, catalog);
+		auto key = EntryKey();
+		auto bound = transaction.GetTableEntry(key);
+		if (bound) {
+			return bound;
+		}
+
+		// Registered but never written to: nothing to resolve against yet. A credential or transport
+		// failure is a different thing and must not quietly downgrade the schema, so it propagates.
+		auto entry = EntryFromDeltaLog(context, lookup_info);
+		if (!entry) {
+			if (!reported) {
+				ThrowNoDeltaTable();
+			}
+			ThrowIfUnreadableColumns();
+			UC_LOG_WARNING(context, "schema.Resolve %s: no schema in the Delta log; using the catalog's report",
+			               table_data->name);
+			return reported.get();
+		}
+		if (reported) {
+			WarnOnSchemaDivergence(context, *reported, *entry);
+		}
+		return transaction.SetTableEntry(key, std::move(entry));
+	}
+
+	auto version = ParseDeltaVersionFromAtClause(*at);
+	auto &transaction = UCTransaction::Get(context, catalog);
+	auto key = EntryKey(version);
+	auto bound = transaction.GetTableEntry(key);
+	if (bound) {
+		return bound;
+	}
+	auto entry = EntryFromDeltaLog(context, lookup_info);
+	if (!entry) {
+		ThrowNoDeltaTable();
+	}
+	return transaction.SetTableEntry(key, std::move(entry));
 };
+
+//! Qualified name, plus the version where the query named one; unversioned means latest.
+string TableInformation::EntryKey(optional_idx version) const {
+	auto key = schema.name + "." + table_data->name;
+	return version.IsValid() ? key + "@" + to_string(version.GetIndex()) : key;
+}
+
+// `reported` describes a table, and tracks unrepresentables; this throws at bind with nice error
+void TableInformation::ThrowIfUnreadableColumns() const {
+	if (unreadable_columns.empty()) {
+		return;
+	}
+	auto &column = unreadable_columns.front();
+	throw NotImplementedException("Table '%s' has %llu column(s) with a type this build cannot read; the first is "
+	                              "'%s', which Unity Catalog reports as '%s'",
+	                              table_data->name, static_cast<uint64_t>(unreadable_columns.size()), column.first,
+	                              column.second);
+}
+
+// Delta keeps year-month and day-time intervals apart, as a count of months or of microseconds; DuckDB's
+// INTERVAL mixes months, days and micros and compares a month as 30 days, so neither maps without changing
+// meaning. Searching the type text also catches a nested field, e.g. `struct<gap:interval day to second>`.
+static bool TypeTextHasInterval(const string &type_text) {
+	static const char *const UNITS[] = {"year", "month", "day", "hour", "minute", "second"};
+	auto text = StringUtil::Lower(type_text);
+	for (auto pos = text.find("interval "); pos != string::npos; pos = text.find("interval ", pos + 1)) {
+		auto rest = text.substr(pos + 9);
+		for (auto unit : UNITS) {
+			if (StringUtil::StartsWith(rest, unit)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+void TableInformation::ThrowIfIntervalColumns() const {
+	for (auto &column : table_data->columns) {
+		if (TypeTextHasInterval(column.type_text)) {
+			throw NotImplementedException("Table '%s' has interval column '%s', which Unity Catalog reports as "
+			                              "'%s'; Delta interval semantics differ from DuckDB's INTERVAL",
+			                              table_data->name, column.name, column.type_text);
+		}
+	}
+}
+
+void TableInformation::ThrowNoDeltaTable() const {
+	throw CatalogException("Table '%s' is registered in Unity Catalog at '%s', but no Delta table was found there",
+	                       table_data->name, table_data->storage_location);
+}
 
 optional_ptr<Catalog> TableInformation::GetInternalCatalog() {
 	// TODO(race): unsynchronized read of internal_attached_database — a concurrent InternalDetach
@@ -233,7 +371,12 @@ static Value BuildLogTailFromCommits(const UCAPICommitsResult &commits, const st
 
 void TableInformation::InternalAttach(ClientContext &context) {
 	lock_guard<mutex> l(attach_lock);
-	if (is_dirty) {
+	// A transaction that already read this table keeps the catalog it read: the meta transaction refuses a
+	// second database under a name it holds, and the reads either side of the swap would straddle two
+	// commits. The next transaction reattaches, since is_dirty stays set.
+	bool read_by_this_transaction =
+	    internal_attached_database && MetaTransaction::Get(context).TryGetTransaction(*internal_attached_database);
+	if (is_dirty && !read_by_this_transaction) {
 		InternalDetach(context, l);
 		is_dirty = false;
 	}
@@ -269,14 +412,14 @@ void TableInformation::InternalAttach(ClientContext &context) {
 		// read-only attach: a RO attach must not mutate table storage (it also holds only read-scoped
 		// credentials). Reads still see staged commits via the log_tail + max_catalog_version above.
 		bool read_only = uc_catalog.access_mode == AccessMode::READ_ONLY;
-		optional_idx start_wm = commit_state.with_locked([](const CommitState &s) { return s.backfilled_version; });
+		optional_idx start_wm = commit_state.with_locked([](const UCCommitState &s) { return s.backfilled_version; });
 		if (read_only) {
 			UC_LOG_DEBUG(context,
 			             "uc.InternalAttach %s.%s.%s read-only: skipping backfill (%zu backfillable commit(s))",
 			             table_data->catalog_name, table_data->schema_name, table_data->name, commits.commits.size());
 		}
 		optional_idx new_wm = read_only ? start_wm : BackfillCommits(context, commits.commits, start_wm);
-		commit_state.with_locked([&](CommitState &s) {
+		commit_state.with_locked([&](UCCommitState &s) {
 			s.etag = commits.etag;
 			s.backfilled_version = new_wm;
 		});
@@ -342,8 +485,15 @@ void UCTableSet::LoadEntries(ClientContext &context, const lock_guard<mutex> &_e
 	for (auto &table : get_tables_result) {
 		D_ASSERT(schema.name == table.schema_name);
 		CreateTableInfo info;
+		vector<pair<string, string>> unreadable;
+		// `position` is the API's ordering contract; the response's array order says nothing. Stable,
+		// so columns sharing a position (or carrying none) keep their listed order.
+		std::stable_sort(table.columns.begin(), table.columns.end(),
+		                 [](const UCAPIColumnDefinition &left, const UCAPIColumnDefinition &right) {
+			                 return left.position < right.position;
+		                 });
 		for (auto &col : table.columns) {
-			info.columns.AddColumn(CreateColumnDefinition(context, col));
+			info.columns.AddColumn(CreateColumnDefinition(context, col, unreadable));
 		}
 
 		lock_guard<mutex> l(entry_lock);
@@ -363,7 +513,8 @@ void UCTableSet::LoadEntries(ClientContext &context, const lock_guard<mutex> &_e
 		auto table_entry = make_uniq<UCTableEntry>(catalog, schema, table_info, info);
 
 		table_info.table_data = make_uniq<UCAPITable>(table);
-		table_info.dummy = std::move(table_entry);
+		table_info.reported = std::move(table_entry);
+		table_info.unreadable_columns = std::move(unreadable);
 	}
 }
 
@@ -426,7 +577,7 @@ void UCTableSet::Scan(ClientContext &context, const std::function<void(CatalogEn
 	EnsureLoaded(context);
 	lock_guard<mutex> l(entry_lock);
 	for (auto &table : tables) {
-		callback(*table.second.dummy);
+		callback(*table.second.reported);
 	}
 }
 

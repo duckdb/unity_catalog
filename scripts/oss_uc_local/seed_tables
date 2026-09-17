@@ -31,7 +31,8 @@
 #
 # Env:
 #   UC_REPO             UC checkout (default ~/src/d/unitycatalog)
-#   DUCKDB_UC_DATA_DIR  table data root (default $UC_REPO/etc/data)
+#   DUCKDB_UC_DATA_DIR  table data root (default: UC_TEST_DATA, else $UC_REPO/etc/data). The tests
+#                       read the staged tables back from UC_TEST_DATA, so the two must agree.
 #   DUCKDB_BIN          built duckdb CLI (default <ext-repo>/build/release/duckdb)
 #   UC_TEST_ENDPOINT    UC server address (default http://127.0.0.1:8080), matching the tests
 set -euo pipefail
@@ -54,7 +55,7 @@ DUCKDB_BIN="${DUCKDB_BIN:-$EXT_REPO/build/release/duckdb}"
 
 UC_REPO="${UC_REPO:-$HOME/src/d/unitycatalog}"
 UC_TEST_ENDPOINT="${UC_TEST_ENDPOINT:-http://127.0.0.1:8080}"
-DATA_DIR="${DUCKDB_UC_DATA_DIR:-$UC_REPO/etc/data}"
+DATA_DIR="${DUCKDB_UC_DATA_DIR:-${UC_TEST_DATA:-$UC_REPO/etc/data}}"
 MANAGED_ROOT="$DATA_DIR/duck/managed"
 EXTERNAL_ROOT="$DATA_DIR/duck/external"
 
@@ -108,6 +109,18 @@ uc schema get --full_name "duck.external" >/dev/null 2>&1 ||
 	uc schema create --catalog duck --name "external" \
 		--comment "plain (EXTERNAL) Delta tables"
 
+# stage_table TBL COLS FIXTURE -- an EXTERNAL table whose location is pre-seeded with FIXTURE's
+# committed Delta log. Column mapping and partitionColumns live in that log, and neither the UC CLI
+# nor duckdb can express them; UC takes the location as given, so the log is staged before the table
+# exists. Always rebuilt: the tests name commit numbers, so a run has to start from 0.
+stage_table() {
+	local tbl=$1 cols=$2 fixture=$3
+	drop_table external "$tbl"
+	cp -r "$EXT_REPO/data/$fixture" "$EXTERNAL_ROOT/$tbl"
+	uc table create --full_name "duck.external.$tbl" --columns "$cols" \
+		--storage_location "$EXTERNAL_ROOT/$tbl"
+}
+
 for schema in managed external; do
 	# _ro: default leaves it intact (create only if missing); --reset rebuilds it.
 	if [ "$RESET" = 1 ]; then
@@ -122,6 +135,28 @@ for schema in managed external; do
 	create_table "$schema" "${TABLE}_rw"
 done
 
+# Write targets for the column-mapping and partition-value tests.
+stage_table column_mapping_rw "id INT, code STRING" column_mapping/id_mode
+stage_table partition_values_rw "id INT, code STRING, p STRING" partition_encoding
+
+# Read fixture for the time-travel test, filled by two INSERTs below so that its versions are 0
+# (empty, from the create), 1 and 2. The test names those numbers, so it reads rather than writes:
+# a write target would gain a version per run and the numbers would drift.
+if [ "$RESET" = 1 ]; then
+	drop_table external time_travel_ro
+	create_table external time_travel_ro
+else
+	uc table get --full_name "duck.external.time_travel_ro" >/dev/null 2>&1 ||
+		create_table external time_travel_ro
+fi
+
+# Write target for the timestamp type test. The naming inverts between the two systems, so the
+# table carries both: UC's timestamp_ntz is DuckDB's naive TIMESTAMP, UC's timestamp is TIMESTAMP_TZ.
+drop_table external timestamp_types_rw
+uc table create --full_name "duck.external.timestamp_types_rw" \
+	--columns "id INT, ntz TIMESTAMP_NTZ, tz TIMESTAMP" \
+	--storage_location "$EXTERNAL_ROOT/timestamp_types_rw"
+
 # Populate the _ro tables (CLI can't insert). WHERE NOT EXISTS covers both cases: a freshly
 # (re)created _ro is empty and gets the 5 rows; an existing _ro is left untouched. _rw left empty.
 # Unquoted heredoc: the endpoint below is the only thing the shell expands here.
@@ -134,6 +169,15 @@ INSERT INTO duck.managed.id_name_ro
 INSERT INTO duck.external.id_name_ro
   SELECT * FROM (VALUES (1, 'one'), (2, 'two'), (3, 'three'), (4, 'four'), (5, 'five')) v(id, name)
   WHERE NOT EXISTS (SELECT 1 FROM duck.external.id_name_ro);
+INSERT INTO duck.external.time_travel_ro
+  SELECT * FROM (VALUES (1, 'one'), (2, 'two'), (3, 'three')) v(id, name)
+  WHERE NOT EXISTS (SELECT 1 FROM duck.external.time_travel_ro);
+INSERT INTO duck.external.time_travel_ro
+  SELECT * FROM (VALUES (4, 'four'), (5, 'five')) v(id, name)
+  WHERE NOT EXISTS (SELECT 1 FROM duck.external.time_travel_ro WHERE id > 3);
 SQL
 
 echo "seed: duck.{managed,external}.${TABLE}_ro (5 rows$([ "$RESET" = 1 ] && echo ', reset')) + _rw (recreated empty) ready"
+echo "seed: duck.external.{column_mapping,partition_values}_rw staged from data/ (recreated) ready"
+echo "seed: duck.external.timestamp_types_rw (recreated empty) ready"
+echo "seed: duck.external.time_travel_ro (versions 0, 1, 2) ready"

@@ -1,0 +1,71 @@
+# name: test/sql/local_oss_unity_catalog/timestamp_types.test
+# description: a catalog timestamp_ntz reads as a naive TIMESTAMP, and a catalog timestamp keeps its zone
+# group: [local_oss_unity_catalog]
+
+#
+# The naming inverts between the two systems: UC's timestamp_ntz is DuckDB's TIMESTAMP and UC's
+# timestamp is DuckDB's TIMESTAMP_TZ. One table carries both columns so the two cannot be conflated.
+#
+# duck.external.timestamp_types_rw is created empty by scripts/oss_uc_local/seed_tables. The reads
+# below are DISTINCT, so a re-run against a server that was not reseeded appends an identical row
+# and still sees one. Values are compared, never counted: a zone shift is the failure this type
+# invites and a count cannot see it. Nothing sets the session zone: that needs icu, which
+# this build does not carry.
+#
+
+require parquet
+
+require httpfs
+
+require delta
+
+require unity_catalog
+
+require-env UC_TEST_SERVER_RUNNING
+
+require-env UC_TEST_ENDPOINT
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN 'not-used',
+    ENDPOINT '{UC_TEST_ENDPOINT}',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH 'duck' AS duck (TYPE unity_catalog, DEFAULT_SCHEMA 'external');
+
+# -----------------------------------------------------------------------------
+# The types the catalog reports
+#
+
+query II
+SELECT data_type, column_name
+FROM duckdb_columns()
+WHERE table_name = 'timestamp_types_rw' AND column_name IN ('ntz', 'tz')
+ORDER BY column_name;
+----
+TIMESTAMP	ntz
+TIMESTAMP WITH TIME ZONE	tz
+
+# -----------------------------------------------------------------------------
+# Round trip
+#
+
+statement ok
+INSERT INTO duck.external.timestamp_types_rw
+VALUES (1, TIMESTAMP '2026-01-15 10:30:00', TIMESTAMPTZ '2026-01-15 10:30:00+02');
+
+query III
+SELECT DISTINCT id, ntz, tz FROM duck.external.timestamp_types_rw ORDER BY id;
+----
+1	2026-01-15 10:30:00	2026-01-15 08:30:00+00
+
+# Stated as a comparison as well as rendered text: the naive column keeps the wall-clock value it
+# was given, and the zoned one keeps the instant, whatever zone the reader prints it in.
+query II
+SELECT DISTINCT ntz = TIMESTAMP '2026-01-15 10:30:00', tz = TIMESTAMPTZ '2026-01-15 08:30:00+00'
+FROM duck.external.timestamp_types_rw;
+----
+true	true

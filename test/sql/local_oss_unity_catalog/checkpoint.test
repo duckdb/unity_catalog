@@ -92,11 +92,12 @@ USE my_catalog.default; CALL unity_catalog_checkpoint_table('user_countries');
 
 # Confirm all checkpoints via presence of checkpoint files
 # backport NOTE: skip marksheet because of writer pollution, fixed in v1.5-variegata
+# marksheet_uniform is skipped for a different reason: the server registers it at file:///tmp, so it
+# is checkpointed (above) but lands outside the data root this globs.
 query II rowsort
-SELECT parse_path(file)[-3], parse_path(file)[-1] FROM glob('${UC_TEST_DATA}/**/*checkpoint*') WHERE file NOT LIKE '%/marksheet/%';
+SELECT parse_path(file)[-3], parse_path(file)[-1] FROM glob('${UC_TEST_DATA}/**/*checkpoint*')
+WHERE file NOT LIKE '%/marksheet/%' AND file NOT LIKE '%/marksheet_uniform/%';
 ----
-marksheet_uniform	00000000000000000001.checkpoint.parquet
-marksheet_uniform	_last_checkpoint
 numbers	00000000000000000000.checkpoint.parquet
 numbers	_last_checkpoint
 user_countries	00000000000000000000.checkpoint.parquet

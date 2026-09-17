@@ -1,0 +1,84 @@
+# name: test/sql/local_oss_unity_catalog/time_travel.test
+# description: reading an earlier version through the UC catalog path
+# group: [local_oss_unity_catalog]
+
+#
+# A versioned read asks the child delta catalog for the table. It used to be asked under the UC
+# schema's name, which that catalog cannot answer for, and the unset answer was dereferenced --
+# the query took the process down rather than returning rows.
+#
+# duck.external.time_travel_ro is a read fixture: scripts/oss_uc_local/seed_tables creates it empty
+# and fills it with two INSERTs, so its versions are 0, 1 and 2. Reading rather than writing is what
+# keeps those numbers true on a second run of this suite.
+#
+
+require parquet
+
+require httpfs
+
+require delta
+
+require unity_catalog
+
+require-env UC_TEST_SERVER_RUNNING
+
+require-env UC_TEST_ENDPOINT
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN 'not-used',
+    ENDPOINT '{UC_TEST_ENDPOINT}',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH 'duck' AS duck (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA 'external');
+
+# -----------------------------------------------------------------------------
+# The version spread
+#
+# Empty, middle and latest, because a fix that only handles the middle case is easy to write by
+# accident.
+#
+
+query I
+SELECT count(*) FROM duck.external.time_travel_ro AT (VERSION => 0);
+----
+0
+
+query II
+SELECT id, name FROM duck.external.time_travel_ro AT (VERSION => 1) ORDER BY id;
+----
+1	one
+2	two
+3	three
+
+query II
+SELECT id, name FROM duck.external.time_travel_ro AT (VERSION => 2) ORDER BY id;
+----
+1	one
+2	two
+3	three
+4	four
+5	five
+
+# Without an AT clause the read is the latest version, which holds every row the fixture carries.
+query II
+SELECT id, name FROM duck.external.time_travel_ro ORDER BY id;
+----
+1	one
+2	two
+3	three
+4	four
+5	five
+
+# -----------------------------------------------------------------------------
+# A version that does not exist
+#
+# An error, not a crash, and not silently the latest.
+#
+
+statement error
+SELECT count(*) FROM duck.external.time_travel_ro AT (VERSION => 99);
+----
