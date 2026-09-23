@@ -571,6 +571,36 @@ static vector<pair<string, string>> ReadJsonStringMap(duckdb_yyjson::yyjson_val 
 	return result;
 }
 
+//! Whether kernel takes this property when a table is created. Mirrors `ALLOWED_DELTA_PROPERTIES` in
+//! kernel's create-table builder, which rejects every other `delta.*` key; a key kernel has since added
+//! is merely not used here, which is the safe direction. Keys outside the `delta.` namespace are the
+//! table's own and are passed through.
+static bool CreatableDeltaProperty(const string &key) {
+	static const unordered_set<string> CREATABLE = {"delta.appendOnly",
+	                                                "delta.checkpointInterval",
+	                                                "delta.checkpointPolicy",
+	                                                "delta.checkpoint.writeStatsAsJson",
+	                                                "delta.checkpoint.writeStatsAsStruct",
+	                                                "delta.columnMapping.mode",
+	                                                "delta.dataSkippingNumIndexedCols",
+	                                                "delta.dataSkippingStatsColumns",
+	                                                "delta.deletedFileRetentionDuration",
+	                                                "delta.enableChangeDataFeed",
+	                                                "delta.enableDeletionVectors",
+	                                                "delta.enableExpiredLogCleanup",
+	                                                "delta.enableIcebergCompatV3",
+	                                                "delta.enableInCommitTimestamps",
+	                                                "delta.enableRowTracking",
+	                                                "delta.enableTypeWidening",
+	                                                "delta.logRetentionDuration",
+	                                                "delta.parquet.format.version",
+	                                                "delta.setTransactionRetentionDuration"};
+	if (!StringUtil::StartsWith(key, "delta.")) {
+		return true;
+	}
+	return CREATABLE.count(key) > 0;
+}
+
 //! A secret scoped to the staging location, so writing version 0 there is authorised. Local storage, which
 //! the OSS server hands out, needs none.
 static void StageCredentials(ClientContext &context, UnityCatalog &uc_catalog, const UCAPIStagingTable &staging) {
@@ -704,6 +734,18 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 			for (auto &feature : features) {
 				base.options["delta.feature." + feature] = ConstantExpression::String("supported");
 			}
+		}
+		// A suggestion is UC saying "this is how we would write it", so take the ones that can be taken.
+		// Two reasons one cannot: column mapping, which the writer maps for top-level, unpartitioned
+		// columns only, so applying it by default would leave nested and partitioned tables impossible to
+		// create; and any `delta.*` key kernel does not accept at creation, which it refuses outright.
+		for (auto &property : staging.suggested_properties) {
+			if (property.first == "delta.columnMapping.mode" || !CreatableDeltaProperty(property.first)) {
+				UC_LOG_DEBUG(context, "CreateTable %s.%s.%s skipped suggested property %s", catalog_name,
+				             schema_name, table_name, property.first);
+				continue;
+			}
+			base.options[property.first] = ConstantExpression::String(property.second);
 		}
 		auto &delta_catalog = staging_db->GetCatalog();
 		auto &delta_schema = delta_catalog.GetSchema(context, Identifier::DefaultSchema());
