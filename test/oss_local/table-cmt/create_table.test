@@ -1,0 +1,103 @@
+# name: test/oss_local/table-cmt/create_table.test
+# description: CREATE TABLE in a catalog-managed schema: DuckDB stages the table with UC, writes version 0 through UC's committer, registers it, and then reads and writes it like any other managed table. Paired create_table.py picks the (unused) name and deletes the table afterwards.
+# group: [table-cmt]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_NEW_TABLE
+
+require-env UC_ENDPOINT
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT '{UC_ENDPOINT}',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'cmt');
+
+statement ok
+CALL enable_logging(level='DEBUG');
+
+# -----------------------------------------------------------------------------
+# Creating it
+#
+
+statement ok
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE} (id INTEGER, name VARCHAR);
+
+# The three calls the flow is made of, in order: UC allocates, DuckDB writes version 0, UC registers
+query I
+SELECT count(*) FROM duckdb_logs()
+WHERE message LIKE 'api.CreateStagingTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE}%';
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_logs()
+WHERE message LIKE 'api.CreateTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE}%';
+----
+1
+
+# The catalog serves it, with the columns as written
+query II
+SELECT column_name, data_type FROM duckdb_columns()
+WHERE table_name = '{UC_TEST_NEW_TABLE}' ORDER BY column_index;
+----
+id	INTEGER
+name	VARCHAR
+
+# -----------------------------------------------------------------------------
+# Using it
+#
+# A managed table is only usable if the catalog owns its commits, so an INSERT here goes through
+# UpdateTable the same way it does for a table the catalog made.
+#
+
+statement ok
+INSERT INTO duck.cmt.{UC_TEST_NEW_TABLE} VALUES (1, 'one'), (2, 'two');
+
+query II
+SELECT id, name FROM duck.cmt.{UC_TEST_NEW_TABLE} ORDER BY id;
+----
+1	one
+2	two
+
+# At least once: a commit and its backfill both go through this endpoint
+query I
+SELECT count(*) >= 1 FROM duckdb_logs()
+WHERE message LIKE 'api.UpdateTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE}%';
+----
+true
+
+# -----------------------------------------------------------------------------
+# A session that did not create it
+#
+# The rows have to be there for a connection that only ever saw the catalog's copy of the table.
+#
+
+statement ok
+CALL disable_logging();
+
+statement ok
+DETACH duck;
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS fresh (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'cmt');
+
+query II
+SELECT id, name FROM fresh.cmt.{UC_TEST_NEW_TABLE} ORDER BY id;
+----
+1	one
+2	two
