@@ -273,6 +273,127 @@ string UCAPI::GetDefaultSchema(ClientContext &ctx, const UCCredentials &credenti
 	return setting_name;
 }
 
+//! Reads the string values of a JSON object into pairs, in the order the server wrote them
+static vector<pair<string, string>> ReadStringMap(duckdb_yyjson::yyjson_val *obj) {
+	vector<pair<string, string>> result;
+	if (!obj || !yyjson_is_obj(obj)) {
+		return result;
+	}
+	size_t idx, max;
+	duckdb_yyjson::yyjson_val *key, *val;
+	yyjson_obj_foreach(obj, idx, max, key, val) {
+		if (!yyjson_is_str(val)) {
+			// A null value means "UC has no opinion", which is not a property to set
+			continue;
+		}
+		result.emplace_back(yyjson_get_str(key), yyjson_get_str(val));
+	}
+	return result;
+}
+
+static vector<string> ReadStringArray(duckdb_yyjson::yyjson_val *arr) {
+	vector<string> result;
+	if (!arr || !yyjson_is_arr(arr)) {
+		return result;
+	}
+	size_t idx, max;
+	duckdb_yyjson::yyjson_val *item;
+	yyjson_arr_foreach(arr, idx, max, item) {
+		if (yyjson_is_str(item)) {
+			result.emplace_back(yyjson_get_str(item));
+		}
+	}
+	return result;
+}
+
+static string JsonStringArray(const vector<string> &values) {
+	vector<string> encoded;
+	for (auto &value : values) {
+		encoded.push_back(YYJsonEncodeString(value));
+	}
+	return "[" + StringUtil::Join(encoded, ", ") + "]";
+}
+
+static string JsonStringMap(const vector<pair<string, string>> &values) {
+	vector<string> encoded;
+	for (auto &value : values) {
+		encoded.push_back(YYJsonEncodeString(value.first) + ": " + YYJsonEncodeString(value.second));
+	}
+	return "{" + StringUtil::Join(encoded, ", ") + "}";
+}
+
+//! The S3 keys of a delta.yaml `DeltaCredentialsResponse`. First entry only; matching the longest
+//! prefix is a TODO shared with the table-credentials path.
+static void ReadStorageCredentials(duckdb_yyjson::yyjson_val *root, UCAPITableCredentials &result) {
+	auto *creds_arr = yyjson_obj_get(root, "storage-credentials");
+	if (!creds_arr || !yyjson_is_arr(creds_arr) || yyjson_arr_size(creds_arr) == 0) {
+		return;
+	}
+	auto *cfg = yyjson_obj_get(yyjson_arr_get_first(creds_arr), "config");
+	if (!cfg || !yyjson_is_obj(cfg)) {
+		return;
+	}
+	result.key_id = TryGetStrFromObject(cfg, "s3.access-key-id", false);
+	result.secret = TryGetStrFromObject(cfg, "s3.secret-access-key", false);
+	result.session_token = TryGetStrFromObject(cfg, "s3.session-token", false);
+}
+
+UCAPIStagingTable UCAPI::CreateStagingTable(ClientContext &ctx, const string &catalog_name, const string &schema_name,
+                                            const string &table_name, const UCCredentials &credentials) {
+	UCAPIStagingTable result;
+	string url = StringUtil::Format("%s/api/2.1/unity-catalog/delta/v1/catalogs/%s/schemas/%s/staging-tables",
+	                                credentials.endpoint, catalog_name, schema_name);
+	string body = StringUtil::Format(R"({"name": %s})", YYJsonEncodeString(table_name));
+	UC_LOG_DEBUG(ctx, "api.CreateStagingTable %s.%s.%s", catalog_name, schema_name, table_name);
+	auto api_result = MakeRequest(ctx, url, credentials.token, body);
+
+	YYJsonDoc doc(api_result);
+	auto *root = doc.Root();
+	auto error = CheckError(root);
+	if (error.HasError()) {
+		error.ThrowError(
+		    StringUtil::Format("Failed to stage table %s.%s.%s", catalog_name, schema_name, table_name));
+	}
+
+	result.table_id = TryGetStrFromObject(root, "table-id");
+	result.location = TryGetStrFromObject(root, "location");
+	auto *protocol = yyjson_obj_get(root, "required-protocol");
+	if (protocol && yyjson_is_obj(protocol)) {
+		result.min_reader_version = (int64_t)TryGetNumFromObject(protocol, "min-reader-version", false, 0);
+		result.min_writer_version = (int64_t)TryGetNumFromObject(protocol, "min-writer-version", false, 0);
+		result.reader_features = ReadStringArray(yyjson_obj_get(protocol, "reader-features"));
+		result.writer_features = ReadStringArray(yyjson_obj_get(protocol, "writer-features"));
+	}
+	result.required_properties = ReadStringMap(yyjson_obj_get(root, "required-properties"));
+	result.suggested_properties = ReadStringMap(yyjson_obj_get(root, "suggested-properties"));
+	return result;
+}
+
+void UCAPI::CreateTable(ClientContext &ctx, const string &catalog_name, const string &schema_name,
+                        const UCAPICommittedTable &table, const UCCredentials &credentials) {
+	string url = StringUtil::Format("%s/api/2.1/unity-catalog/delta/v1/catalogs/%s/schemas/%s/tables",
+	                                credentials.endpoint, catalog_name, schema_name);
+	// The protocol, properties and columns describe what was committed, not what was asked for, so the
+	// catalog cannot end up describing a table that differs from its own version 0.
+	string body = StringUtil::Format(
+	    R"({"name": %s, "location": %s, "table-type": "MANAGED", "columns": %s, "partition-columns": %s, )"
+	    R"("protocol": {"min-reader-version": %d, "min-writer-version": %d, "reader-features": %s, )"
+	    R"("writer-features": %s}, "properties": %s, "last-commit-timestamp-ms": %d})",
+	    YYJsonEncodeString(table.name), YYJsonEncodeString(table.location), table.schema_json,
+	    JsonStringArray(table.partition_columns), table.min_reader_version, table.min_writer_version,
+	    JsonStringArray(table.reader_features), JsonStringArray(table.writer_features),
+	    JsonStringMap(table.properties), table.last_commit_timestamp_ms);
+	UC_LOG_DEBUG(ctx, "api.CreateTable %s.%s.%s", catalog_name, schema_name, table.name);
+	auto api_result = MakeRequest(ctx, url, credentials.token, body);
+
+	YYJsonDoc doc(api_result);
+	auto error = CheckError(doc.Root());
+	if (error.HasError()) {
+		error.ThrowError(
+		    StringUtil::Format("Failed to create table %s.%s.%s", catalog_name, schema_name, table.name));
+	}
+}
+
 UCAPICommitsResult UCAPI::LoadTable(ClientContext &ctx, const string &catalog_name, const string &schema_name,
                                     const string &table_name, const UCCredentials &credentials) {
 	UCAPICommitsResult result;
@@ -436,18 +557,25 @@ UCAPITableCredentials UCAPI::GetTableCredentials(ClientContext &ctx, const strin
 		    StringUtil::Format("Failed to get table credentials for %s.%s.%s", catalog_name, schema_name, table_name));
 	}
 
-	// Parse storage-credentials array; use first entry (longest-prefix matching is a TODO)
-	auto *creds_arr = yyjson_obj_get(root, "storage-credentials");
-	if (creds_arr && yyjson_is_arr(creds_arr) && yyjson_arr_size(creds_arr) > 0) {
-		auto *cred = yyjson_arr_get_first(creds_arr);
-		auto *cfg = yyjson_obj_get(cred, "config");
-		if (cfg && yyjson_is_obj(cfg)) {
-			result.key_id = TryGetStrFromObject(cfg, "s3.access-key-id", false);
-			result.secret = TryGetStrFromObject(cfg, "s3.secret-access-key", false);
-			result.session_token = TryGetStrFromObject(cfg, "s3.session-token", false);
-		}
-	}
+	ReadStorageCredentials(root, result);
+	return result;
+}
 
+UCAPITableCredentials UCAPI::GetStagingTableCredentials(ClientContext &ctx, const string &table_id,
+                                                       const UCCredentials &credentials) {
+	UCAPITableCredentials result;
+	string url = StringUtil::Format("%s/api/2.1/unity-catalog/delta/v1/staging-tables/%s/credentials",
+	                                credentials.endpoint, table_id);
+	UC_LOG_DEBUG(ctx, "api.GetStagingTableCredentials table_id=%s", table_id);
+	auto api_result = MakeRequest(ctx, url, credentials.token);
+
+	YYJsonDoc doc(api_result);
+	auto *root = doc.Root();
+	auto error = CheckError(root);
+	if (error.HasError()) {
+		error.ThrowError(StringUtil::Format("Failed to get credentials for staging table %s", table_id));
+	}
+	ReadStorageCredentials(root, result);
 	return result;
 }
 

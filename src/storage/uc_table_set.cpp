@@ -20,6 +20,8 @@
 #include "storage/uc_schema_entry.hpp"
 #include "storage/uc_transaction.hpp"
 #include "duckdb/parser/parser.hpp"
+#include "yyjson.hpp"
+#include "duckdb/common/path.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
@@ -539,8 +541,184 @@ void UCTableSet::EnsureLoaded(ClientContext &context) {
 	}
 }
 
+static vector<string> ReadJsonStringArray(duckdb_yyjson::yyjson_val *arr) {
+	vector<string> result;
+	if (!arr || !duckdb_yyjson::yyjson_is_arr(arr)) {
+		return result;
+	}
+	size_t idx, max;
+	duckdb_yyjson::yyjson_val *item;
+	yyjson_arr_foreach(arr, idx, max, item) {
+		if (duckdb_yyjson::yyjson_is_str(item)) {
+			result.emplace_back(duckdb_yyjson::yyjson_get_str(item));
+		}
+	}
+	return result;
+}
+
+static vector<pair<string, string>> ReadJsonStringMap(duckdb_yyjson::yyjson_val *obj) {
+	vector<pair<string, string>> result;
+	if (!obj || !duckdb_yyjson::yyjson_is_obj(obj)) {
+		return result;
+	}
+	size_t idx, max;
+	duckdb_yyjson::yyjson_val *key, *val;
+	yyjson_obj_foreach(obj, idx, max, key, val) {
+		if (duckdb_yyjson::yyjson_is_str(val)) {
+			result.emplace_back(duckdb_yyjson::yyjson_get_str(key), duckdb_yyjson::yyjson_get_str(val));
+		}
+	}
+	return result;
+}
+
+//! A secret scoped to the staging location, so writing version 0 there is authorised. Local storage, which
+//! the OSS server hands out, needs none.
+static void StageCredentials(ClientContext &context, UnityCatalog &uc_catalog, const UCAPIStagingTable &staging) {
+	if (StringUtil::StartsWith(staging.location, "file://")) {
+		return;
+	}
+	auto credentials = UCAPI::GetStagingTableCredentials(context, staging.table_id, uc_catalog.credentials);
+	CreateSecretInput input;
+	input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
+	input.persist_type = SecretPersistType::TEMPORARY;
+	input.name = Identifier("__internal_uc_" + staging.table_id);
+	input.type = "s3";
+	input.provider = "config";
+	input.options = {
+	    {"key_id", credentials.key_id},
+	    {"secret", credentials.secret},
+	    {"session_token", credentials.session_token},
+	    {"region", uc_catalog.credentials.aws_region},
+	};
+	input.scope = {staging.location};
+	auto &secret_manager = SecretManager::Get(context);
+	secret_manager.CreateSecret(context, input);
+}
+
+//! What the table's own version 0 says it is: the schema, partition columns, protocol and configuration.
+//! UC is told this rather than what the statement asked for, so the catalog cannot describe a table that
+//! differs from its log.
+static UCAPICommittedTable ReadCommittedTable(ClientContext &context, const string &name, const string &location) {
+	auto log_entry = Path::FromString(location).Join("_delta_log").Join("00000000000000000000.json").ToString();
+	auto &fs = FileSystem::GetFileSystem(context);
+	auto file = fs.OpenFile(log_entry, FileOpenFlags::FILE_FLAGS_READ);
+	auto size = NumericCast<idx_t>(file->GetFileSize());
+	string contents(size, '\0');
+	file->Read((void *)contents.data(), size);
+
+	UCAPICommittedTable result;
+	result.name = name;
+	result.location = location;
+	// Version 0 holds one action per line; the protocol and metaData are the two that describe the table
+	for (auto &line : StringUtil::Split(contents, '\n')) {
+		if (line.find_first_not_of(" \t\r") == string::npos) {
+			continue;
+		}
+		duckdb_yyjson::yyjson_doc *doc =
+		    duckdb_yyjson::yyjson_read(line.c_str(), line.size(), duckdb_yyjson::YYJSON_READ_NOFLAG);
+		if (!doc) {
+			throw IOException("Could not read the committed Delta log at %s", log_entry);
+		}
+		auto *root = duckdb_yyjson::yyjson_doc_get_root(doc);
+		auto *protocol = duckdb_yyjson::yyjson_obj_get(root, "protocol");
+		if (protocol) {
+			result.min_reader_version =
+			    (int64_t)duckdb_yyjson::yyjson_get_sint(duckdb_yyjson::yyjson_obj_get(protocol, "minReaderVersion"));
+			result.min_writer_version =
+			    (int64_t)duckdb_yyjson::yyjson_get_sint(duckdb_yyjson::yyjson_obj_get(protocol, "minWriterVersion"));
+			result.reader_features = ReadJsonStringArray(duckdb_yyjson::yyjson_obj_get(protocol, "readerFeatures"));
+			result.writer_features = ReadJsonStringArray(duckdb_yyjson::yyjson_obj_get(protocol, "writerFeatures"));
+		}
+		auto *commit_info = duckdb_yyjson::yyjson_obj_get(root, "commitInfo");
+		if (commit_info) {
+			// A table with inCommitTimestamp carries the authoritative one there; `timestamp` is what a
+			// writer without that feature records.
+			auto *ict = duckdb_yyjson::yyjson_obj_get(commit_info, "inCommitTimestamp");
+			auto *written = duckdb_yyjson::yyjson_obj_get(commit_info, "timestamp");
+			result.last_commit_timestamp_ms = (int64_t)duckdb_yyjson::yyjson_get_sint(ict ? ict : written);
+		}
+		auto *metadata = duckdb_yyjson::yyjson_obj_get(root, "metaData");
+		if (metadata) {
+			auto *schema_string = duckdb_yyjson::yyjson_obj_get(metadata, "schemaString");
+			if (schema_string && duckdb_yyjson::yyjson_is_str(schema_string)) {
+				result.schema_json = duckdb_yyjson::yyjson_get_str(schema_string);
+			}
+			result.partition_columns =
+			    ReadJsonStringArray(duckdb_yyjson::yyjson_obj_get(metadata, "partitionColumns"));
+			result.properties = ReadJsonStringMap(duckdb_yyjson::yyjson_obj_get(metadata, "configuration"));
+		}
+		duckdb_yyjson::yyjson_doc_free(doc);
+	}
+	if (result.schema_json.empty()) {
+		throw IOException("The committed Delta log at %s holds no schema", log_entry);
+	}
+	if (result.last_commit_timestamp_ms == 0) {
+		throw IOException("The committed Delta log at %s holds no commit timestamp", log_entry);
+	}
+	return result;
+}
+
 optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, BoundCreateTableInfo &info) {
-	throw NotImplementedException("UCTableSet::CreateTable");
+	auto &uc_catalog = catalog.Cast<UnityCatalog>();
+	if (uc_catalog.access_mode == AccessMode::READ_ONLY) {
+		throw InvalidInputException("Can not create a table in a read only Unity Catalog");
+	}
+	auto &base = info.Base().Cast<CreateTableInfo>();
+	auto table_name = base.GetTableName().GetIdentifierName();
+	auto catalog_name = catalog.GetDBPath();
+	auto schema_name = schema.name.GetIdentifierName();
+
+	// UC allocates the location and the table id, and says what the table has to be
+	auto staging = UCAPI::CreateStagingTable(context, catalog_name, schema_name, table_name, uc_catalog.credentials);
+	StageCredentials(context, uc_catalog, staging);
+
+	// Version 0 is written through this catalog's committer, so the delta catalog is attached the way a
+	// read attaches one, minus what only an existing table has (its commits and ratified version).
+	auto attached_name = "__unity_catalog_internal_staging_" + staging.table_id;
+	AttachInfo attach_info;
+	attach_info.name = Identifier(attached_name);
+	attach_info.path = staging.location;
+	attach_info.options = {{"type", Value("Delta")},
+	                       {"child_catalog_mode", Value(true)},
+	                       {"internal_table_name", Value(table_name)},
+	                       {"unity_table_id", Value(staging.table_id)},
+	                       {"parent_catalog", Value(catalog.GetName())},
+	                       {"parent_catalog_schema", Value(schema_name)},
+	                       {"parent_commit", Value(true)}};
+	AttachOptions attach_options(context.db->config.options);
+	attach_options.access_mode = AccessMode::READ_WRITE;
+	attach_options.db_type = "delta";
+
+	auto &db_manager = DatabaseManager::Get(context);
+	auto staging_db = db_manager.AttachDatabase(context, attach_info, attach_options);
+	try {
+		// What UC requires becomes part of the statement kernel sees: its properties as they are, and its
+		// protocol features as `delta.feature.<name> = supported`, which is how a table asks for them at
+		// creation. Without `catalogManaged` among them kernel refuses to commit through a catalog
+		// committer at all. UC's *suggested* properties are not applied: some of them, column mapping
+		// among them, the writer cannot honour on every table shape.
+		for (auto &property : staging.required_properties) {
+			base.options[property.first] = ConstantExpression::String(property.second);
+		}
+		for (auto &features : {staging.reader_features, staging.writer_features}) {
+			for (auto &feature : features) {
+				base.options["delta.feature." + feature] = ConstantExpression::String("supported");
+			}
+		}
+		auto &delta_catalog = staging_db->GetCatalog();
+		auto &delta_schema = delta_catalog.GetSchema(context, Identifier::DefaultSchema());
+		delta_schema.CreateTable(delta_schema.GetCatalogTransaction(context), info);
+		auto committed = ReadCommittedTable(context, table_name, staging.location);
+		UCAPI::CreateTable(context, catalog_name, schema_name, committed, uc_catalog.credentials);
+	} catch (...) {
+		db_manager.DetachDatabase(context, Identifier(attached_name), OnEntryNotFound::RETURN_NULL);
+		throw;
+	}
+	db_manager.DetachDatabase(context, Identifier(attached_name), OnEntryNotFound::RETURN_NULL);
+
+	// The catalog now owns a table this set has never seen; its next lookup loads it from UC.
+	ClearEntries();
+	return nullptr;
 }
 
 void UCTableSet::AlterTable(ClientContext &context, RenameTableInfo &info) {
