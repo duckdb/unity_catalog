@@ -525,8 +525,8 @@ def test_filter_term_survives_a_subquery_alias(data_files):
 # string back out.
 @pytest.mark.xfail(
     strict=True,
-    reason="the duckdb 3be8ad6910 CLI drops this scan's error: no rows, no message, exit 0; "
-    "the sqllogictest runner still sees the error",
+    reason="duckdb CLI in -list mode drops errors raised during execution (no message, exit 0) since "
+    "duckdb#25477; the error is thrown at scan init, the sqllogictest runner and box modes still see it",
 )
 @pytest.mark.parametrize(
     "sent,reported",
