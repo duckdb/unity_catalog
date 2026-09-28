@@ -1,0 +1,201 @@
+# name: test/oss_local/variant_read.test
+# description: Spark-written VARIANT columns read through the UC catalog path -- listing, values, paths, filters, time travel, the scan-plan fallback and a re-attach. Paired variant_read.py registers data/variant_unshredded or data/variant_shredded; the body holds for both.
+# group: [oss_local]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_SCHEMA
+
+require-env UC_TEST_TABLE
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+statement ok
+USE duck.{UC_TEST_SCHEMA};
+
+statement ok
+CALL enable_logging(level => 'warning', storage => 'memory');
+
+# -----------------------------------------------------------------------------
+# Column types
+#
+
+# The listing answers from what the catalog reports, without reading the log.
+query II
+SELECT unnest(column_names), unnest(column_types) FROM (SHOW ALL TABLES) WHERE name = '{UC_TEST_TABLE}';
+----
+id	INTEGER
+v	VARIANT
+s	STRUCT(tag VARCHAR, v VARIANT)
+a	VARIANT[]
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE {UC_TEST_TABLE});
+----
+id	INTEGER
+v	VARIANT
+s	STRUCT(tag VARCHAR, v VARIANT)
+a	VARIANT[]
+
+# The report and the log agree, so no read warns that they diverge.
+query I
+SELECT count(*) FROM duckdb_logs() WHERE message LIKE '%schema.%';
+----
+0
+
+# -----------------------------------------------------------------------------
+# Values, every shape
+#
+
+query IIII
+SELECT id, v, s, a FROM {UC_TEST_TABLE} ORDER BY id;
+----
+1	{'a': 1, 'b': x}	{'tag': t1, 'v': {'a': 1, 'b': x}}	[{'a': 1, 'b': x}]
+2	{'a': 2, 'b': y}	{'tag': t2, 'v': {'a': 2, 'b': y}}	[{'a': 2, 'b': y}]
+3	{'a': 3, 'b': z, 'c': [1, 2]}	{'tag': t3, 'v': {'a': 3, 'b': z, 'c': [1, 2]}}	[{'a': 3, 'b': z, 'c': [1, 2]}]
+4	42	{'tag': t4, 'v': 42}	[42]
+5	43	{'tag': t5, 'v': 43}	[43]
+6	str	{'tag': t6, 'v': str}	[str]
+7	true	{'tag': t7, 'v': true}	[true]
+8	12.5	{'tag': t8, 'v': 12.5}	[12.5]
+9	NULL	{'tag': t9, 'v': NULL}	[NULL]
+10	[1, two, NULL]	{'tag': t10, 'v': [1, two, NULL]}	[[1, two, NULL]]
+11	{'o': {'deep': [1, 2, {'k': true}]}}	{'tag': t11, 'v': {'o': {'deep': [1, 2, {'k': true}]}}}	[{'o': {'deep': [1, 2, {'k': true}]}}]
+12	NULL	NULL	NULL
+
+# Integers are left out: Spark encodes 42 as a one-byte integer, and a shredded file types it by
+# the shredding schema instead.
+query II
+SELECT id, variant_typeof(v) FROM {UC_TEST_TABLE} WHERE id NOT IN (4, 5) ORDER BY id;
+----
+1	OBJECT(a, b)
+2	OBJECT(a, b)
+3	OBJECT(a, b, c)
+6	VARCHAR
+7	BOOL_TRUE
+8	DECIMAL(3, 1)
+9	VARIANT_NULL
+10	ARRAY(3)
+11	OBJECT(o)
+12	VARIANT_NULL
+
+# -----------------------------------------------------------------------------
+# Path extraction
+#
+
+query IIIII
+SELECT id, v.a::INTEGER, v.b::VARCHAR, s.v.a::INTEGER, v.c[2]::INTEGER FROM {UC_TEST_TABLE} WHERE id <= 3 ORDER BY id;
+----
+1	1	x	1	NULL
+2	2	y	2	NULL
+3	3	z	3	2
+
+query IIII
+SELECT v::BIGINT, s.v::BIGINT, a[1]::BIGINT, variant_extract(v, 'a') FROM {UC_TEST_TABLE} WHERE id = 4;
+----
+42	42	42	NULL
+
+query III
+SELECT (v.o.deep[3]).k::BOOLEAN, v.o.deep[1]::INTEGER, (a[1]).o.deep[2]::INTEGER FROM {UC_TEST_TABLE} WHERE id = 11;
+----
+true	1	2
+
+# -----------------------------------------------------------------------------
+# Filters on variant paths
+#
+
+query I
+SELECT list(id ORDER BY id) FROM {UC_TEST_TABLE} WHERE v.a::INTEGER >= 2;
+----
+[2, 3]
+
+query I
+SELECT list(id ORDER BY id) FROM {UC_TEST_TABLE} WHERE s.v.b::VARCHAR = 'y';
+----
+[2]
+
+query I
+SELECT list(id ORDER BY id) FROM {UC_TEST_TABLE} WHERE TRY_CAST(v AS BIGINT) = 42;
+----
+[4]
+
+query I
+SELECT list(id ORDER BY id) FROM {UC_TEST_TABLE} WHERE variant_typeof(v) = 'VARCHAR';
+----
+[6]
+
+# -----------------------------------------------------------------------------
+# Time travel
+#
+
+query I
+SELECT list(id ORDER BY id) FROM {UC_TEST_TABLE} AT (VERSION => 1);
+----
+[1, 2, 3]
+
+query II
+SELECT id, v::BIGINT FROM {UC_TEST_TABLE} AT (VERSION => 2) WHERE id > 3 ORDER BY id;
+----
+4	42
+5	43
+
+# -----------------------------------------------------------------------------
+# Scan-plan attach
+#
+# OSS UC serves no scan-plan endpoint, so the plan request fails and the read falls back to the
+# Delta log. The bind before it still answers from the reported schema.
+#
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck_plan (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}', USE_IRC_SCAN_PLAN true);
+
+query IIII
+SELECT id, v.a::INTEGER, s.v, a[1] FROM duck_plan.{UC_TEST_SCHEMA}.{UC_TEST_TABLE} WHERE id IN (1, 4, 12) ORDER BY id;
+----
+1	1	{'a': 1, 'b': x}	{'a': 1, 'b': x}
+4	NULL	42	42
+12	NULL	NULL	NULL
+
+statement ok
+DETACH duck_plan;
+
+# -----------------------------------------------------------------------------
+# Re-attach: a fresh listing and a fresh log read
+#
+
+statement ok
+USE memory;
+
+statement ok
+DETACH duck;
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+query I
+SELECT column_types FROM (SHOW ALL TABLES) WHERE name = '{UC_TEST_TABLE}';
+----
+[INTEGER, VARIANT, 'STRUCT(tag VARCHAR, v VARIANT)', 'VARIANT[]']
+
+query II
+SELECT id, v.b::VARCHAR FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE} WHERE id IN (2, 6) ORDER BY id;
+----
+2	y
+6	NULL
