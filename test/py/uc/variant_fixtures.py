@@ -1,4 +1,4 @@
-"""The Spark-written variant fixtures (data/variant_*), as Unity Catalog would describe them.
+"""The variant fixtures (data/variant_*), as Unity Catalog would describe them.
 
 Columns and properties mirror the Delta log and Spark's SHOW TBLPROPERTIES, so a read that gates on
 the reported type or on the shredding feature sees what a Spark-created table would report.
@@ -42,5 +42,12 @@ FIXTURES = {
 TOPLEVEL = (
     REPO_ROOT / "data" / "variant_toplevel",
     [COLUMNS[0], COLUMNS[1]],
+    {"delta.feature.variantType": "supported", "delta.minReaderVersion": "3", "delta.minWriterVersion": "7"},
+)
+
+# A log with protocol and metadata only: DuckDB writes its first data file.
+EMPTY = (
+    REPO_ROOT / "data" / "variant_empty",
+    [COLUMNS[0], ("data", "variant", "VARIANT", _json("data", "variant"))],
     {"delta.feature.variantType": "supported", "delta.minReaderVersion": "3", "delta.minWriterVersion": "7"},
 )

@@ -68,7 +68,8 @@ Local OSS (`oss_local/`):
   - `variant_read.test`, once per unshredded and shredded fixture: listing, values of every shape,
     path extraction, filters on variant paths, time travel, the scan-plan fallback, re-attach.
   - `variant_write.test`: every payload shape (object, nested, scalar, array, SQL NULL) survives a
-    duckdb-delta write/read round-trip and a DETACH/ATTACH, next to the Spark rows.
+    duckdb-delta write/read round-trip and a DETACH/ATTACH, next to the Spark rows; and the first
+    write into an empty table (`data/variant_empty`: a log with protocol and metadata only).
 
 Databricks (live):
 
