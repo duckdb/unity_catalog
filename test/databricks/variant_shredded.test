@@ -1,0 +1,89 @@
+# name: test/databricks/variant_shredded.test
+# description: a Databricks-written table with variant shredding on, read through the Delta log and through a scan plan
+# group: [databricks]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+require-env CATALOG
+
+require-env SCHEMA
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}');
+
+statement ok
+ATTACH '{CATALOG}' AS unity_plan (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}', USE_IRC_SCAN_PLAN true);
+
+# -----------------------------------------------------------------------------
+# Column types
+#
+
+query II
+SELECT unnest(column_names), unnest(column_types) FROM (SHOW ALL TABLES) WHERE database = 'unity' AND name = 'variant_shredded';
+----
+id	INTEGER
+v	VARIANT
+s	STRUCT(tag VARCHAR, v VARIANT)
+a	VARIANT[]
+
+# -----------------------------------------------------------------------------
+# Delta log read
+#
+
+query IIII
+SELECT id, v, s.v, a[1] FROM unity.{SCHEMA}.variant_shredded ORDER BY id;
+----
+1	{'a': 1, 'b': x}	{'a': 1, 'b': x}	{'a': 1, 'b': x}
+2	{'a': 2, 'b': y}	{'a': 2, 'b': y}	{'a': 2, 'b': y}
+3	{'a': 3, 'b': z, 'c': [1, 2]}	{'a': 3, 'b': z, 'c': [1, 2]}	{'a': 3, 'b': z, 'c': [1, 2]}
+4	42	42	42
+6	str	str	str
+9	NULL	NULL	NULL
+10	[1, two, NULL]	[1, two, NULL]	[1, two, NULL]
+11	{'o': {'deep': [1, 2, {'k': true}]}}	{'o': {'deep': [1, 2, {'k': true}]}}	{'o': {'deep': [1, 2, {'k': true}]}}
+
+query I
+SELECT list(id ORDER BY id) FROM unity.{SCHEMA}.variant_shredded WHERE v.a::INTEGER >= 2 OR s.v.b::VARCHAR = 'x';
+----
+[1, 2, 3]
+
+query I
+SELECT (v.o.deep[3]).k::BOOLEAN FROM unity.{SCHEMA}.variant_shredded WHERE id = 11;
+----
+true
+
+# -----------------------------------------------------------------------------
+# Scan-plan read
+#
+
+query IIII
+SELECT id, v.a::INTEGER, s.v.b::VARCHAR, a[1] FROM unity_plan.{SCHEMA}.variant_shredded WHERE id IN (1, 4, 11) ORDER BY id;
+----
+1	1	x	{'a': 1, 'b': x}
+4	NULL	NULL	42
+11	NULL	NULL	{'o': {'deep': [1, 2, {'k': true}]}}
+
+query I
+SELECT list(id ORDER BY id) FROM unity_plan.{SCHEMA}.variant_shredded WHERE v.a::INTEGER >= 2;
+----
+[2, 3]
