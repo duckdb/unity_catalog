@@ -1,5 +1,5 @@
 # name: test/oss_local/variant_write.test
-# description: VARIANT columns written through the UC catalog path by duckdb-delta, into Spark-created tables, then read back. Paired variant_write.py registers a copy of data/variant_toplevel, data/variant_unshredded and data/variant_shredded.
+# description: VARIANT columns written through the UC catalog path by duckdb-delta, into Spark-created tables, then read back. Paired variant_write.py registers a copy of data/variant_toplevel, data/variant_unshredded, data/variant_shredded and data/variant_empty.
 # group: [oss_local]
 
 require parquet
@@ -21,6 +21,8 @@ require-env UC_TEST_TABLE_LOCATION
 require-env UC_TEST_TABLE_NESTED
 
 require-env UC_TEST_TABLE_SHREDDED
+
+require-env UC_TEST_TABLE_EMPTY
 
 statement ok
 CREATE SECRET (
@@ -159,6 +161,41 @@ SELECT list(id ORDER BY id) FROM {UC_TEST_TABLE_SHREDDED} WHERE v.a::INTEGER >= 
 mode unskip
 
 # -----------------------------------------------------------------------------
+# First write into an empty table
+#
+# data/variant_empty has protocol and metadata only, so DuckDB writes every data file.
+#
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE {UC_TEST_TABLE_EMPTY});
+----
+id	INTEGER
+data	VARIANT
+
+query I
+SELECT count(*) FROM {UC_TEST_TABLE_EMPTY};
+----
+0
+
+statement ok
+INSERT INTO {UC_TEST_TABLE_EMPTY} VALUES
+    (1, {'tag': 'one', 'value': 1}::VARIANT),
+    (2, 42::VARIANT),
+    (3, NULL);
+
+query III
+SELECT id, data, variant_typeof(data) FROM {UC_TEST_TABLE_EMPTY} ORDER BY id;
+----
+1	{'tag': one, 'value': 1}	OBJECT(tag, value)
+2	42	INT32
+3	NULL	VARIANT_NULL
+
+query I
+SELECT data.tag::VARCHAR FROM {UC_TEST_TABLE_EMPTY} WHERE data.value::INTEGER = 1;
+----
+one
+
+# -----------------------------------------------------------------------------
 # Re-attach: the writes are visible to a fresh log read
 #
 
@@ -181,6 +218,19 @@ SELECT id, variant_typeof(v) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE} WHERE id
 ----
 13	OBJECT(tag, value)
 19	VARIANT_NULL
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_EMPTY});
+----
+id	INTEGER
+data	VARIANT
+
+query II
+SELECT id, variant_typeof(data) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_EMPTY} ORDER BY id;
+----
+1	OBJECT(tag, value)
+2	INT32
+3	VARIANT_NULL
 
 # Reads the rows the skipped shredded-table INSERT writes.
 mode skip
