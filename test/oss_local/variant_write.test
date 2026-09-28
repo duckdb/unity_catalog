@@ -39,25 +39,57 @@ USE duck.{UC_TEST_SCHEMA};
 # -----------------------------------------------------------------------------
 # Top-level variants
 #
+# Ids 13-19 carry one payload per value shape; test/databricks/variant.test reads the same payloads
+# written by Spark.
+#
 
+# Object keys are written pre-sorted: DuckDB renders a variant object with its keys in sorted order.
 statement ok
 INSERT INTO {UC_TEST_TABLE} (id, v) VALUES
-    (13, {'k': 'v', 'n': 1}::VARIANT),
-    (14, 7::VARIANT),
-    (15, [1, 2]::VARIANT),
-    (16, NULL);
+    (13, {'tag': 'one', 'value': 1}::VARIANT),
+    (14, {'nested': {'deep': [1, 2, 3]}}::VARIANT),
+    (15, 'plain string'::VARIANT),
+    (16, 42::VARIANT),
+    (17, true::VARIANT),
+    (18, ['a'::VARIANT, 1, false, {'k': 'v'}]::VARIANT),
+    (19, NULL);
 
 query II
 SELECT id, v FROM {UC_TEST_TABLE} WHERE id > 12 ORDER BY id;
 ----
-13	{'k': v, 'n': 1}
-14	7
-15	[1, 2]
-16	NULL
+13	{'tag': one, 'value': 1}
+14	{'nested': {'deep': [1, 2, 3]}}
+15	plain string
+16	42
+17	true
+18	[a, 1, false, {'k': v}]
+19	NULL
+
+# variant_typeof answers VARIANT_NULL for a SQL NULL too.
+query II
+SELECT id, variant_typeof(v) FROM {UC_TEST_TABLE} WHERE id > 12 ORDER BY id;
+----
+13	OBJECT(tag, value)
+14	OBJECT(nested)
+15	VARCHAR
+16	INT32
+17	BOOL_TRUE
+18	ARRAY(4)
+19	VARIANT_NULL
+
+query III
+SELECT (v.value)::INTEGER, v.tag::VARCHAR, variant_extract(v, 'value') FROM {UC_TEST_TABLE} WHERE id = 13;
+----
+1	one	1
+
+query II
+SELECT (v.nested.deep[2])::INTEGER, variant_typeof(v.nested.deep) FROM {UC_TEST_TABLE} WHERE id = 14;
+----
+2	ARRAY(3)
 
 # The Spark rows are untouched, and a filter spans both writers' files.
 query I
-SELECT list(id ORDER BY id) FROM {UC_TEST_TABLE} WHERE v.a::INTEGER = 1 OR v.n::INTEGER = 1;
+SELECT list(id ORDER BY id) FROM {UC_TEST_TABLE} WHERE v.a::INTEGER = 1 OR v.value::INTEGER = 1;
 ----
 [1, 13]
 
@@ -125,7 +157,13 @@ ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST
 query II
 SELECT count(*), count(*) FILTER (id > 12) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE};
 ----
-6	4
+9	7
+
+query II
+SELECT id, variant_typeof(v) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE} WHERE id IN (13, 19) ORDER BY id;
+----
+13	OBJECT(tag, value)
+19	VARIANT_NULL
 
 query I
 SELECT list(id ORDER BY id) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_SHREDDED} WHERE TRY_CAST(v AS BIGINT) IN (42, 44);
