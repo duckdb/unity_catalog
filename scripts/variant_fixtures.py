@@ -1,11 +1,15 @@
-"""Spark-written Delta fixtures for the variant tests: data/variant_unshredded and data/variant_shredded.
+"""Spark-written Delta fixtures for the variant tests: data/variant_unshredded, data/variant_shredded and
+data/variant_toplevel.
 
-Same rows and commit layout in both; only the shredded one enables `delta.enableVariantShredding`.
+Same rows and commit layout in the first two; only the shredded one enables `delta.enableVariantShredding`.
 Spark infers a shredding schema per file (one file per commit): the object and integer commits
 shred, the mixed-scalar commit falls back to `value`.
 
     JAVA_TOOL_OPTIONS=-XX:-UseContainerSupport <python with pyspark 4.2 + delta-spark 4.4> \
-        scripts/variant_fixtures.py data
+        scripts/variant_fixtures.py data [table ...]
+
+variant_toplevel holds a top-level variant only, for writers that cannot write one nested in a
+struct or a list.
 """
 
 import pathlib
@@ -15,6 +19,7 @@ import sys
 from pyspark.sql import SparkSession
 
 OUT = pathlib.Path(sys.argv[1]).resolve()
+ONLY = set(sys.argv[2:])
 ROW = "SELECT id, parse_json(j), named_struct('tag', 't' || id, 'v', parse_json(j)), array(parse_json(j)) FROM VALUES {} AS t(id, j)"
 COMMITS = [
     "(1, '{\"a\": 1, \"b\": \"x\"}'), (2, '{\"a\": 2, \"b\": \"y\"}'), (3, '{\"a\": 3, \"b\": \"z\", \"c\": [1, 2]}')",
@@ -37,6 +42,8 @@ spark = (
 spark.sparkContext.setLogLevel("ERROR")
 
 for name, shredded in [("variant_unshredded", False), ("variant_shredded", True)]:
+    if ONLY and name not in ONLY:
+        continue
     loc = OUT / name
     shutil.rmtree(loc, ignore_errors=True)
     props = ", 'delta.enableVariantShredding' = 'true'" if shredded else ""
@@ -47,6 +54,17 @@ for name, shredded in [("variant_unshredded", False), ("variant_shredded", True)
     for values in COMMITS:
         spark.sql(f"INSERT INTO delta.`{loc}` {ROW.format(values)}")
     spark.sql(f"INSERT INTO delta.`{loc}` VALUES (12, NULL, NULL, NULL)")
+    for crc in loc.rglob("*.crc"):
+        crc.unlink()
+    (loc / "_delta_log" / "_staged_commits").rmdir()
+
+if not ONLY or "variant_toplevel" in ONLY:
+    loc = OUT / "variant_toplevel"
+    shutil.rmtree(loc, ignore_errors=True)
+    spark.sql(f"CREATE TABLE delta.`{loc}` (id INT, v VARIANT) USING DELTA")
+    spark.sql(
+        f"INSERT INTO delta.`{loc}` SELECT id, parse_json(j) FROM VALUES (1, '{{\"a\": 1}}'), (2, '2') AS t(id, j)"
+    )
     for crc in loc.rglob("*.crc"):
         crc.unlink()
     (loc / "_delta_log" / "_staged_commits").rmdir()
