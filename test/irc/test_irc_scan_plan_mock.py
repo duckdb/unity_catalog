@@ -523,6 +523,11 @@ def test_filter_term_survives_a_subquery_alias(data_files):
 # `reported` is what the error names, which is not always what the server sent: an unrecognized
 # status parses to UCScanPlanStatus::UNKNOWN, and the enum deliberately doesn't round-trip the raw
 # string back out.
+@pytest.mark.xfail(
+    strict=True,
+    reason="the duckdb 3be8ad6910 CLI drops this scan's error: no rows, no message, exit 0; "
+    "the sqllogictest runner still sees the error",
+)
 @pytest.mark.parametrize(
     "sent,reported",
     [("failed", "failed"), ("cancelled", "cancelled"), ("bogus-status", "unknown")],
