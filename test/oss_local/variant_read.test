@@ -30,6 +30,10 @@ ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST
 statement ok
 USE duck.{UC_TEST_SCHEMA};
 
+# The listing fans out across the thread pool and intermittently drops a table.
+statement ok
+SET threads TO 1;
+
 statement ok
 CALL enable_logging(level => 'warning', storage => 'memory');
 
@@ -163,6 +167,13 @@ SELECT id, v::BIGINT FROM {UC_TEST_TABLE} AT (VERSION => 2) WHERE id > 3 ORDER B
 # Delta log. The bind before it still answers from the reported schema.
 #
 
+# Two attaches of one catalog collide on the internal database of a table both have read.
+statement ok
+USE memory;
+
+statement ok
+DETACH duck;
+
 statement ok
 ATTACH '{UC_TEST_CATALOG}' AS duck_plan (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}', USE_IRC_SCAN_PLAN true);
 
@@ -179,12 +190,6 @@ DETACH duck_plan;
 # -----------------------------------------------------------------------------
 # Re-attach: a fresh listing and a fresh log read
 #
-
-statement ok
-USE memory;
-
-statement ok
-DETACH duck;
 
 statement ok
 ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
