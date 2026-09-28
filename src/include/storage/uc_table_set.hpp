@@ -54,7 +54,6 @@ public:
 
 	void ThrowIfUnreadableColumns() const;
 	void ThrowIfIntervalColumns() const;
-	void ThrowIfVariantShredding() const;
 	void ThrowNoDeltaTable() const;
 
 private:

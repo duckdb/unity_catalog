@@ -232,10 +232,8 @@ def _columns(spec):
     return columns
 
 
-def _catalog(columns, fixture, table, properties=None):
-    entry = delta_table(table, fixture, columns, schema=_SCHEMA)
-    entry["properties"] = properties or {}
-    return MockUnityCatalog([entry])
+def _catalog(columns, fixture, table):
+    return MockUnityCatalog([delta_table(table, fixture, columns, schema=_SCHEMA)])
 
 
 def test_divergence_is_reported():
@@ -402,31 +400,6 @@ def test_variant_types_agree_with_the_log(tmp_path):
     assert "[INTEGER, VARIANT, VARIANT, 'VARIANT[]']" in stdout, combined
     assert "0|rows" in stdout, combined
     assert "schema.Resolve" not in stdout, combined
-
-
-@pytest.mark.parametrize("feature", ["variantShredding", "variantShredding-preview"])
-def test_variant_shredding_is_refused(feature, tmp_path):
-    """Every read of a table whose catalog properties enable variant shredding is refused, time travel
-    included, though its log alone would bind. Listing still maps the column."""
-    spec = [_col("id", _INT), _col("v", _VARIANT)]
-    _write_log(tmp_path, spec, features=["variantType"])
-    properties = {f"delta.feature.{feature}": "supported"}
-    with _catalog(_columns(spec), tmp_path, "shredded", properties) as mock:
-        listed, listed_out = run(mock, "SELECT column_types FROM (SHOW ALL TABLES) WHERE name = 'shredded';")
-        reads = [
-            run(mock, sql)
-            for sql in (
-                "SELECT id FROM unity.plain.shredded;",
-                "SELECT id FROM unity.plain.shredded AT (VERSION => 0);",
-            )
-        ]
-
-    assert listed.returncode == 0, listed_out + listed.stderr
-    assert "[INTEGER, VARIANT]" in listed_out, listed_out
-    for read, read_out in reads:
-        combined = read_out + read.stderr
-        assert read.returncode != 0, combined
-        assert f"Delta table feature '{feature}'" in read.stderr, combined
 
 
 def test_timestamp_text_types_agree_with_the_log():

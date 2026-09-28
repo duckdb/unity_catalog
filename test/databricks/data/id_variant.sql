@@ -1,7 +1,6 @@
 -- id_variant: id INT + a Spark-written VARIANT column.
 -- Spark is the writer here; test/oss_local/variant.test writes the same payloads row-for-row
 -- through duckdb-delta. Row 7 is a variant null.
--- Must not enable variant shredding: reads of such tables are refused.
 -- Run via `databricks-gen from-sql`.
 CREATE OR REPLACE TABLE {table_name}
 AS SELECT id, parse_json(payload) AS data FROM VALUES
