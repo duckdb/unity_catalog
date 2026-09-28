@@ -1,5 +1,5 @@
 # name: test/databricks/variant.test
-# description: read a Spark-written VARIANT column from Databricks Unity Catalog -- the live twin of test/oss_local/variant.test, which has duckdb-delta as the writer.
+# description: read a Spark-written VARIANT column from Databricks Unity Catalog -- the live twin of the top-level writes in test/oss_local/variant_write.test, which have duckdb-delta as the writer.
 # group: [databricks]
 
 #

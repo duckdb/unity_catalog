@@ -381,7 +381,7 @@ def test_interval_column_is_refused(with_log, tmp_path):
 def test_variant_types_agree_with_the_log(tmp_path):
     """Variant columns reported in type_json or in text alone, nested included, list as VARIANT and
     type as the log does, so the read binds with no divergence warning. The log holds no rows;
-    oss_local/variant.test reads values."""
+    oss_local/variant_read.test reads values."""
     _write_log(
         tmp_path,
         [_col("id", _INT), _col("v", _VARIANT), _col("t", _VARIANT), _col("vs", _array(_VARIANT))],

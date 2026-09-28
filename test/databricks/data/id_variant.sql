@@ -1,5 +1,5 @@
 -- id_variant: id INT + a Spark-written VARIANT column.
--- Spark is the writer here; test/oss_local/variant.test writes the same payloads row-for-row
+-- Spark is the writer here; test/oss_local/variant_write.test writes the same payloads (ids 13-19)
 -- through duckdb-delta. Row 7 is a variant null.
 -- Run via `databricks-gen from-sql`.
 CREATE OR REPLACE TABLE {table_name}
