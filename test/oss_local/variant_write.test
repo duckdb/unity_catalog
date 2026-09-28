@@ -1,0 +1,133 @@
+# name: test/oss_local/variant_write.test
+# description: VARIANT columns written through the UC catalog path by duckdb-delta, into Spark-created tables, then read back. Paired variant_write.py registers a copy of data/variant_toplevel, data/variant_unshredded and data/variant_shredded.
+# group: [oss_local]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_SCHEMA
+
+require-env UC_TEST_TABLE
+
+require-env UC_TEST_TABLE_LOCATION
+
+require-env UC_TEST_TABLE_NESTED
+
+require-env UC_TEST_TABLE_SHREDDED
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+statement ok
+USE duck.{UC_TEST_SCHEMA};
+
+# -----------------------------------------------------------------------------
+# Top-level variants
+#
+
+statement ok
+INSERT INTO {UC_TEST_TABLE} (id, v) VALUES
+    (13, {'k': 'v', 'n': 1}::VARIANT),
+    (14, 7::VARIANT),
+    (15, [1, 2]::VARIANT),
+    (16, NULL);
+
+query II
+SELECT id, v FROM {UC_TEST_TABLE} WHERE id > 12 ORDER BY id;
+----
+13	{'k': v, 'n': 1}
+14	7
+15	[1, 2]
+16	NULL
+
+# The Spark rows are untouched, and a filter spans both writers' files.
+query I
+SELECT list(id ORDER BY id) FROM {UC_TEST_TABLE} WHERE v.a::INTEGER = 1 OR v.n::INTEGER = 1;
+----
+[1, 13]
+
+query I
+SELECT count(*) FROM {UC_TEST_TABLE} AT (VERSION => 1);
+----
+2
+
+# The table does not enable the variantShredding feature, so a writer may not shred into it.
+query I
+SELECT count(*) FROM parquet_metadata('{UC_TEST_TABLE_LOCATION}/*.parquet') WHERE path_in_schema LIKE '%typed_value%';
+----
+0
+
+# -----------------------------------------------------------------------------
+# Variants nested in a struct and a list
+#
+
+statement ok
+INSERT INTO {UC_TEST_TABLE_NESTED} VALUES
+    (17, NULL, {'tag': 't17', 'v': {'k': 'v'}::VARIANT}, [1::VARIANT, 'x'::VARIANT]);
+
+query III
+SELECT s.tag, s.v.k::VARCHAR, a[2]::VARCHAR FROM {UC_TEST_TABLE_NESTED} WHERE id = 17;
+----
+t17	v	x
+
+# -----------------------------------------------------------------------------
+# Into the shredded table
+#
+# Its struct and list columns take NULLs here, which still need a nested variant writer.
+#
+
+statement ok
+INSERT INTO {UC_TEST_TABLE_SHREDDED} (id, v) VALUES
+    (13, {'a': 13, 'b': 'w'}::VARIANT),
+    (14, 44::VARIANT);
+
+query III
+SELECT id, v.a::INTEGER, v.b::VARCHAR FROM {UC_TEST_TABLE_SHREDDED} WHERE id IN (1, 4, 13, 14) ORDER BY id;
+----
+1	1	x
+4	NULL	NULL
+13	13	w
+14	NULL	NULL
+
+query I
+SELECT list(id ORDER BY id) FROM {UC_TEST_TABLE_SHREDDED} WHERE v.a::INTEGER >= 3;
+----
+[3, 13]
+
+# -----------------------------------------------------------------------------
+# Re-attach: the writes are visible to a fresh log read
+#
+
+statement ok
+USE memory;
+
+statement ok
+DETACH duck;
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+query II
+SELECT count(*), count(*) FILTER (id > 12) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE};
+----
+6	4
+
+query I
+SELECT list(id ORDER BY id) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_SHREDDED} WHERE TRY_CAST(v AS BIGINT) IN (42, 44);
+----
+[4, 14]
