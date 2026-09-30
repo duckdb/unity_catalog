@@ -200,7 +200,8 @@ static unique_ptr<GlobalTableFunctionState> UCScanPlanInitGlobal(ClientContext &
 			};
 			CreateSecretInput sec;
 			sec.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
-			sec.persist_type = SecretPersistType::TEMPORARY;
+			// Transaction-scoped for the same reason as the secret in RefreshCredentials.
+			sec.persist_type = SecretPersistType::TRANSACTION;
 			sec.name = Identifier("__internal_uc_scanplan__" + bd.catalog_name + "__" + bd.schema_name + "__" +
 			                      bd.table_name + "__" + to_string(i));
 			sec.type = "s3";
