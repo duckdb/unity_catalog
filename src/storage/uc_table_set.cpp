@@ -241,10 +241,12 @@ void TableInformation::RefreshCredentials(ClientContext &context) {
 	    context, table_data->catalog_name, table_data->schema_name, table_data->name, table_data->table_id,
 	    IsCatalogManaged(), !(catalog.access_mode == AccessMode::READ_ONLY), catalog.credentials);
 
-	// Inject secret into secret manager scoped to this path
+	// Inject secret into secret manager scoped to this path and to the current transaction. A TEMPORARY
+	// secret lives in a transactional catalog set, so two open transactions replacing the same name
+	// conflict (write-write conflict on "__internal_uc_<table_id>").
 	CreateSecretInput input;
 	input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
-	input.persist_type = SecretPersistType::TEMPORARY;
+	input.persist_type = SecretPersistType::TRANSACTION;
 	input.name = Identifier("__internal_uc_" + table_data->table_id);
 	input.type = "s3";
 	input.provider = "config";
