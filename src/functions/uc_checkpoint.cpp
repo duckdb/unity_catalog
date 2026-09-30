@@ -83,12 +83,14 @@ static void CheckpointTableFunction(ClientContext &context, TableFunctionInput &
 }
 
 UCCheckpointTableFunction::UCCheckpointTableFunction()
-    : TableFunction("unity_catalog_checkpoint_table", {LogicalType::VARCHAR}, CheckpointTableFunction,
+    : TableFunction("unity_catalog_checkpoint_table",
+                    FunctionSignature().AddPositionalOnly("table_name", LogicalType::VARCHAR), CheckpointTableFunction,
                     CheckpointTableBind<false>) {
 }
 
 UCForceCheckpointTableFunction::UCForceCheckpointTableFunction()
-    : TableFunction("unity_catalog_force_checkpoint_table", {LogicalType::VARCHAR}, CheckpointTableFunction,
+    : TableFunction("unity_catalog_force_checkpoint_table",
+                    FunctionSignature().AddPositionalOnly("table_name", LogicalType::VARCHAR), CheckpointTableFunction,
                     CheckpointTableBind<true>) {
 }
 

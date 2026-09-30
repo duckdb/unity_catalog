@@ -92,10 +92,16 @@ static void ReadDVFunction(ClientContext &, TableFunctionInput &data_p, DataChun
 	output.SetChildCardinality(count);
 }
 
+static FunctionSignature ReadDeletionVectorSignature() {
+	FunctionSignature signature;
+	signature.AddParameter("path", LogicalType::VARCHAR).WithTypedKwargs("options", [&](TypedKwargs &options) {
+		options.Add("content_offset", LogicalType::BIGINT).Add("content_size", LogicalType::BIGINT);
+	});
+	return signature;
+}
+
 UCReadDeletionVectorFunction::UCReadDeletionVectorFunction()
-    : TableFunction("uc_read_deletion_vector", {LogicalType::VARCHAR}, ReadDVFunction, ReadDVBind, ReadDVInit) {
-	named_parameters["content_offset"] = LogicalType::BIGINT;
-	named_parameters["content_size"] = LogicalType::BIGINT;
+    : TableFunction("uc_read_deletion_vector", ReadDeletionVectorSignature(), ReadDVFunction, ReadDVBind, ReadDVInit) {
 }
 
 } // namespace duckdb

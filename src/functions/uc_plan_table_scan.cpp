@@ -68,12 +68,20 @@ static void PlanScanFunction(ClientContext &, TableFunctionInput &data_p, DataCh
 	output.SetChildCardinality(1);
 }
 
+static FunctionSignature PlanTableScanSignature() {
+	FunctionSignature signature;
+	signature.AddParameter("endpoint", LogicalType::VARCHAR)
+	    .AddParameter("catalog", LogicalType::VARCHAR)
+	    .AddParameter("schema", LogicalType::VARCHAR)
+	    .AddParameter("table", LogicalType::VARCHAR)
+	    .AddParameter("token", LogicalType::VARCHAR)
+	    .WithTypedKwargs("options", [&](TypedKwargs &options) { options.Add("filter", LogicalType::VARCHAR); });
+	return signature;
+}
+
 UCInternalPlanTableScanFunction::UCInternalPlanTableScanFunction()
-    : TableFunction("__internal_uc_plan_table_scan",
-                    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-                     LogicalType::VARCHAR},
-                    PlanScanFunction, PlanScanBind, PlanScanInit) {
-	named_parameters["filter"] = LogicalType::VARCHAR;
+    : TableFunction("__internal_uc_plan_table_scan", PlanTableScanSignature(), PlanScanFunction, PlanScanBind,
+                    PlanScanInit) {
 }
 
 } // namespace duckdb

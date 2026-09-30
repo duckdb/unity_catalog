@@ -228,14 +228,16 @@ static unique_ptr<GlobalTableFunctionState> UCScanPlanInitGlobal(ClientContext &
 
 	string scan_path = bd.storage_location.empty() ? "uc://scan_plan" : bd.storage_location;
 	vector<Value> inputs = {Value(scan_path)};
-	named_parameter_map_t named_params;
+	named_argument_map_t named_params;
 	vector<LogicalType> input_table_types;
 	vector<Identifier> input_table_names;
 	TableFunctionRef dummy_ref;
 	vector<LogicalType> return_types;
 	vector<Identifier> return_names;
+	// the bind sees the function as a bound call would; nothing is read back off it afterwards
+	BoundTableFunction bound_parquet_fn(parquet_fn);
 	TableFunctionBindInput bind_input(inputs, named_params, input_table_types, input_table_names, nullptr, nullptr,
-	                                  parquet_fn, dummy_ref);
+	                                  bound_parquet_fn, dummy_ref);
 	try {
 		gstate->inner_bind_data = parquet_fn.bind(context, bind_input, return_types, return_names);
 	} catch (...) {

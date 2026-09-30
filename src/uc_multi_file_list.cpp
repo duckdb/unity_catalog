@@ -96,7 +96,7 @@ bool UCMultiFileList::ExpandNextPath() const {
 // parquet_fn.bind(), moved out by the factory on the same thread.
 thread_local shared_ptr<UCMultiFileList> tl_uc_file_list;
 
-unique_ptr<MultiFileReader> UCMultiFileReaderFactory(const TableFunction &) {
+unique_ptr<MultiFileReader> UCMultiFileReaderFactory(const BoundTableFunction &) {
 	D_ASSERT(tl_uc_file_list);
 	return make_uniq<UCMultiFileReader>(std::move(tl_uc_file_list));
 }
@@ -118,14 +118,16 @@ static void ScanParquetFile(ClientContext &context, const string &path,
 	auto parquet_fn = GetParquetScanFunction(context);
 
 	vector<Value> inputs = {Value(path)};
-	named_parameter_map_t named_params;
+	named_argument_map_t named_params;
 	vector<LogicalType> input_table_types;
 	vector<Identifier> input_table_names;
 	TableFunctionRef dummy_ref;
 	vector<LogicalType> return_types;
 	vector<Identifier> return_names;
+	// the bind sees the function as a bound call would; nothing is read back off it afterwards
+	BoundTableFunction bound_parquet_fn(parquet_fn);
 	TableFunctionBindInput bind_input(inputs, named_params, input_table_types, input_table_names, nullptr, nullptr,
-	                                  parquet_fn, dummy_ref);
+	                                  bound_parquet_fn, dummy_ref);
 	auto bind_data = parquet_fn.bind(context, bind_input, return_types, return_names);
 
 	vector<column_t> column_ids;

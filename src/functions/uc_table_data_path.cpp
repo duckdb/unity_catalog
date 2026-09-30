@@ -60,7 +60,8 @@ static void UCTableDataPathExecute(ClientContext &context, TableFunctionInput &d
 }
 
 UCTableDataPath::UCTableDataPath(UCSchemaEntry &schema)
-    : TableFunction("table_data_path", {LogicalType::VARCHAR}, UCTableDataPathExecute, UCTableDataPathBind) {
+    : TableFunction("table_data_path", FunctionSignature().AddPositionalOnly("table_name", LogicalType::VARCHAR),
+                    UCTableDataPathExecute, UCTableDataPathBind) {
 	function_info = make_shared_ptr<UCTableDataPathInfo>(schema);
 }
 
