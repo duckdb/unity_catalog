@@ -46,10 +46,28 @@ struct UCAPISchema {
 	string catalog_name;
 };
 
+//! Unity Catalog vends a different credential shape per cloud: AWS gets key/secret/session
+//! token, GCP a pre-issued OAuth bearer token, Azure a user-delegation SAS. Exactly one group
+//! is populated, matching the scheme of the table's storage_location.
 struct UCAPITableCredentials {
+	// AWS
 	string key_id;
 	string secret;
 	string session_token;
+	// GCP
+	string bearer_token;
+	// Azure
+	string sas_token;
+
+	bool HasAws() const {
+		return !key_id.empty() || !secret.empty();
+	}
+	bool HasGcp() const {
+		return !bearer_token.empty();
+	}
+	bool HasAzure() const {
+		return !sas_token.empty();
+	}
 };
 
 struct UCAPICommit {
