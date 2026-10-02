@@ -73,7 +73,7 @@ private:
 extern thread_local shared_ptr<UCMultiFileList> tl_uc_file_list;
 
 // Registered as get_multi_file_reader on a parquet_scan copy; consumes tl_uc_file_list.
-unique_ptr<MultiFileReader> UCMultiFileReaderFactory(const TableFunction &function);
+unique_ptr<MultiFileReader> UCMultiFileReaderFactory(const BoundTableFunction &function);
 
 // The DeleteFilter for one data file, or nullptr if it has no deletes. Positional deletes are
 // supported in both physical forms (parquet (file_path, pos) files and deletion-vector puffin
