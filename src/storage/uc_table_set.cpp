@@ -1,6 +1,8 @@
 #include <algorithm>
 
 #include "uc_api.hpp"
+
+#include "duckdb/common/exception/catalog_exception.hpp"
 #include "uc_logging.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
@@ -698,8 +700,17 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	auto catalog_name = catalog.GetDBPath();
 	auto schema_name = schema.name.GetIdentifierName();
 
-	// UC allocates the location and the table id, and says what the table has to be
-	auto staging = UCAPI::CreateStagingTable(context, catalog_name, schema_name, table_name, uc_catalog.credentials);
+	// UC allocates the location and the table id, and says what the table has to be. The catalog is
+	// the only authority on whether the name is taken, so the name is not checked here first.
+	UCAPIStagingTable staging;
+	try {
+		staging = UCAPI::CreateStagingTable(context, catalog_name, schema_name, table_name, uc_catalog.credentials);
+	} catch (const CatalogException &) {
+		if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+			return nullptr;
+		}
+		throw;
+	}
 	StageCredentials(context, uc_catalog, staging);
 
 	// Version 0 is written through this catalog's committer, so the delta catalog is attached the way a
@@ -751,7 +762,29 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 		auto &delta_schema = delta_catalog.GetSchema(context, Identifier::DefaultSchema());
 		delta_schema.CreateTable(delta_schema.GetCatalogTransaction(context), info);
 		auto committed = ReadCommittedTable(context, table_name, staging.location);
-		UCAPI::CreateTable(context, catalog_name, schema_name, committed, uc_catalog.credentials);
+		try {
+			UCAPI::CreateTable(context, catalog_name, schema_name, committed, uc_catalog.credentials);
+		} catch (const InterruptException &) {
+			throw;
+		} catch (std::exception &e) {
+			// Check: table may be registered even though the call reported failure -- a 5xx after the write, a dropped
+			// connection. The spec resolves that by loading the name and matching its uuid against the staged id
+			// (tasks/ManagedTablesSpec.md:446); anything else is the real error, and a retry of it would fail at
+			// staging with a 409 instead.
+			string loaded_uuid;
+			try {
+				loaded_uuid =
+				    UCAPI::LoadTable(context, catalog_name, schema_name, table_name, uc_catalog.credentials).table_uuid;
+			} catch (std::exception &) {
+			}
+			if (loaded_uuid.empty() || loaded_uuid != staging.table_id) {
+				throw;
+			}
+			UC_LOG_WARNING(context,
+			               "api.CreateTable %s.%s.%s reported an error but the table is registered with the "
+			               "staged id; treating it as created: %s",
+			               catalog_name, schema_name, table_name, e.what());
+		}
 	} catch (...) {
 		db_manager.DetachDatabase(context, Identifier(attached_name), OnEntryNotFound::RETURN_NULL);
 		throw;
@@ -759,7 +792,7 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	db_manager.DetachDatabase(context, Identifier(attached_name), OnEntryNotFound::RETURN_NULL);
 
 	// The catalog now owns a table this set has never seen; its next lookup loads it from UC.
-	ClearEntries();
+	MarkNeedsReload();
 	return nullptr;
 }
 
@@ -793,6 +826,11 @@ optional_ptr<CatalogEntry> UCTableSet::GetEntry(ClientContext &context, const En
 	}
 	auto &table_info = entry->second;
 	return table_info.GetVersion(context, lookup);
+}
+
+void UCTableSet::MarkNeedsReload() {
+	lock_guard<mutex> ll(load_lock);
+	is_loaded = false;
 }
 
 void UCTableSet::ClearEntries() {

@@ -62,6 +62,8 @@ struct UCAPICommit {
 
 struct UCAPICommitsResult {
 	vector<UCAPICommit> commits;
+	//! JSON: metadata.table-uuid -- the id a create can be recognized by when its outcome is unclear
+	string table_uuid;
 	// Newest version the catalog has assigned (may not yet be backfilled into _delta_log/).
 	idx_t ratified_version = 0; // JSON: latest-table-version
 	string etag;
