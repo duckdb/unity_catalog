@@ -14,6 +14,8 @@ require-env UC_TEST_CATALOG
 
 require-env UC_TEST_NEW_TABLE
 
+require-env UC_TEST_NEW_NESTED_TABLE
+
 require-env UC_ENDPOINT
 
 statement ok
@@ -50,13 +52,34 @@ WHERE message LIKE 'api.CreateTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE}%';
 ----
 1
 
-# The catalog serves it, with the columns as written
+# The catalog serves it, with the columns as written. Scoped to the attachment: once a table has been
+# resolved, the internal Delta database holding it is attached too, and duckdb_columns() reports both.
 query II
 SELECT column_name, data_type FROM duckdb_columns()
-WHERE table_name = '{UC_TEST_NEW_TABLE}' ORDER BY column_index;
+WHERE database_name = 'duck' AND table_name = '{UC_TEST_NEW_TABLE}' ORDER BY column_index;
 ----
 id	INTEGER
 name	VARCHAR
+
+# -----------------------------------------------------------------------------
+# Creating it again
+#
+
+statement ok
+CREATE TABLE IF NOT EXISTS duck.cmt.{UC_TEST_NEW_TABLE} (id INTEGER, name VARCHAR);
+
+# The catalog refused the second staging attempt, and the table it refused for is untouched
+query II
+SELECT column_name, data_type FROM duckdb_columns()
+WHERE database_name = 'duck' AND table_name = '{UC_TEST_NEW_TABLE}' ORDER BY column_index;
+----
+id	INTEGER
+name	VARCHAR
+
+statement error
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE} (id INTEGER, name VARCHAR);
+----
+already exists
 
 # -----------------------------------------------------------------------------
 # Using it
@@ -101,3 +124,40 @@ SELECT id, name FROM fresh.cmt.{UC_TEST_NEW_TABLE} ORDER BY id;
 ----
 1	one
 2	two
+
+# -----------------------------------------------------------------------------
+# Nested columns
+#
+# A list, a map and a struct, because UC spells the parts of a nested type with dashes where the
+# Delta log spells them in camelCase, and a column whose element type never reaches the server
+# comes back as a table nobody can read. This runs on the attachment that just read the table
+# above, so it also covers a CREATE in a session that already has tables in hand.
+#
+
+statement ok
+CREATE TABLE fresh.cmt.{UC_TEST_NEW_NESTED_TABLE} (
+    tags VARCHAR[],
+    scores MAP(VARCHAR, INTEGER),
+    who STRUCT(first VARCHAR, ages INTEGER[])
+);
+
+statement ok
+INSERT INTO fresh.cmt.{UC_TEST_NEW_NESTED_TABLE}
+VALUES (['a', 'b'], MAP {'x': 1}, {'first': 'ann', 'ages': [3, 4]});
+
+query II
+SELECT id, name FROM fresh.cmt.{UC_TEST_NEW_TABLE} ORDER BY id;
+----
+1	one
+2	two
+
+statement ok
+DETACH fresh;
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS nested (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'cmt');
+
+query III
+SELECT tags, scores, who FROM nested.cmt.{UC_TEST_NEW_NESTED_TABLE};
+----
+[a, b]	{x=1}	{'first': ann, 'ages': [3, 4]}
