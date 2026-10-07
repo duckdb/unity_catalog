@@ -42,6 +42,7 @@ def test_create_table(request, uc_server):
             env={
                 "UC_TEST_NEW_TABLE": table,
                 "UC_TEST_NEW_NESTED_TABLE": nested,
+                "UC_TEST_CATALOG": catalog,
                 "UC_ENDPOINT": endpoint,
             },
         )

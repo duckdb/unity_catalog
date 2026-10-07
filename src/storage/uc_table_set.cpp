@@ -692,6 +692,13 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 		throw InvalidInputException("Can not create a table in a read only Unity Catalog");
 	}
 	auto &base = info.Base().Cast<CreateTableInfo>();
+	// The bind accepts `location` so the option can be refused here, where the message can say what it
+	// would mean, rather than in DuckDB's own "WITH clause is not supported" before binding finishes.
+	if (base.options.find("location") != base.options.end()) {
+		throw NotImplementedException("CREATE TABLE with a location, which asks for an external table, is not "
+		                              "supported yet; a table created here is catalog-managed and Unity Catalog "
+		                              "chooses where it lives");
+	}
 	auto table_name = base.GetTableName().GetIdentifierName();
 	auto catalog_name = catalog.GetDBPath();
 	auto schema_name = schema.name.GetIdentifierName();

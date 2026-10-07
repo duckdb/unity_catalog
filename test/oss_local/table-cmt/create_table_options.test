@@ -1,0 +1,62 @@
+# name: test/oss_local/table-cmt/create_table_options.test
+# description: What a CREATE TABLE in a Unity Catalog schema accepts in its WITH clause. DuckDB's base
+# catalog refuses every WITH clause before binding finishes, so without the extension's own
+# SupportsCreateTable none of these messages could ever be reached. Paired create_table_options.py only
+# wants the server attached: each statement is refused before any table is created.
+# group: [table-cmt]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_ENDPOINT
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT '{UC_ENDPOINT}',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'cmt');
+
+# -----------------------------------------------------------------------------
+# location reaches the catalog
+#
+# The option asking for an external table is not implemented yet, and the refusal has to come from
+# the extension -- a message about the WITH clause itself would mean the bind never got here.
+#
+
+statement error
+CREATE TABLE duck.cmt.opts_location (id INTEGER) WITH (location = 's3://bucket/opts_location');
+----
+asks for an external table
+
+# -----------------------------------------------------------------------------
+# what else the clause takes
+#
+
+statement error
+CREATE TABLE duck.cmt.opts_unknown (id INTEGER) WITH (nonsense = 'x');
+----
+Unrecognized option "nonsense"
+
+# A property that decides the table's protocol is not the caller's to set: UC states the required
+# ones and the kernel derives the rest from them.
+statement error
+CREATE TABLE duck.cmt.opts_feature (id INTEGER) WITH ("delta.feature.catalogManaged" = 'supported');
+----
+Unrecognized option
+
+statement error
+CREATE TABLE duck.cmt.opts_sorted (id INTEGER) SORTED BY (id);
+----
+SORTED BY is not supported
