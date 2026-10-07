@@ -37,8 +37,12 @@ struct YYJsonDoc {
 };
 
 static string YYJsonEncodeString(const string &raw) {
-	duckdb_yyjson::yyjson_val val;
-	duckdb_yyjson::yyjson_set_strn(&val, raw.data(), raw.size());
+	// Zeroed on purpose: yyjson_set_strn refuses a value whose tag already reads as an array or object,
+	// so uninitialised stack leaves that container to be written in place of the string.
+	duckdb_yyjson::yyjson_val val = {};
+	if (!duckdb_yyjson::yyjson_set_strn(&val, raw.data(), raw.size())) {
+		throw InvalidInputException("yyjson string encoding failed");
+	}
 	size_t encoded_len = 0;
 	char *encoded = duckdb_yyjson::yyjson_val_write(&val, duckdb_yyjson::YYJSON_WRITE_NOFLAG, &encoded_len);
 	if (!encoded) {
