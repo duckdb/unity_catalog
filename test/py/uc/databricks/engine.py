@@ -417,7 +417,15 @@ class DatabricksProvisioner(_BaseProvisioner):
         with open(path) as f:
             sql = os.path.expandvars(f.read())
         sql = sql.replace("{table_name}", target).replace("{catalog}", cat).replace("{schema}", schema)
-        proc = subprocess.run([duckdb_bin, "-unsigned", "-c", sql], capture_output=True, text=True)
+        # LOAD the build's own extensions by path, as uc.duckdb and uc.oss do for their shells.
+        # Autoloading instead resolves against build/<type>/repository/<duckdb-version>/, which only
+        # exists where duckdb's deploy step ran -- the extension beside the binary is always there.
+        build_dir = os.path.dirname(duckdb_bin)
+        loads = "".join(
+            f"LOAD '{os.path.join(build_dir, 'extension', n, n + '.duckdb_extension')}';\n"
+            for n in ("parquet", "httpfs", "delta", "unity_catalog")
+        )
+        proc = subprocess.run([duckdb_bin, "-unsigned", "-c", loads + sql], capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError(f"DuckDB UC insert failed ({os.path.basename(path)}):\n{proc.stderr.strip()}")
 
