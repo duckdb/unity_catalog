@@ -19,6 +19,7 @@ add_executable(
 set_target_properties(unittest_cpp PROPERTIES RUNTIME_OUTPUT_DIRECTORY
                                               ${CMAKE_BINARY_DIR}/test)
 
-target_link_libraries(unittest_cpp test_helpers duckdb_static)
+# DuckDB links an out-of-tree extension only when a config asks, so link this one directly
+target_link_libraries(unittest_cpp test_helpers ${EXTENSION_NAME} duckdb_static)
 link_extension_libraries(unittest_cpp "")
 link_threads(unittest_cpp "")
