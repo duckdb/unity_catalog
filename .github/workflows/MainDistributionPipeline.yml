@@ -17,7 +17,7 @@ jobs:
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
     with:
       extension_name: &ext_name unity_catalog
-      duckdb_version: &duckdb_ref e091a79d435a2d9914c0131d8e51829b20045ba6 # v2.0-cyanoptera 2026-09-11 pin
+      duckdb_version: &duckdb_ref 5070de3585e846718fac121b5b149f4236e6a58a # v2.0-cyanoptera 2026-10-06 pin
       ci_tools_version: &ci_tools_ref main
       exclude_archs: wasm_mvp;wasm_eh;wasm_threads;windows_amd64_mingw;windows_amd64;linux_arm64;linux_amd64_musl
       enable_rust: true
