@@ -107,55 +107,6 @@ SELECT count(*) FROM parquet_metadata('{UC_TEST_TABLE_LOCATION}/*.parquet') WHER
 0
 
 # -----------------------------------------------------------------------------
-# Variants nested in a struct and a list
-#
-# Skipped until the duckdb parquet writer supports a variant below the root. Today: "Not implemented
-# Error: ColumnWriter of type 'VARIANT' requires a transform, but is not a root column".
-#
-
-mode skip
-
-statement ok
-INSERT INTO {UC_TEST_TABLE_NESTED} VALUES
-    (17, NULL, {'tag': 't17', 'v': {'k': 'v'}::VARIANT}, [1::VARIANT, 'x'::VARIANT]);
-
-query III
-SELECT s.tag, s.v.k::VARCHAR, a[2]::VARCHAR FROM {UC_TEST_TABLE_NESTED} WHERE id = 17;
-----
-t17	v	x
-
-mode unskip
-
-# -----------------------------------------------------------------------------
-# Into the shredded table
-#
-# Its struct and list columns take NULLs here, which still need a nested variant writer: skipped
-# with the section above, same error.
-#
-
-mode skip
-
-statement ok
-INSERT INTO {UC_TEST_TABLE_SHREDDED} (id, v) VALUES
-    (13, {'a': 13, 'b': 'w'}::VARIANT),
-    (14, 44::VARIANT);
-
-query III
-SELECT id, v.a::INTEGER, v.b::VARCHAR FROM {UC_TEST_TABLE_SHREDDED} WHERE id IN (1, 4, 13, 14) ORDER BY id;
-----
-1	1	x
-4	NULL	NULL
-13	13	w
-14	NULL	NULL
-
-query I
-SELECT list(id ORDER BY id) FROM {UC_TEST_TABLE_SHREDDED} WHERE v.a::INTEGER >= 3;
-----
-[3, 13]
-
-mode unskip
-
-# -----------------------------------------------------------------------------
 # First write into an empty table
 #
 # data/variant_empty has protocol and metadata only, so DuckDB writes every data file.
@@ -227,12 +178,23 @@ SELECT id, variant_typeof(data) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_EMPTY}
 2	INT32
 3	VARIANT_NULL
 
-# Reads the rows the skipped shredded-table INSERT writes.
-mode skip
+# -----------------------------------------------------------------------------
+# Variants nested in a struct and a list
+#
+# duckdb-delta refuses these until the duckdb parquet writer can write a variant below the root.
+# Last in the file: after a failed INSERT, DETACH of the catalog fails with "database not found".
+#
 
-query I
-SELECT list(id ORDER BY id) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_SHREDDED} WHERE TRY_CAST(v AS BIGINT) IN (42, 44);
+statement error
+INSERT INTO duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_NESTED} VALUES
+    (17, NULL, {'tag': 't17', 'v': {'k': 'v'}::VARIANT}, [1::VARIANT, 'x'::VARIANT]);
 ----
-[4, 14]
+Delta INSERT does not support column 's' with a VARIANT nested in a STRUCT yet
 
-mode unskip
+# The shredded table has struct and list columns too, so even a top-level-only INSERT is refused.
+statement error
+INSERT INTO duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_SHREDDED} (id, v) VALUES
+    (13, {'a': 13, 'b': 'w'}::VARIANT),
+    (14, 44::VARIANT);
+----
+Delta INSERT does not support column 's' with a VARIANT nested in a STRUCT yet
