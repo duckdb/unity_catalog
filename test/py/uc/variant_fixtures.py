@@ -45,6 +45,14 @@ TOPLEVEL = (
     {"delta.feature.variantType": "supported", "delta.minReaderVersion": "3", "delta.minWriterVersion": "7"},
 )
 
+# Spark-written, top-level variant only, with delta.enableVariantShredding: a table DuckDB can write
+# into while shredding is on. A copy of duckdb-delta's data/inlined/variant/spark_shredded_variant_stats.
+SHREDDED_TOPLEVEL = (
+    REPO_ROOT / "data" / "variant_shredded_toplevel",
+    [COLUMNS[0], COLUMNS[1]],
+    {**_BASE, "delta.enableVariantShredding": "true", "delta.feature.variantShredding-preview": "supported"},
+)
+
 # A log with protocol and metadata only: DuckDB writes its first data file.
 EMPTY = (
     REPO_ROOT / "data" / "variant_empty",

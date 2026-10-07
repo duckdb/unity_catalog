@@ -1,5 +1,5 @@
 # name: test/oss_local/variant_write.test
-# description: VARIANT columns written through the UC catalog path by duckdb-delta, into Spark-created tables, then read back. Paired variant_write.py registers a copy of data/variant_toplevel, data/variant_unshredded, data/variant_shredded and data/variant_empty.
+# description: VARIANT columns written through the UC catalog path by duckdb-delta, into Spark-created tables, then read back. Paired variant_write.py registers a copy of data/variant_toplevel, data/variant_unshredded, data/variant_shredded, data/variant_shredded_toplevel and data/variant_empty.
 # group: [oss_local]
 
 require parquet
@@ -21,6 +21,10 @@ require-env UC_TEST_TABLE_LOCATION
 require-env UC_TEST_TABLE_NESTED
 
 require-env UC_TEST_TABLE_SHREDDED
+
+require-env UC_TEST_TABLE_SHREDDED_TOPLEVEL
+
+require-env UC_TEST_TABLE_SHREDDED_TOPLEVEL_LOCATION
 
 require-env UC_TEST_TABLE_EMPTY
 
@@ -107,6 +111,43 @@ SELECT count(*) FROM parquet_metadata('{UC_TEST_TABLE_LOCATION}/*.parquet') WHER
 0
 
 # -----------------------------------------------------------------------------
+# Into a table that enables shredding, top-level variants only
+#
+# data/variant_shredded_toplevel sets delta.enableVariantShredding, so DuckDB shreds, as Spark did.
+#
+
+statement ok
+INSERT INTO {UC_TEST_TABLE_SHREDDED_TOPLEVEL} (id, v) VALUES
+    (73, {'a': 15, 'b': 'w'}::VARIANT),
+    (74, {'a': 20, 'b': 'q'}::VARIANT);
+
+query I
+SELECT list(DISTINCT path_in_schema ORDER BY path_in_schema) FROM parquet_metadata('{UC_TEST_TABLE_SHREDDED_TOPLEVEL_LOCATION}/duckdb-*.parquet') WHERE path_in_schema LIKE '%typed_value%';
+----
+['v, typed_value, a, typed_value', 'v, typed_value, a, value', 'v, typed_value, b, typed_value', 'v, typed_value, b, value']
+
+query III
+SELECT id, v, variant_typeof(v) FROM {UC_TEST_TABLE_SHREDDED_TOPLEVEL} ORDER BY id;
+----
+70	{'a': 1, 'b': x}	OBJECT(a, b)
+71	{'a': 5, 'b': y}	OBJECT(a, b)
+72	{'a': 10, 'b': z}	OBJECT(a, b)
+73	{'a': 15, 'b': w}	OBJECT(a, b)
+74	{'a': 20, 'b': q}	OBJECT(a, b)
+
+query III
+SELECT id, v.a::INTEGER, v.b::VARCHAR FROM {UC_TEST_TABLE_SHREDDED_TOPLEVEL} WHERE id IN (70, 73) ORDER BY id;
+----
+70	1	x
+73	15	w
+
+# Spans Spark's and DuckDB's files.
+query I
+SELECT list(id ORDER BY id) FROM {UC_TEST_TABLE_SHREDDED_TOPLEVEL} WHERE v.a::INTEGER >= 10;
+----
+[72, 73, 74]
+
+# -----------------------------------------------------------------------------
 # First write into an empty table
 #
 # data/variant_empty has protocol and metadata only, so DuckDB writes every data file.
@@ -177,6 +218,11 @@ SELECT id, variant_typeof(data) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_EMPTY}
 1	OBJECT(tag, value)
 2	INT32
 3	VARIANT_NULL
+
+query II
+SELECT list(id ORDER BY id), list(v.b::VARCHAR ORDER BY id) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_SHREDDED_TOPLEVEL} WHERE v.a::INTEGER >= 10;
+----
+[72, 73, 74]	[z, w, q]
 
 # -----------------------------------------------------------------------------
 # Variants nested in a struct and a list
