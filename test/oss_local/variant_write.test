@@ -101,15 +101,10 @@ SELECT count(*) FROM {UC_TEST_TABLE} AT (VERSION => 1);
 2
 
 # The table does not enable the variantShredding feature, so a writer may not shred into it.
-# Skipped until duckdb-delta writes unshredded files here; today 8 typed_value columns come back.
-mode skip
-
 query I
 SELECT count(*) FROM parquet_metadata('{UC_TEST_TABLE_LOCATION}/*.parquet') WHERE path_in_schema LIKE '%typed_value%';
 ----
 0
-
-mode unskip
 
 # -----------------------------------------------------------------------------
 # Variants nested in a struct and a list
