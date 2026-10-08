@@ -26,12 +26,12 @@ jobs:
 
   duckdb-stable-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@f3fccb8e79f4c50b02447907207e2f3caf404946 # main 2026-10-07 pin
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@db25140b9d9eb1132137d65aeef104c8b7d6d5e3 # main 2026-10-08 pin
     needs: prepare
     with:
       extension_name: &ext_name unity_catalog
-      duckdb_version: &duckdb_ref 57c755a991d44bc967bed33f451a00375e76c346 # v2.0-cyanoptera 2026-10-07 pin
-      ci_tools_version: &ci_tools_ref f3fccb8e79f4c50b02447907207e2f3caf404946 # main 2026-10-07 pin
+      duckdb_version: &duckdb_ref f2f9329721f3d7228296c07f40c3cac72243a6df # v2.0-cyanoptera 2026-10-08 pin
+      ci_tools_version: &ci_tools_ref db25140b9d9eb1132137d65aeef104c8b7d6d5e3 # main 2026-10-08 pin
       runners: ${{ needs.prepare.outputs.runners }}
       exclude_archs: wasm_mvp;wasm_eh;wasm_threads;windows_amd64_mingw;windows_amd64;linux_arm64;linux_amd64_musl
       enable_rust: true
@@ -42,7 +42,7 @@ jobs:
   duckdb-stable-deploy:
     name: Deploy extension binaries
     needs: duckdb-stable-build
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@f3fccb8e79f4c50b02447907207e2f3caf404946 # main 2026-10-07 pin
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@db25140b9d9eb1132137d65aeef104c8b7d6d5e3 # main 2026-10-08 pin
     secrets: inherit
     with:
       extension_name: *ext_name
@@ -54,7 +54,7 @@ jobs:
 
   code-quality-check:
     name: Code Quality Check
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@f3fccb8e79f4c50b02447907207e2f3caf404946 # main 2026-10-07 pin
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@db25140b9d9eb1132137d65aeef104c8b7d6d5e3 # main 2026-10-08 pin
     with:
       extension_name: *ext_name
       duckdb_version: *duckdb_ref
