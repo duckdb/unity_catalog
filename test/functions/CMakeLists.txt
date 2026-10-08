@@ -20,4 +20,9 @@ set_target_properties(unittest_cpp PROPERTIES RUNTIME_OUTPUT_DIRECTORY
 
 target_link_libraries(unittest_cpp test_helpers duckdb_static)
 link_extension_libraries(unittest_cpp "")
+# The cases call into the extension's own objects, and link_extension_libraries
+# brings only the statically linked extensions -- in a build where this one is
+# loadable it contributes nothing and the link fails. Naming the archive is a
+# no-op where it is already linked statically.
+target_link_libraries(unittest_cpp unity_catalog_extension)
 link_threads(unittest_cpp "")
