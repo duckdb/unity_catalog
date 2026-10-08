@@ -1,9 +1,10 @@
 # name: test/oss_local/table-cmt/create_table_options.test
 # description: What a CREATE TABLE in a Unity Catalog schema accepts in its WITH clause. DuckDB's base
+# group: [table-cmt]
+
 # catalog refuses every WITH clause before binding finishes, so without the extension's own
 # SupportsCreateTable none of these messages could ever be reached. Paired create_table_options.py only
 # wants the server attached: each statement is refused before any table is created.
-# group: [table-cmt]
 
 require parquet
 

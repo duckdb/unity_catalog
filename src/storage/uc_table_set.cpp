@@ -671,8 +671,7 @@ static UCAPICommittedTable ReadCommittedTable(ClientContext &context, const stri
 			if (schema_string && duckdb_yyjson::yyjson_is_str(schema_string)) {
 				result.schema_json = duckdb_yyjson::yyjson_get_str(schema_string);
 			}
-			result.partition_columns =
-			    ReadJsonStringArray(duckdb_yyjson::yyjson_obj_get(metadata, "partitionColumns"));
+			result.partition_columns = ReadJsonStringArray(duckdb_yyjson::yyjson_obj_get(metadata, "partitionColumns"));
 			result.properties = ReadJsonStringMap(duckdb_yyjson::yyjson_obj_get(metadata, "configuration"));
 		}
 		duckdb_yyjson::yyjson_doc_free(doc);
@@ -742,8 +741,8 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 		// create; and any `delta.*` key kernel does not accept at creation, which it refuses outright.
 		for (auto &property : staging.suggested_properties) {
 			if (property.first == "delta.columnMapping.mode" || !CreatableDeltaProperty(property.first)) {
-				UC_LOG_DEBUG(context, "CreateTable %s.%s.%s skipped suggested property %s", catalog_name,
-				             schema_name, table_name, property.first);
+				UC_LOG_DEBUG(context, "CreateTable %s.%s.%s skipped suggested property %s", catalog_name, schema_name,
+				             table_name, property.first);
 				continue;
 			}
 			base.options[property.first] = ConstantExpression::String(property.second);
