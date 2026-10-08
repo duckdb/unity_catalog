@@ -272,7 +272,10 @@ void TableInformation::InternalDetach(ClientContext &context, const lock_guard<m
 	}
 	auto &db_manager = DatabaseManager::Get(context);
 	auto name = AttachedCatalogName();
-	db_manager.DetachDatabase(context, Identifier(name), OnEntryNotFound::THROW_EXCEPTION);
+	// This pointer is ours, but the attachment it names belongs to DuckDB, which undoes it when the
+	// statement that attached it rolls back -- leaving the pointer set and nothing to detach. Tolerate
+	// that: the name has to be released either way, or the next attach collides with it.
+	db_manager.DetachDatabase(context, Identifier(name), OnEntryNotFound::RETURN_NULL);
 	internal_attached_database = nullptr;
 }
 
