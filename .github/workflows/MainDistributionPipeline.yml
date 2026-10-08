@@ -12,13 +12,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  prepare:
+    runs-on: ${{ github.repository_owner == 'duckdb' && 'namespace-profile-linux-slim' || 'ubuntu-slim' }}
+    name: Prepare
+    outputs:
+      runners: ${{ steps.runners.outputs.runners }}
+    steps:
+      - name: Detect runners
+        id: runners
+        uses: duckdb/duckdb-ci/detect-runners@main
+
   duckdb-stable-build:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+    needs: prepare
     with:
       extension_name: &ext_name unity_catalog
       duckdb_version: &duckdb_ref 5070de3585e846718fac121b5b149f4236e6a58a # v2.0-cyanoptera 2026-10-06 pin
       ci_tools_version: &ci_tools_ref main
+      runners: ${{ needs.prepare.outputs.runners }}
       exclude_archs: wasm_mvp;wasm_eh;wasm_threads;windows_amd64_mingw;windows_amd64;linux_arm64;linux_amd64_musl
       enable_rust: true
       rust_logs: true
