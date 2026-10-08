@@ -736,8 +736,7 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 		// What UC requires becomes part of the statement kernel sees: its properties as they are, and its
 		// protocol features as `delta.feature.<name> = supported`, which is how a table asks for them at
 		// creation. Without `catalogManaged` among them kernel refuses to commit through a catalog
-		// committer at all. UC's *suggested* properties are not applied: some of them, column mapping
-		// among them, the writer cannot honour on every table shape.
+		// committer at all.
 		for (auto &property : staging.required_properties) {
 			base.options[property.first] = ConstantExpression::String(property.second);
 		}
