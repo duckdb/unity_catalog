@@ -733,18 +733,6 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	auto &db_manager = DatabaseManager::Get(context);
 	auto staging_db = db_manager.AttachDatabase(context, attach_info, attach_options);
 	try {
-		// What UC requires becomes part of the statement kernel sees: its properties as they are, and its
-		// protocol features as `delta.feature.<name> = supported`, which is how a table asks for them at
-		// creation. Without `catalogManaged` among them kernel refuses to commit through a catalog
-		// committer at all.
-		for (auto &property : staging.required_properties) {
-			base.options[property.first] = ConstantExpression::String(property.second);
-		}
-		for (auto &features : {staging.reader_features, staging.writer_features}) {
-			for (auto &feature : features) {
-				base.options["delta.feature." + feature] = ConstantExpression::String("supported");
-			}
-		}
 		// A suggestion is UC saying "this is how we would write it", so take the ones that can be taken.
 		// Two reasons one cannot: column mapping, which the writer maps for top-level, unpartitioned
 		// columns only, so applying it by default would leave nested and partitioned tables impossible to
@@ -756,6 +744,19 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 				continue;
 			}
 			base.options[property.first] = ConstantExpression::String(property.second);
+		}
+		// What UC requires becomes part of the statement kernel sees: its properties as they are, and its
+		// protocol features as `delta.feature.<name> = supported`, which is how a table asks for them at
+		// creation. Without `catalogManaged` among them kernel refuses to commit through a catalog
+		// committer at all. Written after the suggestions, so a key UC names in both is the way it
+		// requires it, not the way it would prefer it.
+		for (auto &property : staging.required_properties) {
+			base.options[property.first] = ConstantExpression::String(property.second);
+		}
+		for (auto &features : {staging.reader_features, staging.writer_features}) {
+			for (auto &feature : features) {
+				base.options["delta.feature." + feature] = ConstantExpression::String("supported");
+			}
 		}
 		auto &delta_catalog = staging_db->GetCatalog();
 		auto &delta_schema = delta_catalog.GetSchema(context, Identifier::DefaultSchema());
