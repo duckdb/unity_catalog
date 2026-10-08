@@ -198,7 +198,7 @@ public:
 	// delta.yaml v1: GET /delta/v1/staging-tables/{table_id}/credentials
 	// Always READ_WRITE: the caller writes the table's version 0.
 	static UCAPITableCredentials GetStagingTableCredentials(ClientContext &ctx, const string &table_id,
-	                                                       const UCCredentials &credentials);
+	                                                        const UCCredentials &credentials);
 	static string GetDefaultSchema(ClientContext &ctx, const UCCredentials &credentials);
 	static vector<string> GetCatalogs(ClientContext &ctx, Catalog &catalog, const UCCredentials &credentials);
 	static vector<UCAPITable> GetTables(ClientContext &ctx, Catalog &catalog, const string &schema,

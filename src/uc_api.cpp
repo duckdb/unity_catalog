@@ -433,8 +433,7 @@ UCAPIStagingTable UCAPI::CreateStagingTable(ClientContext &ctx, const string &ca
 			// in DuckDB's wording instead of an HTTP failure.
 			throw CatalogException::EntryAlreadyExists(CatalogType::TABLE_ENTRY, Identifier(table_name));
 		}
-		error.ThrowError(
-		    StringUtil::Format("Failed to stage table %s.%s.%s", catalog_name, schema_name, table_name));
+		error.ThrowError(StringUtil::Format("Failed to stage table %s.%s.%s", catalog_name, schema_name, table_name));
 	}
 
 	result.table_id = TryGetStrFromObject(root, "table-id");
@@ -463,16 +462,15 @@ void UCAPI::CreateTable(ClientContext &ctx, const string &catalog_name, const st
 	    R"("writer-features": %s}, "properties": %s, "last-commit-timestamp-ms": %d})",
 	    YYJsonEncodeString(table.name), YYJsonEncodeString(table.location), WireSchema(table.schema_json),
 	    JsonStringArray(table.partition_columns), table.min_reader_version, table.min_writer_version,
-	    JsonStringArray(table.reader_features), JsonStringArray(table.writer_features),
-	    JsonStringMap(table.properties), table.last_commit_timestamp_ms);
+	    JsonStringArray(table.reader_features), JsonStringArray(table.writer_features), JsonStringMap(table.properties),
+	    table.last_commit_timestamp_ms);
 	UC_LOG_DEBUG(ctx, "api.CreateTable %s.%s.%s", catalog_name, schema_name, table.name);
 	auto api_result = MakeRequest(ctx, url, credentials.token, body);
 
 	YYJsonDoc doc(api_result);
 	auto error = CheckError(doc.Root());
 	if (error.HasError()) {
-		error.ThrowError(
-		    StringUtil::Format("Failed to create table %s.%s.%s", catalog_name, schema_name, table.name));
+		error.ThrowError(StringUtil::Format("Failed to create table %s.%s.%s", catalog_name, schema_name, table.name));
 	}
 }
 
@@ -645,7 +643,7 @@ UCAPITableCredentials UCAPI::GetTableCredentials(ClientContext &ctx, const strin
 }
 
 UCAPITableCredentials UCAPI::GetStagingTableCredentials(ClientContext &ctx, const string &table_id,
-                                                       const UCCredentials &credentials) {
+                                                        const UCCredentials &credentials) {
 	UCAPITableCredentials result;
 	string url = StringUtil::Format("%s/api/2.1/unity-catalog/delta/v1/staging-tables/%s/credentials",
 	                                credentials.endpoint, table_id);
