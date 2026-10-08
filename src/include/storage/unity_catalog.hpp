@@ -65,6 +65,10 @@ public:
 		return true;
 	}
 
+	//! What a CREATE may say here: the base class refuses a WITH clause outright, so without this
+	//! override `location` -- the option that asks for an external table -- never reaches the catalog.
+	ErrorData SupportsCreateTable(BoundCreateTableInfo &info) override;
+
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;
 
 	void ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) override;

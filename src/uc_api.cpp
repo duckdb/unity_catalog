@@ -11,9 +11,13 @@
 #include "duckdb/main/extension_helper.hpp"
 
 #include "uc_api.hpp"
+
+#include "duckdb/common/exception/catalog_exception.hpp"
 #include "uc_logging.hpp"
 #include "storage/unity_catalog.hpp"
 #include "yyjson.hpp"
+
+#include <map>
 
 namespace duckdb {
 
@@ -72,9 +76,12 @@ static void EnsureHttpfsExtension(const shared_ptr<DatabaseInstance> &db) {
 }
 
 // Core request: returns the full response (so callers can read headers/status), throwing on
-// non-2xx. MakeRequest wraps it for callers that only need the body.
+// non-2xx. MakeRequest wraps it for callers that only need the body. `tolerated` hands one failure
+// status back as a response instead: the body then carries an error the caller acts on rather than
+// reports, which only CheckError can tell apart.
 static unique_ptr<HTTPResponse> MakeRequestResp(ClientContext &ctx, const string &url, const string &token = "",
-                                                const string &body = "", bool send_as_get = false) {
+                                                const string &body = "", bool send_as_get = false,
+                                                HTTPStatusCode tolerated = HTTPStatusCode::INVALID) {
 	auto db = ctx.db;
 	EnsureHttpfsExtension(db);
 	auto &http_util = HTTPUtil::Get(*db);
@@ -96,7 +103,7 @@ static unique_ptr<HTTPResponse> MakeRequestResp(ClientContext &ctx, const string
 		resp = http_util.Request(req);
 	}
 
-	if (!resp->Success()) {
+	if (!resp->Success() && resp->status != tolerated) {
 		throw IOException("Request to '%s' failed (HTTP %d): %s\nResponse body: %s", url,
 		                  static_cast<int>(resp->status), resp->GetError(),
 		                  resp->body.empty() ? "(empty)" : resp->body);
@@ -105,8 +112,8 @@ static unique_ptr<HTTPResponse> MakeRequestResp(ClientContext &ctx, const string
 }
 
 static string MakeRequest(ClientContext &ctx, const string &url, const string &token = "", const string &body = "",
-                          bool send_as_get = false) {
-	return std::move(MakeRequestResp(ctx, url, token, body, send_as_get)->body);
+                          bool send_as_get = false, HTTPStatusCode tolerated = HTTPStatusCode::INVALID) {
+	return std::move(MakeRequestResp(ctx, url, token, body, send_as_get, tolerated)->body);
 }
 
 // Retry-After delay-seconds header -> milliseconds; -1 if absent or not a plain integer (the
@@ -197,6 +204,13 @@ public:
 	}
 
 public:
+	//! Observed on OSS 0.5.1 as {"error": {"type": "AlreadyExistsException", "code": 409}}; the legacy
+	//! all.yaml shape spells the same condition in error_code.
+	bool IsAlreadyExists() const {
+		return error_code == "AlreadyExistsException" || error_code == "ALREADY_EXISTS" ||
+		       error_code == "TABLE_ALREADY_EXISTS";
+	}
+
 	void ThrowError(const string &prefix) {
 		D_ASSERT(HasError());
 		throw IOException("%s. error_code: %s, message: %s", prefix, error_code, message);
@@ -273,6 +287,193 @@ string UCAPI::GetDefaultSchema(ClientContext &ctx, const UCCredentials &credenti
 	return setting_name;
 }
 
+//! Reads the string values of a JSON object into pairs, in the order the server wrote them
+static vector<pair<string, string>> ReadStringMap(duckdb_yyjson::yyjson_val *obj) {
+	vector<pair<string, string>> result;
+	if (!obj || !yyjson_is_obj(obj)) {
+		return result;
+	}
+	size_t idx, max;
+	duckdb_yyjson::yyjson_val *key, *val;
+	yyjson_obj_foreach(obj, idx, max, key, val) {
+		if (!yyjson_is_str(val)) {
+			// A null value means "UC has no opinion", which is not a property to set
+			continue;
+		}
+		result.emplace_back(yyjson_get_str(key), yyjson_get_str(val));
+	}
+	return result;
+}
+
+static vector<string> ReadStringArray(duckdb_yyjson::yyjson_val *arr) {
+	vector<string> result;
+	if (!arr || !yyjson_is_arr(arr)) {
+		return result;
+	}
+	size_t idx, max;
+	duckdb_yyjson::yyjson_val *item;
+	yyjson_arr_foreach(arr, idx, max, item) {
+		if (yyjson_is_str(item)) {
+			result.emplace_back(yyjson_get_str(item));
+		}
+	}
+	return result;
+}
+
+static string JsonStringArray(const vector<string> &values) {
+	vector<string> encoded;
+	for (auto &value : values) {
+		encoded.push_back(YYJsonEncodeString(value));
+	}
+	return "[" + StringUtil::Join(encoded, ", ") + "]";
+}
+
+static string JsonStringMap(const vector<pair<string, string>> &values) {
+	vector<string> encoded;
+	for (auto &value : values) {
+		encoded.push_back(YYJsonEncodeString(value.first) + ": " + YYJsonEncodeString(value.second));
+	}
+	return "{" + StringUtil::Join(encoded, ", ") + "}";
+}
+
+//! The S3 keys of a delta.yaml `DeltaCredentialsResponse`. First entry only; matching the longest
+//! prefix is a TODO shared with the table-credentials path.
+static void ReadStorageCredentials(duckdb_yyjson::yyjson_val *root, UCAPITableCredentials &result) {
+	auto *creds_arr = yyjson_obj_get(root, "storage-credentials");
+	if (!creds_arr || !yyjson_is_arr(creds_arr) || yyjson_arr_size(creds_arr) == 0) {
+		return;
+	}
+	auto *cfg = yyjson_obj_get(yyjson_arr_get_first(creds_arr), "config");
+	if (!cfg || !yyjson_is_obj(cfg)) {
+		return;
+	}
+	result.key_id = TryGetStrFromObject(cfg, "s3.access-key-id", false);
+	result.secret = TryGetStrFromObject(cfg, "s3.secret-access-key", false);
+	result.session_token = TryGetStrFromObject(cfg, "s3.session-token", false);
+}
+
+//! The wire name for a Delta schema key. UC's API spells multi-word keys with dashes, and a schema's
+//! only multi-word keys are the parameters of `array` and `map` (`delta.yaml`:
+//! `DeltaArrayType`/`DeltaMapType`) -- field names, `nullable` and `metadata` are single words and
+//! already match. The server drops keys it does not recognize before checking that the ones it
+//! requires are present, so a camelCase schema is rejected for a type it did send.
+static const char *WireSchemaKey(const char *key) {
+	static const std::map<std::string, const char *> RENAMED = {{"elementType", "element-type"},
+	                                                            {"containsNull", "contains-null"},
+	                                                            {"keyType", "key-type"},
+	                                                            {"valueType", "value-type"},
+	                                                            {"valueContainsNull", "value-contains-null"}};
+	auto entry = RENAMED.find(key);
+	return entry == RENAMED.end() ? key : entry->second;
+}
+
+static duckdb_yyjson::yyjson_mut_val *WireSchemaCopy(duckdb_yyjson::yyjson_mut_doc *doc,
+                                                     duckdb_yyjson::yyjson_val *value) {
+	if (yyjson_is_obj(value)) {
+		auto *result = yyjson_mut_obj(doc);
+		size_t idx, max;
+		duckdb_yyjson::yyjson_val *key, *child;
+		yyjson_obj_foreach(value, idx, max, key, child) {
+			auto *wire_key = duckdb_yyjson::yyjson_mut_strcpy(doc, WireSchemaKey(yyjson_get_str(key)));
+			yyjson_mut_obj_put(result, wire_key, WireSchemaCopy(doc, child));
+		}
+		return result;
+	}
+	if (yyjson_is_arr(value)) {
+		auto *result = yyjson_mut_arr(doc);
+		size_t idx, max;
+		duckdb_yyjson::yyjson_val *item;
+		yyjson_arr_foreach(value, idx, max, item) {
+			yyjson_mut_arr_add_val(result, WireSchemaCopy(doc, item));
+		}
+		return result;
+	}
+	return duckdb_yyjson::yyjson_val_mut_copy(doc, value);
+}
+
+//! A Delta `schemaString` as the `columns` of a create-table request.
+static string WireSchema(const string &schema_json) {
+	YYJsonDoc parsed(schema_json);
+	if (!parsed.Root()) {
+		throw InvalidInputException("could not parse the table schema written to the Delta log");
+	}
+	auto *doc = duckdb_yyjson::yyjson_mut_doc_new(nullptr);
+	if (!doc) {
+		throw InvalidInputException("yyjson document allocation failed");
+	}
+	duckdb_yyjson::yyjson_mut_doc_set_root(doc, WireSchemaCopy(doc, parsed.Root()));
+	size_t len = 0;
+	char *written = duckdb_yyjson::yyjson_mut_write(doc, duckdb_yyjson::YYJSON_WRITE_NOFLAG, &len);
+	duckdb_yyjson::yyjson_mut_doc_free(doc);
+	if (!written) {
+		throw InvalidInputException("yyjson schema encoding failed");
+	}
+	string result(written, len);
+	free(written);
+	return result;
+}
+
+UCAPIStagingTable UCAPI::CreateStagingTable(ClientContext &ctx, const string &catalog_name, const string &schema_name,
+                                            const string &table_name, const UCCredentials &credentials) {
+	UCAPIStagingTable result;
+	string url = StringUtil::Format("%s/api/2.1/unity-catalog/delta/v1/catalogs/%s/schemas/%s/staging-tables",
+	                                credentials.endpoint, catalog_name, schema_name);
+	string body = StringUtil::Format(R"({"name": %s})", YYJsonEncodeString(table_name));
+	UC_LOG_DEBUG(ctx, "api.CreateStagingTable %s.%s.%s", catalog_name, schema_name, table_name);
+	// A taken name comes back as a 409, and CREATE IF NOT EXISTS treats that as a no-op, so the body
+	// is parsed instead of thrown.
+	auto api_result = MakeRequest(ctx, url, credentials.token, body, false, HTTPStatusCode::Conflict_409);
+
+	YYJsonDoc doc(api_result);
+	auto *root = doc.Root();
+	auto error = CheckError(root);
+	if (error.HasError()) {
+		if (error.IsAlreadyExists()) {
+			// The one condition a caller acts on rather than reports, so it arrives as a catalog error
+			// in DuckDB's wording instead of an HTTP failure.
+			throw CatalogException::EntryAlreadyExists(CatalogType::TABLE_ENTRY, Identifier(table_name));
+		}
+		error.ThrowError(StringUtil::Format("Failed to stage table %s.%s.%s", catalog_name, schema_name, table_name));
+	}
+
+	result.table_id = TryGetStrFromObject(root, "table-id");
+	result.location = TryGetStrFromObject(root, "location");
+	auto *protocol = yyjson_obj_get(root, "required-protocol");
+	if (protocol && yyjson_is_obj(protocol)) {
+		result.min_reader_version = (int64_t)TryGetNumFromObject(protocol, "min-reader-version", false, 0);
+		result.min_writer_version = (int64_t)TryGetNumFromObject(protocol, "min-writer-version", false, 0);
+		result.reader_features = ReadStringArray(yyjson_obj_get(protocol, "reader-features"));
+		result.writer_features = ReadStringArray(yyjson_obj_get(protocol, "writer-features"));
+	}
+	result.required_properties = ReadStringMap(yyjson_obj_get(root, "required-properties"));
+	result.suggested_properties = ReadStringMap(yyjson_obj_get(root, "suggested-properties"));
+	return result;
+}
+
+void UCAPI::CreateTable(ClientContext &ctx, const string &catalog_name, const string &schema_name,
+                        const UCAPICommittedTable &table, const UCCredentials &credentials) {
+	string url = StringUtil::Format("%s/api/2.1/unity-catalog/delta/v1/catalogs/%s/schemas/%s/tables",
+	                                credentials.endpoint, catalog_name, schema_name);
+	// The protocol, properties and columns describe what was committed, not what was asked for, so the
+	// catalog cannot end up describing a table that differs from its own version 0.
+	string body = StringUtil::Format(
+	    R"({"name": %s, "location": %s, "table-type": "MANAGED", "columns": %s, "partition-columns": %s, )"
+	    R"("protocol": {"min-reader-version": %d, "min-writer-version": %d, "reader-features": %s, )"
+	    R"("writer-features": %s}, "properties": %s, "last-commit-timestamp-ms": %d})",
+	    YYJsonEncodeString(table.name), YYJsonEncodeString(table.location), WireSchema(table.schema_json),
+	    JsonStringArray(table.partition_columns), table.min_reader_version, table.min_writer_version,
+	    JsonStringArray(table.reader_features), JsonStringArray(table.writer_features), JsonStringMap(table.properties),
+	    table.last_commit_timestamp_ms);
+	UC_LOG_DEBUG(ctx, "api.CreateTable %s.%s.%s", catalog_name, schema_name, table.name);
+	auto api_result = MakeRequest(ctx, url, credentials.token, body);
+
+	YYJsonDoc doc(api_result);
+	auto error = CheckError(doc.Root());
+	if (error.HasError()) {
+		error.ThrowError(StringUtil::Format("Failed to create table %s.%s.%s", catalog_name, schema_name, table.name));
+	}
+}
+
 UCAPICommitsResult UCAPI::LoadTable(ClientContext &ctx, const string &catalog_name, const string &schema_name,
                                     const string &table_name, const UCCredentials &credentials) {
 	UCAPICommitsResult result;
@@ -292,6 +493,7 @@ UCAPICommitsResult UCAPI::LoadTable(ClientContext &ctx, const string &catalog_na
 	auto *metadata = yyjson_obj_get(root, "metadata");
 	if (metadata && yyjson_is_obj(metadata)) {
 		result.etag = TryGetStrFromObject(metadata, "etag", false);
+		result.table_uuid = TryGetStrFromObject(metadata, "table-uuid", false);
 	}
 
 	// `latest-table-version` is optional per spec but gates which staged commits are visible
@@ -436,18 +638,25 @@ UCAPITableCredentials UCAPI::GetTableCredentials(ClientContext &ctx, const strin
 		    StringUtil::Format("Failed to get table credentials for %s.%s.%s", catalog_name, schema_name, table_name));
 	}
 
-	// Parse storage-credentials array; use first entry (longest-prefix matching is a TODO)
-	auto *creds_arr = yyjson_obj_get(root, "storage-credentials");
-	if (creds_arr && yyjson_is_arr(creds_arr) && yyjson_arr_size(creds_arr) > 0) {
-		auto *cred = yyjson_arr_get_first(creds_arr);
-		auto *cfg = yyjson_obj_get(cred, "config");
-		if (cfg && yyjson_is_obj(cfg)) {
-			result.key_id = TryGetStrFromObject(cfg, "s3.access-key-id", false);
-			result.secret = TryGetStrFromObject(cfg, "s3.secret-access-key", false);
-			result.session_token = TryGetStrFromObject(cfg, "s3.session-token", false);
-		}
-	}
+	ReadStorageCredentials(root, result);
+	return result;
+}
 
+UCAPITableCredentials UCAPI::GetStagingTableCredentials(ClientContext &ctx, const string &table_id,
+                                                        const UCCredentials &credentials) {
+	UCAPITableCredentials result;
+	string url = StringUtil::Format("%s/api/2.1/unity-catalog/delta/v1/staging-tables/%s/credentials",
+	                                credentials.endpoint, table_id);
+	UC_LOG_DEBUG(ctx, "api.GetStagingTableCredentials table_id=%s", table_id);
+	auto api_result = MakeRequest(ctx, url, credentials.token);
+
+	YYJsonDoc doc(api_result);
+	auto *root = doc.Root();
+	auto error = CheckError(root);
+	if (error.HasError()) {
+		error.ThrowError(StringUtil::Format("Failed to get credentials for staging table %s", table_id));
+	}
+	ReadStorageCredentials(root, result);
 	return result;
 }
 

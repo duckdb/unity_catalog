@@ -109,6 +109,9 @@ public:
 	void DropEntry(ClientContext &context, DropInfo &info);
 	void Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback);
 	void ClearEntries();
+	//! Load again on the next lookup, keeping the entries already loaded. Tables this set handed out stay
+	//! valid, which ClearEntries() cannot promise: each one may own an attached delta database.
+	void MarkNeedsReload();
 	void OnDetach(ClientContext &context);
 	// void Checkpoint(ClientContext &context, bool force); TODO: remove/update (see definition)
 	void CheckpointTable(ClientContext &context, const string &table_name, bool force = false);

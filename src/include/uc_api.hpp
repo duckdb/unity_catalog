@@ -62,6 +62,8 @@ struct UCAPICommit {
 
 struct UCAPICommitsResult {
 	vector<UCAPICommit> commits;
+	//! JSON: metadata.table-uuid -- the id a create can be recognized by when its outcome is unclear
+	string table_uuid;
 	// Newest version the catalog has assigned (may not yet be backfilled into _delta_log/).
 	idx_t ratified_version = 0; // JSON: latest-table-version
 	string etag;
@@ -143,6 +145,36 @@ struct UCScanPlanResult {
 	string error_type;
 };
 
+//! What UC allocates for a table that is being created: where it goes, what it must be, and the id the
+//! committer and the table's own configuration are keyed on (delta.yaml `DeltaStagingTableResponse`).
+struct UCAPIStagingTable {
+	string table_id;
+	string location;
+	int64_t min_reader_version = 0;
+	int64_t min_writer_version = 0;
+	vector<string> reader_features;
+	vector<string> writer_features;
+	vector<pair<string, string>> required_properties;
+	vector<pair<string, string>> suggested_properties;
+};
+
+//! A table as it was committed, read back from its log, for registering it with UC
+//! (delta.yaml `DeltaCreateTableRequest`).
+struct UCAPICommittedTable {
+	string name;
+	string location;
+	//! The Delta schema, as the log spells it
+	string schema_json;
+	vector<string> partition_columns;
+	int64_t min_reader_version = 0;
+	int64_t min_writer_version = 0;
+	vector<string> reader_features;
+	vector<string> writer_features;
+	vector<pair<string, string>> properties;
+	//! When version 0 was committed, in epoch milliseconds, as its own commit records it
+	int64_t last_commit_timestamp_ms = 0;
+};
+
 class UCAPI {
 public:
 	// Vends temporary S3 credentials:
@@ -153,6 +185,20 @@ public:
 	                                                 const string &schema_name, const string &table_name,
 	                                                 const string &table_id, bool catalog_managed, bool write,
 	                                                 const UCCredentials &credentials);
+	// delta.yaml v1: POST /delta/v1/catalogs/{catalog}/schemas/{schema}/staging-tables
+	// Asks UC for a location and a table id to create a managed table at, plus the protocol and
+	// properties it requires. The table is not in the catalog until CreateTable registers it.
+	static UCAPIStagingTable CreateStagingTable(ClientContext &ctx, const string &catalog_name,
+	                                            const string &schema_name, const string &table_name,
+	                                            const UCCredentials &credentials);
+	// delta.yaml v1: POST /delta/v1/catalogs/{catalog}/schemas/{schema}/tables
+	// Registers a staged table that has its version 0 written, describing it as the log does.
+	static void CreateTable(ClientContext &ctx, const string &catalog_name, const string &schema_name,
+	                        const UCAPICommittedTable &table, const UCCredentials &credentials);
+	// delta.yaml v1: GET /delta/v1/staging-tables/{table_id}/credentials
+	// Always READ_WRITE: the caller writes the table's version 0.
+	static UCAPITableCredentials GetStagingTableCredentials(ClientContext &ctx, const string &table_id,
+	                                                        const UCCredentials &credentials);
 	static string GetDefaultSchema(ClientContext &ctx, const UCCredentials &credentials);
 	static vector<string> GetCatalogs(ClientContext &ctx, Catalog &catalog, const UCCredentials &credentials);
 	static vector<UCAPITable> GetTables(ClientContext &ctx, Catalog &catalog, const string &schema,
