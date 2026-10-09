@@ -30,7 +30,7 @@ jobs:
     needs: prepare
     with:
       extension_name: &ext_name unity_catalog
-      duckdb_version: &duckdb_ref 5070de3585e846718fac121b5b149f4236e6a58a # v2.0-cyanoptera 2026-10-06 pin
+      duckdb_version: &duckdb_ref c29eca15a2f119e9c9d958fcd54542ba9171da76 # v2.0-cyanoptera 2026-10-09 pin
       ci_tools_version: &ci_tools_ref main
       runners: ${{ needs.prepare.outputs.runners }}
       exclude_archs: wasm_mvp;wasm_eh;wasm_threads;windows_amd64_mingw;windows_amd64;linux_arm64;linux_amd64_musl
