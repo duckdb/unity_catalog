@@ -7,8 +7,10 @@ in sibling modules (e.g. server.py: the OSS UC server resource).
 Imported by drivers as `from uc import uctl` / `from uc.server import uc_server`.
 """
 
+import json
 import os
 import subprocess
+import urllib.request
 from pathlib import Path
 
 from ducktest import ProvisionFailed
@@ -50,3 +52,38 @@ def plain_table_location(uc_server, table, catalog="duck", schema="plain"):
             "staged into -- the container was attached rather than started here"
         )
     return Path(uc_server.data_dir) / catalog / schema / table
+
+
+def register_external_table(endpoint, table, location, columns, properties=None, catalog="duck", schema="plain"):
+    """Register an EXTERNAL Delta table over REST, for column types `uctl` cannot state.
+
+    `columns` are (name, type_text, type_name, type_json) tuples, in position order.
+    """
+    body = {
+        "name": table,
+        "catalog_name": catalog,
+        "schema_name": schema,
+        "table_type": "EXTERNAL",
+        "data_source_format": "DELTA",
+        "storage_location": str(location),
+        "properties": properties or {},
+        "columns": [
+            {
+                "name": name,
+                "type_text": type_text,
+                "type_name": type_name,
+                "type_json": type_json,
+                "position": position,
+                "nullable": True,
+            }
+            for position, (name, type_text, type_name, type_json) in enumerate(columns)
+        ],
+    }
+    request = urllib.request.Request(
+        f"{endpoint}/api/2.1/unity-catalog/tables",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)

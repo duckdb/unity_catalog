@@ -63,12 +63,30 @@ Local OSS (`oss_local/`):
   `test_concurrent_rw.py` runs N racing writers (`INSERT … max(id)+1`, retrying on version
   conflict) + M readers, asserting the gapless commit invariant `max(id) == count(*) == version` at
   every snapshot.
+- **VARIANT columns**, on Spark-written fixtures (`data/variant_*`) registered over REST:
+  duckdb-delta refuses `CREATE TABLE` with a VARIANT column, and `uctl` cannot state nested types.
+  - `variant_read.test`, once per unshredded and shredded fixture: listing, values of every shape,
+    path extraction, filters on variant paths, time travel, the scan-plan fallback, re-attach.
+  - `variant_write.test`: every payload shape (object, nested, scalar, array, SQL NULL) survives a
+    duckdb-delta write/read round-trip and a DETACH/ATTACH, next to the Spark rows; and the first
+    write into an empty table (`data/variant_empty`: a log with protocol and metadata only).
 
 Databricks (live):
 
 - CMT delta read, column-mapped read, time-travel, attach, and a TPC-H read pass (`tpch.test` —
   hand-written scans / pushdown / join vs the premade sf0.01 tables); write + write-CMT under
   `write_tests/`.
+- VARIANT read (`variant.test`) of a **Spark-written** column: the payloads
+  `oss_local/variant_write.test` writes, with Databricks' column types and on-disk encoding.
+  `variant_shredded.test` reads a shredded table.
+
+Server-free (`functions/`):
+
+- The type text map a column falls back to without `type_json` (`test_uc_type_mapping.cpp`, tag
+  `[uc][types]`): scalars, `decimal(p,s)`, nested `array`/`map`/`struct` spellings, and malformed text.
+- VARIANT from the mock catalog (`test_variant_types.py`): listing from `type_json` and from text
+  alone, a map of variants, log reads with and without the shredding feature, time travel, a table
+  without a log, and scan-plan reads.
 
 ## Testing gaps / TODO
 

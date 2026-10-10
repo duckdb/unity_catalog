@@ -1,0 +1,80 @@
+# name: test/databricks/variant.test
+# description: read a Spark-written VARIANT column from Databricks Unity Catalog -- the live twin of the top-level writes in test/oss_local/variant_write.test, which have duckdb-delta as the writer.
+# group: [databricks]
+
+#
+# Table (test/databricks/data/id_variant.sql): id INT, data VARIANT, 7 rows, one per payload
+# shape (object, nested object, string, int, bool, array, variant null).
+#
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+require-env CATALOG
+
+require-env SCHEMA
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}');
+
+# -----------------------------------------------------------------------------
+# Column type
+#
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE unity.{SCHEMA}.id_variant);
+----
+id	INTEGER
+data	VARIANT
+
+# -----------------------------------------------------------------------------
+# Spark-written payloads read back
+#
+
+query II
+SELECT id, data FROM unity.{SCHEMA}.id_variant ORDER BY id;
+----
+1	{'tag': one, 'value': 1}
+2	{'nested': {'deep': [1, 2, 3]}}
+3	plain string
+4	42
+5	true
+6	[a, 1, false, {'k': v}]
+7	NULL
+
+query II
+SELECT id, variant_typeof(data) FROM unity.{SCHEMA}.id_variant ORDER BY id;
+----
+1	OBJECT(tag, value)
+2	OBJECT(nested)
+3	VARCHAR
+4	INT32
+5	BOOL_TRUE
+6	ARRAY(4)
+7	VARIANT_NULL
+
+query III
+SELECT (data.value)::INTEGER, data.tag::VARCHAR, (data.nested.deep[2])::INTEGER
+FROM unity.{SCHEMA}.id_variant WHERE id IN (1, 2) ORDER BY id;
+----
+1	one	NULL
+NULL	NULL	2

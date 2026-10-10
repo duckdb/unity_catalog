@@ -345,15 +345,18 @@ void TableInformation::MarkDirty(const lock_guard<mutex> &_attach_lock) {
 	is_dirty = true;
 }
 
+bool TableInformation::HasDeltaFeature(const string &feature) const {
+	auto it = table_data->properties.find("delta.feature." + feature);
+	return it != table_data->properties.end() && it->second == "supported";
+}
+
 bool TableInformation::IsCatalogManaged() const {
 	// Databricks preview property (pre-GA)
-	auto it = table_data->properties.find("delta.feature.catalogOwned-preview");
-	if (it != table_data->properties.end() && it->second == "supported") {
+	if (HasDeltaFeature("catalogOwned-preview")) {
 		return true;
 	}
 	// Databricks GA + OSS UC v0.5+: set for tables that use the Delta CMT protocol
-	it = table_data->properties.find("delta.feature.catalogManaged");
-	return it != table_data->properties.end() && it->second == "supported";
+	return HasDeltaFeature("catalogManaged");
 }
 
 static Value BuildLogTailFromCommits(const UCAPICommitsResult &commits, const string &storage_location) {
