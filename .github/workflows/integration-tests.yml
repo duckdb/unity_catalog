@@ -163,7 +163,7 @@ jobs:
           path: build/${{ env.BUILD_KIND }}
 
       - name: Restore exec bits
-        run: chmod +x build/$BUILD_KIND/test/unittest build/$BUILD_KIND/duckdb
+        run: chmod +x build/$BUILD_KIND/test/unittest build/$BUILD_KIND/test/unittest_cpp build/$BUILD_KIND/duckdb
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v5

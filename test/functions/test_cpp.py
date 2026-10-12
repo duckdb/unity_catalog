@@ -21,13 +21,14 @@ _KINDS = ("debug", "reldebug", "relassert", "release")
 
 
 def _cpp_binary():
+    # Executable, not merely present: a CI artifact download drops the exec bit.
     build_dir = os.environ.get("BUILD_DIR") or os.environ.get("DUCKDB_BUILD_DIR")
     if build_dir:
         cand = _REPO / build_dir / "test" / "unittest_cpp"
-        return cand if cand.exists() else None
+        return cand if os.access(cand, os.X_OK) else None
     for kind in _KINDS:
         cand = _REPO / "build" / kind / "test" / "unittest_cpp"
-        if cand.exists():
+        if os.access(cand, os.X_OK):
             return cand
     return None
 
@@ -42,7 +43,7 @@ _BIN = _cpp_binary()
 if _BIN is None:
 
     def test_unittest_cpp_present():
-        pytest.skip("unittest_cpp not built; run `dbuild` or `cmake --build <dir> --target unittest_cpp`")
+        pytest.skip("unittest_cpp not built or not executable; `cmake --build <dir> --target unittest_cpp`")
 
 else:
 
