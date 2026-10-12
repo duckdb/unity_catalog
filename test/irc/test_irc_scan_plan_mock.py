@@ -191,8 +191,7 @@ class MockUC:
         )
 
     def query(self, sql, alias="unity", scan_plan="true"):
-        loads = load_statements(build_dir(), ("unity_catalog", "parquet"))
-        return _run_sql(f"{loads} {self.attach_sql(alias, scan_plan)} USE {alias}; {sql}")
+        return _run_sql(f"{load_statements(build_dir())} {self.attach_sql(alias, scan_plan)} USE {alias}; {sql}")
 
     def plan_requests(self):
         return [x for x in self.requests if x["path"].endswith("/plan")]
