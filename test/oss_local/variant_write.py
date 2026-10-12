@@ -2,8 +2,7 @@
 
 Registers a copy of the top-level, unshredded, shredded, shredded top-level and empty fixtures (the
 INSERTs never touch the committed tree) over REST, because `uctl` cannot state a nested type.
-`CREATE TABLE` is not how these start: this extension cannot create a table through the catalog, and
-duckdb-delta refuses a VARIANT column in one.
+`CREATE TABLE` is not how these start: this extension cannot create a table through the catalog.
 """
 
 import os

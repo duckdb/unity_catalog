@@ -63,8 +63,8 @@ Local OSS (`oss_local/`):
   `test_concurrent_rw.py` runs N racing writers (`INSERT … max(id)+1`, retrying on version
   conflict) + M readers, asserting the gapless commit invariant `max(id) == count(*) == version` at
   every snapshot.
-- **VARIANT columns**, on Spark-written fixtures (`data/variant_*`) registered over REST:
-  duckdb-delta refuses `CREATE TABLE` with a VARIANT column, and `uctl` cannot state nested types.
+- **VARIANT columns**, on Spark-written fixtures (`data/variant_*`) registered over REST: this
+  extension cannot `CREATE TABLE` through the catalog, and `uctl` cannot state nested types.
   - `variant_read.test`, once per unshredded and shredded fixture: listing, values of every shape,
     path extraction, filters on variant paths, time travel, the scan-plan fallback, re-attach.
   - `variant_write.test`: every payload shape (object, nested, scalar, array, SQL NULL) survives a

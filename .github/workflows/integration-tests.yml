@@ -132,7 +132,7 @@ jobs:
 
       - name: Local suite (-m oss_local)
         # LD_LIBRARY_PATH: unittest/duckdb dynamically link libduckdb.so via an ABSOLUTE runpath.
-        run: LD_LIBRARY_PATH="$PWD/build/$BUILD_KIND/src" BUILD_DIR=build/$BUILD_KIND uv run pytest -m oss_local -n0 -s
+        run: LD_LIBRARY_PATH="$PWD/build/$BUILD_KIND/src" BUILD_DIR=build/$BUILD_KIND uv run pytest -n0 -s
 
   # ---------------------------------------------------------------------------
   # Cloud: live Databricks. `environment: cloud` (required reviewer) gates each run -- an admin must
