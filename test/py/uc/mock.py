@@ -10,13 +10,14 @@ keeps credential vending out of it.
 
 import http.server
 import json
-import os
 import re
 import subprocess
 import threading
 from pathlib import Path
 
 import pytest
+
+from uc import build_dir, load_statements
 
 CATALOG = "duck"
 
@@ -95,9 +96,9 @@ class MockUnityCatalog:
 
 
 def duckdb_bin():
-    binary = _REPO / os.environ.get("DUCKDB_BUILD_DIR", "build/debug") / "duckdb"
+    binary = build_dir() / "duckdb"
     if not binary.exists():
-        pytest.skip(f"duckdb CLI not built at {binary} (set DUCKDB_BUILD_DIR)")
+        pytest.skip(f"duckdb CLI not built at {binary} (set BUILD_DIR)")
     return str(binary)
 
 
@@ -106,6 +107,7 @@ def run(mock, sql, attach_options=""):
     stripped). stdout holds only what `sql` prints: the attach's own output is discarded, its errors are
     not."""
     prelude = (
+        f"{load_statements(build_dir())}"
         # The listing fans out across the thread pool and is intermittently racy.
         "SET threads TO 1;"
         f"CREATE SECRET (TYPE UNITY_CATALOG, TOKEN 'x', ENDPOINT '{mock.endpoint}', AWS_REGION 'us-east-2');"

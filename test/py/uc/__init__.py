@@ -21,6 +21,23 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_DIR = REPO_ROOT / "scripts" / "oss_uc_image"
 UCTL = os.environ.get("UC_UCTL", str(SCRIPTS_DIR / "uctl"))
 
+# Locally-built extensions a CLI test LOADs by full path under `-unsigned`. A bare `LOAD name` resolves
+# through the build's local extension repository, which the CI test job does not receive (it gets the
+# loadables only), and the shell has no extension linked in.
+EXTENSIONS = ("parquet", "httpfs", "delta", "unity_catalog")
+
+
+def build_dir():
+    """The build tree CLI tests run against: $BUILD_DIR, else $DUCKDB_BUILD_DIR, else build/debug."""
+    return REPO_ROOT / os.environ.get("BUILD_DIR", os.environ.get("DUCKDB_BUILD_DIR", "build/debug"))
+
+
+def load_statements(build_dir, extensions=EXTENSIONS):
+    """`LOAD '<build_dir>/extension/<name>/<name>.duckdb_extension';` for each extension, one per line."""
+    return "\n".join(
+        f"LOAD '{Path(build_dir) / 'extension' / name / f'{name}.duckdb_extension'}';" for name in extensions
+    )
+
 
 def uctl(*args, check=True):
     """Run the image kit's `uctl <args>` (wraps `docker exec <container> bin/uc ...`).
