@@ -4,7 +4,7 @@ Default behaviour: if `unittest_cpp` is present under the resolved build dir, ea
 becomes a pytest item that runs it and asserts a clean exit; if the binary isn't built, one skipped
 item says how. The binary is server-free (no container, no creds) -- it's the pure-logic unit
 coverage (SerializeFiltersToIRC, UCPositionDeleteFilter) that no sqllogictest .test can drive in
-isolation. Build it with `dbuild` (which now targets it) or `cmake --build <dir> --target unittest_cpp`.
+isolation. It is part of the default build; `cmake --build <dir> --target unittest_cpp` builds it alone.
 
 Binary resolution mirrors how the driver resolves the base `unittest` binary: $BUILD_DIR (or
 $DUCKDB_BUILD_DIR) wins; otherwise probe the usual build kinds under build/<kind>/test/.

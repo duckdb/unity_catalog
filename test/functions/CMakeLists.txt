@@ -5,17 +5,20 @@
 # more generic, greppable unittest_cpp): an executable built entirely from the
 # extension repo, so there is NO edit to the vendored duckdb submodule. It runs
 # ONLY these C++ Catch cases -- the base `unittest` binary still owns every
-# sqllogictest .test/.py file. Build + run on demand: cmake --build
-# build/<variant> --target unittest_cpp build/<variant>/test/unittest_cpp # all
-# cases build/<variant>/test/unittest_cpp "[uc][irc]" # one tag
+# sqllogictest .test/.py file. Part of the default build, so CI's pytest run
+# picks it up (test/functions/test_cpp.py); on its own:
+# ~~~
+# cmake --build build/<variant> --target unittest_cpp
+# build/<variant>/test/unittest_cpp              # all cases
+# build/<variant>/test/unittest_cpp "[uc][irc]"  # one tag
+# ~~~
 include_directories(${CMAKE_SOURCE_DIR}/test/include)
 include_directories(${CMAKE_SOURCE_DIR}/third_party/catch)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../src/include)
 
 add_executable(
-  unittest_cpp EXCLUDE_FROM_ALL
-  main.cpp test_uc_irc_expression.cpp test_uc_position_delete_filter.cpp
-  test_uc_type_mapping.cpp)
+  unittest_cpp main.cpp test_uc_irc_expression.cpp
+               test_uc_position_delete_filter.cpp test_uc_type_mapping.cpp)
 set_target_properties(unittest_cpp PROPERTIES RUNTIME_OUTPUT_DIRECTORY
                                               ${CMAKE_BINARY_DIR}/test)
 

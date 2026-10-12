@@ -92,6 +92,7 @@ jobs:
           name: ${{ env.BUILD_KIND }}
           path: |
             build/${{ env.BUILD_KIND }}/test/unittest
+            build/${{ env.BUILD_KIND }}/test/unittest_cpp
             build/${{ env.BUILD_KIND }}/duckdb
             build/${{ env.BUILD_KIND }}/extension/**/*.duckdb_extension
             build/${{ env.BUILD_KIND }}/src/libduckdb.so
@@ -117,9 +118,9 @@ jobs:
           name: ${{ env.BUILD_KIND }}
           path: build/${{ env.BUILD_KIND }}
 
-      # upload-artifact drops the executable bit; restore it on the two binaries (extensions are LOADed, not run).
+      # upload-artifact drops the executable bit; restore it on the binaries (extensions are LOADed, not run).
       - name: Restore exec bits
-        run: chmod +x build/$BUILD_KIND/test/unittest build/$BUILD_KIND/duckdb
+        run: chmod +x build/$BUILD_KIND/test/unittest build/$BUILD_KIND/test/unittest_cpp build/$BUILD_KIND/duckdb
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
@@ -130,7 +131,7 @@ jobs:
       - name: Pull OSS Unity Catalog image (fail fast if unpullable)
         run: docker pull "$DUCKTEST_UC_IMAGE"
 
-      - name: Local suite (-m oss_local)
+      - name: Local suite (everything but Databricks)
         # LD_LIBRARY_PATH: unittest/duckdb dynamically link libduckdb.so via an ABSOLUTE runpath.
         run: LD_LIBRARY_PATH="$PWD/build/$BUILD_KIND/src" BUILD_DIR=build/$BUILD_KIND uv run pytest -n0 -s
 
