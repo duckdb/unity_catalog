@@ -261,9 +261,10 @@ void TableInformation::RefreshCredentials(ClientContext &context) {
 
 string TableInformation::AttachedCatalogName() const {
 	auto &schema_name = table_data->schema_name;
-	auto &catalog_name = table_data->catalog_name;
 	auto &name = table_data->name;
-	return "__unity_catalog_internal_" + catalog_name + "_" + schema_name + "_" + name;
+	// Named after the attachment, not the Unity Catalog: one catalog can be attached twice, each with an internal
+	// database of its own, so attach by identifier
+	return "__unity_catalog_internal_" + catalog.GetName().GetIdentifierName() + "_" + schema_name + "_" + name;
 }
 
 void TableInformation::InternalDetach(ClientContext &context, const lock_guard<mutex> &_attach_lock) {
@@ -375,8 +376,8 @@ static Value BuildLogTailFromCommits(const UCAPICommitsResult &commits, const st
 
 	return Value::LIST(
 	    LogicalType::STRUCT({make_pair("version", LogicalType::BIGINT), make_pair("timestamp", LogicalType::BIGINT),
-	                         make_pair("file_name", LogicalType::VARCHAR), make_pair("file_size", LogicalType::BIGINT),
-	                         make_pair("file_modification_timestamp", LogicalType::BIGINT)}),
+		                     make_pair("file_name", LogicalType::VARCHAR), make_pair("file_size", LogicalType::BIGINT),
+		                     make_pair("file_modification_timestamp", LogicalType::BIGINT)}),
 	    commit_values);
 }
 
