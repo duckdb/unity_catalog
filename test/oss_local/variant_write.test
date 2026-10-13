@@ -1,0 +1,246 @@
+# name: test/oss_local/variant_write.test
+# description: VARIANT columns written through the UC catalog path by duckdb-delta, into Spark-created tables, then read back. Paired variant_write.py registers a copy of data/variant_toplevel, data/variant_unshredded, data/variant_shredded, data/variant_shredded_toplevel and data/variant_empty.
+# group: [oss_local]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_SCHEMA
+
+require-env UC_TEST_TABLE
+
+require-env UC_TEST_TABLE_LOCATION
+
+require-env UC_TEST_TABLE_NESTED
+
+require-env UC_TEST_TABLE_SHREDDED
+
+require-env UC_TEST_TABLE_SHREDDED_TOPLEVEL
+
+require-env UC_TEST_TABLE_SHREDDED_TOPLEVEL_LOCATION
+
+require-env UC_TEST_TABLE_EMPTY
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+statement ok
+USE duck.{UC_TEST_SCHEMA};
+
+# -----------------------------------------------------------------------------
+# Top-level variants
+#
+# Ids 13-19 carry one payload per value shape; test/databricks/variant.test reads the same payloads
+# written by Spark.
+#
+
+# Object keys are written pre-sorted: DuckDB renders a variant object with its keys in sorted order.
+statement ok
+INSERT INTO {UC_TEST_TABLE} (id, v) VALUES
+    (13, {'tag': 'one', 'value': 1}::VARIANT),
+    (14, {'nested': {'deep': [1, 2, 3]}}::VARIANT),
+    (15, 'plain string'::VARIANT),
+    (16, 42::VARIANT),
+    (17, true::VARIANT),
+    (18, ['a'::VARIANT, 1, false, {'k': 'v'}]::VARIANT),
+    (19, NULL);
+
+query II
+SELECT id, v FROM {UC_TEST_TABLE} WHERE id > 12 ORDER BY id;
+----
+13	{'tag': one, 'value': 1}
+14	{'nested': {'deep': [1, 2, 3]}}
+15	plain string
+16	42
+17	true
+18	[a, 1, false, {'k': v}]
+19	NULL
+
+# variant_typeof answers VARIANT_NULL for a SQL NULL too.
+query II
+SELECT id, variant_typeof(v) FROM {UC_TEST_TABLE} WHERE id > 12 ORDER BY id;
+----
+13	OBJECT(tag, value)
+14	OBJECT(nested)
+15	VARCHAR
+16	INT32
+17	BOOL_TRUE
+18	ARRAY(4)
+19	VARIANT_NULL
+
+query III
+SELECT (v.value)::INTEGER, v.tag::VARCHAR, variant_extract(v, 'value') FROM {UC_TEST_TABLE} WHERE id = 13;
+----
+1	one	1
+
+query II
+SELECT (v.nested.deep[2])::INTEGER, variant_typeof(v.nested.deep) FROM {UC_TEST_TABLE} WHERE id = 14;
+----
+2	ARRAY(3)
+
+# The Spark rows are untouched, and a filter spans both writers' files.
+query I
+SELECT list(id ORDER BY id) FROM {UC_TEST_TABLE} WHERE v.a::INTEGER = 1 OR v.value::INTEGER = 1;
+----
+[1, 13]
+
+query I
+SELECT count(*) FROM {UC_TEST_TABLE} AT (VERSION => 1);
+----
+2
+
+# The table does not enable the variantShredding feature, so a writer may not shred into it.
+query I
+SELECT count(*) FROM parquet_metadata('{UC_TEST_TABLE_LOCATION}/*.parquet') WHERE path_in_schema LIKE '%typed_value%';
+----
+0
+
+# -----------------------------------------------------------------------------
+# Into a table that enables shredding, top-level variants only
+#
+# data/variant_shredded_toplevel sets delta.enableVariantShredding, so DuckDB shreds, as Spark did.
+#
+
+statement ok
+INSERT INTO {UC_TEST_TABLE_SHREDDED_TOPLEVEL} (id, v) VALUES
+    (73, {'a': 15, 'b': 'w'}::VARIANT),
+    (74, {'a': 20, 'b': 'q'}::VARIANT);
+
+query I
+SELECT list(DISTINCT path_in_schema ORDER BY path_in_schema) FROM parquet_metadata('{UC_TEST_TABLE_SHREDDED_TOPLEVEL_LOCATION}/duckdb-*.parquet') WHERE path_in_schema LIKE '%typed_value%';
+----
+['v, typed_value, a, typed_value', 'v, typed_value, a, value', 'v, typed_value, b, typed_value', 'v, typed_value, b, value']
+
+query III
+SELECT id, v, variant_typeof(v) FROM {UC_TEST_TABLE_SHREDDED_TOPLEVEL} ORDER BY id;
+----
+70	{'a': 1, 'b': x}	OBJECT(a, b)
+71	{'a': 5, 'b': y}	OBJECT(a, b)
+72	{'a': 10, 'b': z}	OBJECT(a, b)
+73	{'a': 15, 'b': w}	OBJECT(a, b)
+74	{'a': 20, 'b': q}	OBJECT(a, b)
+
+query III
+SELECT id, v.a::INTEGER, v.b::VARCHAR FROM {UC_TEST_TABLE_SHREDDED_TOPLEVEL} WHERE id IN (70, 73) ORDER BY id;
+----
+70	1	x
+73	15	w
+
+# Spans Spark's and DuckDB's files.
+query I
+SELECT list(id ORDER BY id) FROM {UC_TEST_TABLE_SHREDDED_TOPLEVEL} WHERE v.a::INTEGER >= 10;
+----
+[72, 73, 74]
+
+# -----------------------------------------------------------------------------
+# First write into an empty table
+#
+# data/variant_empty has protocol and metadata only, so DuckDB writes every data file.
+#
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE {UC_TEST_TABLE_EMPTY});
+----
+id	INTEGER
+data	VARIANT
+
+query I
+SELECT count(*) FROM {UC_TEST_TABLE_EMPTY};
+----
+0
+
+statement ok
+INSERT INTO {UC_TEST_TABLE_EMPTY} VALUES
+    (1, {'tag': 'one', 'value': 1}::VARIANT),
+    (2, 42::VARIANT),
+    (3, NULL);
+
+query III
+SELECT id, data, variant_typeof(data) FROM {UC_TEST_TABLE_EMPTY} ORDER BY id;
+----
+1	{'tag': one, 'value': 1}	OBJECT(tag, value)
+2	42	INT32
+3	NULL	VARIANT_NULL
+
+query I
+SELECT data.tag::VARCHAR FROM {UC_TEST_TABLE_EMPTY} WHERE data.value::INTEGER = 1;
+----
+one
+
+# -----------------------------------------------------------------------------
+# Re-attach: the writes are visible to a fresh log read
+#
+
+statement ok
+USE memory;
+
+statement ok
+DETACH duck;
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+query II
+SELECT count(*), count(*) FILTER (id > 12) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE};
+----
+9	7
+
+query II
+SELECT id, variant_typeof(v) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE} WHERE id IN (13, 19) ORDER BY id;
+----
+13	OBJECT(tag, value)
+19	VARIANT_NULL
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_EMPTY});
+----
+id	INTEGER
+data	VARIANT
+
+query II
+SELECT id, variant_typeof(data) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_EMPTY} ORDER BY id;
+----
+1	OBJECT(tag, value)
+2	INT32
+3	VARIANT_NULL
+
+query II
+SELECT list(id ORDER BY id), list(v.b::VARCHAR ORDER BY id) FROM duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_SHREDDED_TOPLEVEL} WHERE v.a::INTEGER >= 10;
+----
+[72, 73, 74]	[z, w, q]
+
+# -----------------------------------------------------------------------------
+# Variants nested in a struct and a list
+#
+# duckdb-delta refuses these until the duckdb parquet writer can write a variant below the root.
+# Last in the file: after a failed INSERT, DETACH of the catalog fails with "database not found".
+#
+
+statement error
+INSERT INTO duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_NESTED} VALUES
+    (17, NULL, {'tag': 't17', 'v': {'k': 'v'}::VARIANT}, [1::VARIANT, 'x'::VARIANT]);
+----
+Delta INSERT does not support column 's' with a VARIANT nested in a STRUCT yet
+
+# The shredded table has struct and list columns too, so even a top-level-only INSERT is refused.
+statement error
+INSERT INTO duck.{UC_TEST_SCHEMA}.{UC_TEST_TABLE_SHREDDED} (id, v) VALUES
+    (13, {'a': 13, 'b': 'w'}::VARIANT),
+    (14, 44::VARIANT);
+----
+Delta INSERT does not support column 's' with a VARIANT nested in a STRUCT yet

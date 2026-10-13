@@ -27,12 +27,13 @@ Runs the BUILT duckdb CLI (its ABI matches the locally-built extension; pip `duc
 
 import http.server
 import json
-import os
 import subprocess
 import threading
 from pathlib import Path
 
 import pytest
+
+from uc import build_dir, load_statements
 
 REPO = Path(__file__).resolve().parents[2]  # test/irc/ -> repo root
 
@@ -45,10 +46,9 @@ ROWS_PER_FILE = 10
 
 
 def _duckdb_bin():
-    build_dir = os.environ.get("BUILD_DIR") or os.environ.get("DUCKDB_BUILD_DIR", "build/debug")
-    binary = REPO / build_dir / "duckdb"
+    binary = build_dir() / "duckdb"
     if not binary.exists():
-        pytest.skip(f"duckdb CLI not built at {binary} (set DUCKDB_BUILD_DIR)")
+        pytest.skip(f"duckdb CLI not built at {binary} (set BUILD_DIR)")
     return str(binary)
 
 
@@ -191,7 +191,7 @@ class MockUC:
         )
 
     def query(self, sql, alias="unity", scan_plan="true"):
-        return _run_sql(f"LOAD unity_catalog; LOAD parquet; {self.attach_sql(alias, scan_plan)} USE {alias}; {sql}")
+        return _run_sql(f"{load_statements(build_dir())} {self.attach_sql(alias, scan_plan)} USE {alias}; {sql}")
 
     def plan_requests(self):
         return [x for x in self.requests if x["path"].endswith("/plan")]

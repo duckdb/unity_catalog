@@ -40,7 +40,7 @@ else()
 endif()
 
 # C++ (Catch) unit tests for pure logic no sqllogictest .test can drive in
-# isolation. Standalone `unittest_cpp` runner, built on demand -- see
+# isolation. Standalone `unittest_cpp` runner, built with the extension -- see
 # test/functions/CMakeLists.txt.
 if(BUILD_UNITTESTS AND NOT EMSCRIPTEN)
   add_subdirectory(test/functions)

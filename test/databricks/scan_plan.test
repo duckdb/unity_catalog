@@ -57,6 +57,13 @@ SELECT count(*) FROM scan_plan_days_managed;
 ----
 50
 
+# A failed /plan latches the attach onto the Delta fallback for 15 minutes, and later queries then
+# skip planning without a trace. Surface the failure here, where its message is still in the log.
+query I
+SELECT message FROM duckdb_logs() WHERE message LIKE 'api-irc.PlanTableScan%falling back to Delta%';
+----
+
+
 # -----------------------------------------------------------------------------
 # Filter pushdown — single day (EQ expression, fully serialized)
 #
@@ -76,6 +83,12 @@ SELECT min(id), max(id) FROM scan_plan_days_managed WHERE day = 'Mon';
 ----
 1	10
 
+# Still planning, not fallen back (see the first check).
+query I
+SELECT message FROM duckdb_logs() WHERE message LIKE 'api-irc.PlanTableScan%falling back to Delta%';
+----
+
+
 # -----------------------------------------------------------------------------
 # Filter pushdown — compound predicate with residual
 #
@@ -93,6 +106,12 @@ query I
 SELECT count(*) FROM scan_plan_days_managed WHERE day = 'Mon' AND id % 2 = 0;
 ----
 5
+
+# Still planning, not fallen back (see the first check).
+query I
+SELECT message FROM duckdb_logs() WHERE message LIKE 'api-irc.PlanTableScan%falling back to Delta%';
+----
+
 
 # Exactly one plan call for the query. The pruning assertion below counts only results that
 # pruned, so on its own it would pass even if we called /plan repeatedly.

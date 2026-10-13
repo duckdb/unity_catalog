@@ -10,13 +10,14 @@ keeps credential vending out of it.
 
 import http.server
 import json
-import os
 import re
 import subprocess
 import threading
 from pathlib import Path
 
 import pytest
+
+from uc import build_dir, load_statements
 
 CATALOG = "duck"
 
@@ -39,9 +40,10 @@ def delta_table(name, location, columns, *, schema="plain"):
 
 class MockUnityCatalog:
     """Serves `tables`, each listed under its own schema. `schemas` defaults to the tables' schemas, in
-    order; the first is the default schema `run` attaches with."""
+    order; the first is the default schema `run` attaches with. `plan(path) -> dict` answers the POSTs
+    of an IRC scan plan, for a catalog attached with `USE_IRC_SCAN_PLAN`."""
 
-    def __init__(self, tables, schemas=None):
+    def __init__(self, tables, schemas=None, plan=None):
         self.requests = []
         self.schemas = list(schemas or dict.fromkeys(t["schema_name"] for t in tables))
         outer = self
@@ -60,6 +62,17 @@ class MockUnityCatalog:
                     body = {"tables": [t for t in tables if f"schema_name={t['schema_name']}" in self.path]}
                 else:
                     body = {}
+                self._reply(body)
+
+            def do_POST(self):
+                outer.requests.append(self.path)
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                if plan is None:
+                    self.send_error(404)
+                    return
+                self._reply(plan(self.path))
+
+            def _reply(self, body):
                 payload = json.dumps(body).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -83,21 +96,22 @@ class MockUnityCatalog:
 
 
 def duckdb_bin():
-    binary = _REPO / os.environ.get("DUCKDB_BUILD_DIR", "build/debug") / "duckdb"
+    binary = build_dir() / "duckdb"
     if not binary.exists():
-        pytest.skip(f"duckdb CLI not built at {binary} (set DUCKDB_BUILD_DIR)")
+        pytest.skip(f"duckdb CLI not built at {binary} (set BUILD_DIR)")
     return str(binary)
 
 
-def run(mock, sql):
+def run(mock, sql, attach_options=""):
     """Attach the mock catalog as `unity`, run `sql` in list mode, and return (result, stdout with colour
     stripped). stdout holds only what `sql` prints: the attach's own output is discarded, its errors are
     not."""
     prelude = (
+        f"{load_statements(build_dir())}"
         # The listing fans out across the thread pool and is intermittently racy.
         "SET threads TO 1;"
         f"CREATE SECRET (TYPE UNITY_CATALOG, TOKEN 'x', ENDPOINT '{mock.endpoint}', AWS_REGION 'us-east-2');"
-        f"ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, DEFAULT_SCHEMA '{mock.schemas[0]}');"
+        f"ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, DEFAULT_SCHEMA '{mock.schemas[0]}'{attach_options});"
     )
     quiet_prelude = ["-cmd", ".output /dev/null", "-cmd", prelude, "-cmd", ".output"]
     result = subprocess.run(

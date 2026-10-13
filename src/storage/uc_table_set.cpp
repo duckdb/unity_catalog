@@ -261,9 +261,10 @@ void TableInformation::RefreshCredentials(ClientContext &context) {
 
 string TableInformation::AttachedCatalogName() const {
 	auto &schema_name = table_data->schema_name;
-	auto &catalog_name = table_data->catalog_name;
 	auto &name = table_data->name;
-	return "__unity_catalog_internal_" + catalog_name + "_" + schema_name + "_" + name;
+	// Named after the attachment, not the Unity Catalog: one catalog can be attached twice, each with an internal
+	// database of its own, so attach by identifier
+	return "__unity_catalog_internal_" + catalog.GetName().GetIdentifierName() + "_" + schema_name + "_" + name;
 }
 
 void TableInformation::InternalDetach(ClientContext &context, const lock_guard<mutex> &_attach_lock) {
@@ -345,15 +346,18 @@ void TableInformation::MarkDirty(const lock_guard<mutex> &_attach_lock) {
 	is_dirty = true;
 }
 
+bool TableInformation::HasDeltaFeature(const string &feature) const {
+	auto it = table_data->properties.find("delta.feature." + feature);
+	return it != table_data->properties.end() && it->second == "supported";
+}
+
 bool TableInformation::IsCatalogManaged() const {
 	// Databricks preview property (pre-GA)
-	auto it = table_data->properties.find("delta.feature.catalogOwned-preview");
-	if (it != table_data->properties.end() && it->second == "supported") {
+	if (HasDeltaFeature("catalogOwned-preview")) {
 		return true;
 	}
 	// Databricks GA + OSS UC v0.5+: set for tables that use the Delta CMT protocol
-	it = table_data->properties.find("delta.feature.catalogManaged");
-	return it != table_data->properties.end() && it->second == "supported";
+	return HasDeltaFeature("catalogManaged");
 }
 
 static Value BuildLogTailFromCommits(const UCAPICommitsResult &commits, const string &storage_location) {

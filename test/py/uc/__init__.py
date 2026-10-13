@@ -7,8 +7,10 @@ in sibling modules (e.g. server.py: the OSS UC server resource).
 Imported by drivers as `from uc import uctl` / `from uc.server import uc_server`.
 """
 
+import json
 import os
 import subprocess
+import urllib.request
 from pathlib import Path
 
 from ducktest import ProvisionFailed
@@ -18,6 +20,23 @@ from ducktest import ProvisionFailed
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS_DIR = REPO_ROOT / "scripts" / "oss_uc_image"
 UCTL = os.environ.get("UC_UCTL", str(SCRIPTS_DIR / "uctl"))
+
+# Locally-built extensions a CLI test LOADs by full path under `-unsigned`. A bare `LOAD name` resolves
+# through the build's local extension repository, which the CI test job does not receive (it gets the
+# loadables only), and the shell has no extension linked in.
+EXTENSIONS = ("parquet", "httpfs", "delta", "unity_catalog")
+
+
+def build_dir():
+    """The build tree CLI tests run against: $BUILD_DIR, else $DUCKDB_BUILD_DIR, else build/debug."""
+    return REPO_ROOT / os.environ.get("BUILD_DIR", os.environ.get("DUCKDB_BUILD_DIR", "build/debug"))
+
+
+def load_statements(build_dir, extensions=EXTENSIONS):
+    """`LOAD '<build_dir>/extension/<name>/<name>.duckdb_extension';` for each extension, one per line."""
+    return "\n".join(
+        f"LOAD '{Path(build_dir) / 'extension' / name / f'{name}.duckdb_extension'}';" for name in extensions
+    )
 
 
 def uctl(*args, check=True):
@@ -50,3 +69,38 @@ def plain_table_location(uc_server, table, catalog="duck", schema="plain"):
             "staged into -- the container was attached rather than started here"
         )
     return Path(uc_server.data_dir) / catalog / schema / table
+
+
+def register_external_table(endpoint, table, location, columns, properties=None, catalog="duck", schema="plain"):
+    """Register an EXTERNAL Delta table over REST, for column types `uctl` cannot state.
+
+    `columns` are (name, type_text, type_name, type_json) tuples, in position order.
+    """
+    body = {
+        "name": table,
+        "catalog_name": catalog,
+        "schema_name": schema,
+        "table_type": "EXTERNAL",
+        "data_source_format": "DELTA",
+        "storage_location": str(location),
+        "properties": properties or {},
+        "columns": [
+            {
+                "name": name,
+                "type_text": type_text,
+                "type_name": type_name,
+                "type_json": type_json,
+                "position": position,
+                "nullable": True,
+            }
+            for position, (name, type_text, type_name, type_json) in enumerate(columns)
+        ],
+    }
+    request = urllib.request.Request(
+        f"{endpoint}/api/2.1/unity-catalog/tables",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)

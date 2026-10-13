@@ -84,6 +84,8 @@ LogicalType PrimitiveFromDeltaName(const string &name) {
 		return LogicalType::TIMESTAMP_TZ;
 	} else if (name == "timestamp_ntz") {
 		return LogicalType::TIMESTAMP;
+	} else if (name == "variant") {
+		return LogicalType::VARIANT();
 	} else if (name == "void") {
 		return LogicalType::SQLNULL;
 	} else if (name.find("decimal(") == 0) {
@@ -159,6 +161,23 @@ LogicalType UCUtils::TypeFromJson(const string &type_json) {
 	}
 }
 
+// The next top-level ',' in a map/struct child list, or `type_end`. A ',' inside <> or () belongs to a
+// child type: without the paren case a `decimal(p,s)` child splits on its own comma.
+static size_t FindChildSeparator(const string &type_text, size_t cur, size_t type_end) {
+	int nested_opens = 0;
+	size_t pos = cur;
+	while (pos < type_end && (type_text[pos] != ',' || nested_opens > 0)) {
+		char c = type_text[pos];
+		if (c == '<' || c == '(') {
+			nested_opens++;
+		} else if (c == '>' || c == ')') {
+			nested_opens--;
+		}
+		pos++;
+	}
+	return pos;
+}
+
 LogicalType UCUtils::ColumnTypeFromDefinition(const UCAPIColumnDefinition &column) {
 	if (column.type_json.empty()) {
 		return UCUtils::TypeToLogicalType(column.type_text);
@@ -191,6 +210,8 @@ LogicalType UCUtils::TypeToLogicalType(const string &type_text) {
 		return LogicalType::TIMESTAMP_TZ;
 	} else if (type_text == "timestamp_ntz") {
 		return LogicalType::TIMESTAMP;
+	} else if (type_text == "variant") {
+		return LogicalType::VARIANT();
 	} else if (type_text == "binary") {
 		return LogicalType::BLOB;
 	} else if (type_text == "date") {
@@ -217,28 +238,14 @@ LogicalType UCUtils::TypeToLogicalType(const string &type_text) {
 	} else if (type_text.find("map<") == 0) {
 		size_t type_end = type_text.rfind('>'); // find last, to deal with nested
 		if (type_end != string::npos) {
-			// TODO: Factor this and struct parsing into an iterator over ',' separated values
 			vector<LogicalType> key_val;
 			size_t cur = 4;
-			auto nested_opens = 0;
 			for (;;) {
-				size_t next_sep = cur;
-				// find the location of the next ',' ignoring nested commas
-				while (type_text[next_sep] != ',' || nested_opens > 0) {
-					if (type_text[next_sep] == '<') {
-						nested_opens++;
-					} else if (type_text[next_sep] == '>') {
-						nested_opens--;
-					}
-					next_sep++;
-					if (next_sep == type_end) {
-						break;
-					}
-				}
+				size_t next_sep = FindChildSeparator(type_text, cur, type_end);
 				auto child_str = type_text.substr(cur, next_sep - cur);
 				auto child_type = UCUtils::TypeToLogicalType(child_str);
 				key_val.push_back(child_type);
-				if (next_sep == type_end) {
+				if (next_sep >= type_end) {
 					break;
 				}
 				cur = next_sep + 1;
@@ -253,21 +260,8 @@ LogicalType UCUtils::TypeToLogicalType(const string &type_text) {
 		if (type_end != string::npos) {
 			child_list_t<LogicalType> children;
 			size_t cur = 7;
-			auto nested_opens = 0;
 			for (;;) {
-				size_t next_sep = cur;
-				// find the location of the next ',' ignoring nested commas
-				while (type_text[next_sep] != ',' || nested_opens > 0) {
-					if (type_text[next_sep] == '<') {
-						nested_opens++;
-					} else if (type_text[next_sep] == '>') {
-						nested_opens--;
-					}
-					next_sep++;
-					if (next_sep == type_end) {
-						break;
-					}
-				}
+				size_t next_sep = FindChildSeparator(type_text, cur, type_end);
 				auto child_str = type_text.substr(cur, next_sep - cur);
 				size_t type_sep = child_str.find(':');
 				if (type_sep == string::npos) {
@@ -276,7 +270,7 @@ LogicalType UCUtils::TypeToLogicalType(const string &type_text) {
 				auto child_name = child_str.substr(0, type_sep);
 				auto child_type = UCUtils::TypeToLogicalType(child_str.substr(type_sep + 1, string::npos));
 				children.emplace_back(child_name, child_type);
-				if (next_sep == type_end) {
+				if (next_sep >= type_end) {
 					break;
 				}
 				cur = next_sep + 1;

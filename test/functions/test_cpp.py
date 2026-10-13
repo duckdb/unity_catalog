@@ -4,7 +4,7 @@ Default behaviour: if `unittest_cpp` is present under the resolved build dir, ea
 becomes a pytest item that runs it and asserts a clean exit; if the binary isn't built, one skipped
 item says how. The binary is server-free (no container, no creds) -- it's the pure-logic unit
 coverage (SerializeFiltersToIRC, UCPositionDeleteFilter) that no sqllogictest .test can drive in
-isolation. Build it with `dbuild` (which now targets it) or `cmake --build <dir> --target unittest_cpp`.
+isolation. It is part of the default build; `cmake --build <dir> --target unittest_cpp` builds it alone.
 
 Binary resolution mirrors how the driver resolves the base `unittest` binary: $BUILD_DIR (or
 $DUCKDB_BUILD_DIR) wins; otherwise probe the usual build kinds under build/<kind>/test/.
@@ -21,13 +21,14 @@ _KINDS = ("debug", "reldebug", "relassert", "release")
 
 
 def _cpp_binary():
+    # Executable, not merely present: a CI artifact download drops the exec bit.
     build_dir = os.environ.get("BUILD_DIR") or os.environ.get("DUCKDB_BUILD_DIR")
     if build_dir:
         cand = _REPO / build_dir / "test" / "unittest_cpp"
-        return cand if cand.exists() else None
+        return cand if os.access(cand, os.X_OK) else None
     for kind in _KINDS:
         cand = _REPO / "build" / kind / "test" / "unittest_cpp"
-        if cand.exists():
+        if os.access(cand, os.X_OK):
             return cand
     return None
 
@@ -42,7 +43,7 @@ _BIN = _cpp_binary()
 if _BIN is None:
 
     def test_unittest_cpp_present():
-        pytest.skip("unittest_cpp not built; run `dbuild` or `cmake --build <dir> --target unittest_cpp`")
+        pytest.skip("unittest_cpp not built or not executable; `cmake --build <dir> --target unittest_cpp`")
 
 else:
 
