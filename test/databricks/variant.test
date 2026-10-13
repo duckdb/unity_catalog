@@ -67,7 +67,7 @@ SELECT id, variant_typeof(data) FROM unity.{SCHEMA}.id_variant ORDER BY id;
 1	OBJECT(tag, value)
 2	OBJECT(nested)
 3	VARCHAR
-4	INT32
+4	INT8
 5	BOOL_TRUE
 6	ARRAY(4)
 7	VARIANT_NULL
