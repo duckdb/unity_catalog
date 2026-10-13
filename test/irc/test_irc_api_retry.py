@@ -12,22 +12,19 @@ Runs the BUILT duckdb CLI (its ABI matches the locally-built extension; pip `duc
 
 import http.server
 import json
-import os
 import subprocess
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[2]  # test/irc/ -> repo root
+from uc import build_dir, load_statements
 
 
 def _duckdb_bin():
-    build_dir = os.environ.get("DUCKDB_BUILD_DIR", "build/debug")
-    binary = REPO / build_dir / "duckdb"
+    binary = build_dir() / "duckdb"
     if not binary.exists():
-        pytest.skip(f"duckdb CLI not built at {binary} (set DUCKDB_BUILD_DIR)")
+        pytest.skip(f"duckdb CLI not built at {binary} (set BUILD_DIR)")
     return str(binary)
 
 
@@ -91,7 +88,7 @@ def _run_plan_scan(endpoint, *, filter_json=None, pre="", timeout=30):
     args = f"'{endpoint}', 'cat', 'sch', 'tbl', 'tok'"
     if filter_json is not None:
         args += f", filter => '{filter_json}'"
-    sql = f"LOAD unity_catalog; LOAD httpfs; {pre} SELECT * FROM __internal_uc_plan_table_scan({args});"
+    sql = f"{load_statements(build_dir())} {pre} SELECT * FROM __internal_uc_plan_table_scan({args});"
     return subprocess.run([_duckdb_bin(), "-unsigned", "-c", sql], capture_output=True, text=True, timeout=timeout)
 
 
