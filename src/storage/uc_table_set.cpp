@@ -246,15 +246,9 @@ void TableInformation::RefreshCredentials(ClientContext &context) {
 	input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
 	input.persist_type = SecretPersistType::TEMPORARY;
 	input.name = Identifier("__internal_uc_" + table_data->table_id);
-	input.type = "s3";
 	input.provider = "config";
-	input.options = {
-	    {"key_id", table_credentials.key_id},
-	    {"secret", table_credentials.secret},
-	    {"session_token", table_credentials.session_token},
-	    {"region", catalog.credentials.aws_region},
-	};
 	input.scope = {table_data->storage_location};
+	ApplyVendedCredentials(context, input, table_data->storage_location, table_credentials, catalog.credentials.aws_region);
 
 	secret_manager.CreateSecret(context, input);
 }
