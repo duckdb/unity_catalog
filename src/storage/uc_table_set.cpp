@@ -376,8 +376,8 @@ static Value BuildLogTailFromCommits(const UCAPICommitsResult &commits, const st
 
 	return Value::LIST(
 	    LogicalType::STRUCT({make_pair("version", LogicalType::BIGINT), make_pair("timestamp", LogicalType::BIGINT),
-		                     make_pair("file_name", LogicalType::VARCHAR), make_pair("file_size", LogicalType::BIGINT),
-		                     make_pair("file_modification_timestamp", LogicalType::BIGINT)}),
+	                         make_pair("file_name", LogicalType::VARCHAR), make_pair("file_size", LogicalType::BIGINT),
+	                         make_pair("file_modification_timestamp", LogicalType::BIGINT)}),
 	    commit_values);
 }
 
