@@ -1,4 +1,5 @@
 #include "storage/uc_transaction.hpp"
+#include "duckdb/transaction/transaction_manager.hpp"
 #include "storage/unity_catalog.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/catalog/catalog_entry/index_catalog_entry.hpp"

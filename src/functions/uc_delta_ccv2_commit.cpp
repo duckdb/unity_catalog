@@ -16,7 +16,7 @@ unique_ptr<GlobalTableFunctionState> UCDeltaCCV2CommitInit(ClientContext &contex
 }
 
 static unique_ptr<FunctionData> UCDeltaCCV2CommitBind(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types, vector<string> &names) {
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	throw InternalException(
 	    "__internal_delta_ccv2_commit_staged is only for internal use and should not be called directly");
 }
@@ -61,8 +61,11 @@ void UCDeltaCCV2CommitExecute(ClientContext &context, TableFunctionInput &data_p
 	}
 	table.commit_state.with_locked([&](UCCommitState &s) { s.etag = new_etag; });
 
-	output.SetCardinality(1);
-	output.SetValue(1, 0, Value::BOOLEAN(true));
+	// Write the output boolean at row 0, then set cardinality. SetChildCardinality (not the
+	// deprecated SetCardinality) sizes the child vectors via FlatVector::SetSize -- which
+	// preserves the value just written -- and sets the chunk count.
+	output.data[1].SetValue(0, Value::BOOLEAN(true));
+	output.SetChildCardinality(1);
 }
 
 UCDeltaCCV2Commit::UCDeltaCCV2Commit()

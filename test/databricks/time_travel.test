@@ -1,0 +1,81 @@
+# name: test/databricks/time_travel.test
+# description: read-only Delta time travel (AT VERSION => n) against a premade, schema-evolving table via Unity Catalog.
+# group: [databricks]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+require-env CATALOG
+
+require-env SCHEMA
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
+);
+
+statement ok
+set threads=2;
+
+statement ok
+ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}');
+
+statement ok
+USE unity;
+
+# -----------------------------------------------------------------------------
+# Time travel across id_name__alter_colmap_id's version history
+#   v0: (id, name)          v1: + val (NULL)          v2: + row (6, six, 6)
+#
+
+query II
+SELECT id, name FROM id_name__alter_colmap_id AT (VERSION => 0) ORDER BY id
+----
+1	one
+2	two
+3	three
+4	four
+5	five
+
+query III
+SELECT id, name, val FROM id_name__alter_colmap_id AT (VERSION => 1) ORDER BY id
+----
+1	one	NULL
+2	two	NULL
+3	three	NULL
+4	four	NULL
+5	five	NULL
+
+query III
+SELECT id, name, val FROM id_name__alter_colmap_id AT (VERSION => 2) ORDER BY id
+----
+1	one	NULL
+2	two	NULL
+3	three	NULL
+4	four	NULL
+5	five	NULL
+6	six	6
+
+query III
+SELECT id, name, val FROM id_name__alter_colmap_id ORDER BY id
+----
+1	one	NULL
+2	two	NULL
+3	three	NULL
+4	four	NULL
+5	five	NULL
+6	six	6

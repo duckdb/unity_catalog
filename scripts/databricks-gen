@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""Executable shim for the `databricks-gen` CLI (see databricks_gen/cli.py).
+
+Run under the project venv (deps: databricks-sdk, duckdb-pytest-driver), e.g.
+`scripts/env_databricks scripts/databricks-gen create …`.
+"""
+
+import os
+import sys
+
+# This file lives in scripts/; put scripts/ on the path so `import databricks_gen` resolves.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from databricks_gen.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,31 @@
+diff --git a/examples/cli/src/main/java/io/unitycatalog/cli/delta/DeltaKernelUtils.java b/examples/cli/src/main/java/io/unitycatalog/cli/delta/DeltaKernelUtils.java
+index 353f7bfd..ff524f50 100644
+--- a/examples/cli/src/main/java/io/unitycatalog/cli/delta/DeltaKernelUtils.java
++++ b/examples/cli/src/main/java/io/unitycatalog/cli/delta/DeltaKernelUtils.java
+@@ -159,15 +159,19 @@ public class DeltaKernelUtils {
+       throw new IllegalArgumentException("URI scheme is missing");
+     }
+     if (scheme.equals(Constants.URI_SCHEME_S3)) {
+-      AwsCredentials awsTempCredentials = temporaryCredentials.getAwsTempCredentials();
+-      if (awsTempCredentials == null) {
+-        throw new IllegalArgumentException("AWS temporary credentials are missing");
+-      }
+-      conf.set("fs.s3a.access.key", awsTempCredentials.getAccessKeyId());
+-      conf.set("fs.s3a.secret.key", awsTempCredentials.getSecretAccessKey());
+-      conf.set("fs.s3a.session.token", awsTempCredentials.getSessionToken());
+       conf.set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem");
+       conf.set("fs.s3a.path.style.access", "true");
++      AwsCredentials awsTempCredentials =
++          temporaryCredentials != null ? temporaryCredentials.getAwsTempCredentials() : null;
++      if (awsTempCredentials != null) {
++        // Vended creds (e.g. MANAGED tables): use the UC-issued session credentials.
++        conf.set("fs.s3a.access.key", awsTempCredentials.getAccessKeyId());
++        conf.set("fs.s3a.secret.key", awsTempCredentials.getSecretAccessKey());
++        conf.set("fs.s3a.session.token", awsTempCredentials.getSessionToken());
++      }
++      // else (e.g. EXTERNAL tables, no vending): fall back to whatever the ambient
++      // Hadoop config provides -- e.g. a core-site.xml on the classpath supplying
++      // fs.s3a.endpoint + static keys for an S3-compatible store like MinIO.
+     } else if (scheme.equals(Constants.URI_SCHEME_FILE)) {
+       conf.set("fs.file.impl", "org.apache.hadoop.fs.LocalFileSystem");
+     } else {

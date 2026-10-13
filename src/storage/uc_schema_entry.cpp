@@ -41,7 +41,7 @@ UCTransaction &GetUCTransaction(CatalogTransaction transaction) {
 
 optional_ptr<CatalogEntry> UCSchemaEntry::CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) {
 	auto &base_info = info.Base();
-	auto table_name = base_info.table;
+	auto table_name = base_info.GetTableName();
 	if (base_info.on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
 		throw NotImplementedException("REPLACE ON CONFLICT in CreateTable");
 	}
@@ -53,10 +53,10 @@ optional_ptr<CatalogEntry> UCSchemaEntry::CreateFunction(CatalogTransaction tran
 }
 
 void UCUnqualifyColumnRef(ParsedExpression &expr) {
-	if (expr.type == ExpressionType::COLUMN_REF) {
+	if (expr.GetExpressionType() == ExpressionType::COLUMN_REF) {
 		auto &colref = expr.Cast<ColumnRefExpression>();
-		auto name = std::move(colref.column_names.back());
-		colref.column_names = {std::move(name)};
+		auto name = std::move(colref.ColumnNamesMutable().back());
+		colref.ColumnNamesMutable() = {std::move(name)};
 		return;
 	}
 	ParsedExpressionIterator::EnumerateChildren(expr, UCUnqualifyColumnRef);

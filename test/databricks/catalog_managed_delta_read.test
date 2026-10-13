@@ -1,0 +1,79 @@
+# name: test/databricks/catalog_managed_delta_read.test
+# description: Reads catalog-managed tables via the Delta path to verify max_catalog_version is passed to the kernel.
+# group: [databricks]
+
+#
+# id_name__cmt__spark: catalog-managed, all commits written server-side (staged commits).
+#   Fails on an unfixed build with: "Staged commits in log_tail require max_catalog_version to be set"
+#
+# id_name__cmt__duckdb: catalog-managed, structure created server-side, data inserted by the
+#   DuckDB UC write path. DuckDB-written commits are promoted to _delta_log/ (not staged), so
+#   this reads on an unfixed build too.
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+require-env CATALOG
+
+require-env SCHEMA
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}');
+
+statement ok
+USE unity;
+
+# -----------------------------------------------------------------------------
+# id_name__cmt__spark — staged commits (server write path), needs max_catalog_version
+#
+
+query I
+SELECT count(*) FROM id_name__cmt__spark;
+----
+5
+
+query II
+SELECT id, name FROM id_name__cmt__spark ORDER BY id;
+----
+1	one
+2	two
+3	three
+4	four
+5	five
+
+# -----------------------------------------------------------------------------
+# id_name__cmt__duckdb — DuckDB-inserted data (promoted to _delta_log, not staged)
+#
+
+query I
+SELECT count(*) FROM id_name__cmt__duckdb;
+----
+5
+
+query II
+SELECT id, name FROM id_name__cmt__duckdb ORDER BY id;
+----
+1	one
+2	two
+3	three
+4	four
+5	five

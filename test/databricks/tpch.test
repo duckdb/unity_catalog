@@ -1,0 +1,117 @@
+# name: test/databricks/tpch.test
+# description: read-path coverage against premade Databricks TPC-H (sf0.01) tables via Unity Catalog. Three hand-written queries stand in for the old 21-query PRAGMA tpch loop: the read path is identical regardless of which query consumes the scanned rows, so depth comes from the axes exercised (full scan + rich types, predicate pushdown, multi-table join), not from query count. No tpch extension / answer-CSV dependency.
+# group: [databricks]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+# -----------------------------------------------------------------------------
+# Attach the premade TPC-H sf0.01 schema through Unity Catalog
+#
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH 'duckdb_testing' (TYPE unity_catalog, DEFAULT_SCHEMA 'tpch_sf0_01');
+
+statement ok
+USE duckdb_testing
+
+# -----------------------------------------------------------------------------
+# Q1: single lineitem scan -- exercises the full-table delta read, DATE predicate
+# pushdown, DECIMAL arithmetic, aggregation, and CHAR-column grouping in one scan.
+# (This is TPC-H Q1's shape; goldens are the deterministic sf0.01 dbgen values.)
+#
+
+query TTIRRRR
+SELECT l_returnflag, l_linestatus,
+       count(*) AS cnt,
+       sum(l_quantity) AS sum_qty,
+       round(sum(l_extendedprice), 2) AS sum_base,
+       round(sum(l_extendedprice * (1 - l_discount)), 2) AS sum_disc,
+       round(avg(l_discount), 4) AS avg_disc
+FROM lineitem
+WHERE l_shipdate <= DATE '1998-09-02'
+GROUP BY l_returnflag, l_linestatus
+ORDER BY l_returnflag, l_linestatus;
+----
+A	F	14876	380456.00	532348211.65	505822441.49	0.0501
+N	F	348	8971.00	12384801.37	11798257.21	0.0478
+N	O	29181	742802.00	1041502841.45	989737518.63	0.0499
+R	F	14902	381449.00	534594445.35	507996454.41	0.0498
+
+# -----------------------------------------------------------------------------
+# Q2: nation JOIN region -- multi-table catalog resolution across two UC/delta
+# tables (cheap; proves the join operator wires two attached tables together).
+#
+
+query TI
+SELECT r_name, count(*) AS n_nations
+FROM nation JOIN region ON n_regionkey = r_regionkey
+GROUP BY r_name
+ORDER BY r_name;
+----
+AFRICA	5
+AMERICA	5
+ASIA	5
+EUROPE	5
+MIDDLE EAST	5
+
+# -----------------------------------------------------------------------------
+# Q3: lineitem -> supplier -> nation, date-filtered -- the large delta-scanned
+# table participates as a join probe side (not just a leaf aggregate), with
+# pushdown on l_shipdate. (TPC-H Q5's shape, simplified to a single revenue col.)
+#
+
+query TIR
+SELECT n_name, count(*) AS cnt,
+       round(sum(l_extendedprice * (1 - l_discount)), 2) AS revenue
+FROM lineitem
+  JOIN supplier ON l_suppkey = s_suppkey
+  JOIN nation   ON s_nationkey = n_nationkey
+WHERE l_shipdate >= DATE '1996-01-01' AND l_shipdate < DATE '1997-01-01'
+GROUP BY n_name
+ORDER BY n_name;
+----
+ALGERIA	272	8351134.89
+ARGENTINA	239	8668260.16
+BRAZIL	218	7989915.78
+CANADA	269	9161662.33
+CHINA	683	23367533.72
+EGYPT	521	17502578.43
+ETHIOPIA	243	8039090.54
+FRANCE	187	6422521.47
+GERMANY	440	15406742.08
+INDIA	475	15690798.45
+INDONESIA	479	15748543.00
+IRAN	202	7108006.69
+IRAQ	198	6697080.64
+JAPAN	381	13121798.00
+JORDAN	102	3597312.36
+KENYA	559	19505770.98
+MOROCCO	191	6514803.15
+MOZAMBIQUE	655	21732285.70
+PERU	369	12083265.09
+ROMANIA	428	14622421.95
+RUSSIA	441	15600981.61
+SAUDI ARABIA	97	3127948.71
+UNITED KINGDOM	278	10186045.97
+UNITED STATES	746	24835734.41
+VIETNAM	527	17739153.81

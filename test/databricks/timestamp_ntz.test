@@ -1,0 +1,44 @@
+# name: test/databricks/timestamp_ntz.test
+# description: read a TIMESTAMP_NTZ column through Unity Catalog against a premade table.
+# group: [databricks]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env DATABRICKS_TOKEN
+
+require-env DATABRICKS_ENDPOINT
+
+require-env DATABRICKS_REGION
+
+require-env CATALOG
+
+require-env SCHEMA
+
+statement ok
+CREATE SECRET (
+    TYPE unity_catalog,
+    TOKEN '{DATABRICKS_TOKEN}',
+    ENDPOINT '{DATABRICKS_ENDPOINT}',
+    AWS_REGION '{DATABRICKS_REGION}'
+);
+
+statement ok
+ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, READ_ONLY, DEFAULT_SCHEMA '{SCHEMA}');
+
+statement ok
+USE unity;
+
+query II
+SELECT id, created_at FROM timestamp_ntz ORDER BY id;
+----
+1	2024-01-01 01:00:00
+2	2024-01-01 02:00:00
+3	2024-01-01 03:00:00
+4	2024-01-01 04:00:00
+5	2024-01-01 05:00:00

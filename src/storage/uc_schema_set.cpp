@@ -22,7 +22,8 @@ void UCSchemaSet::LoadEntries(ClientContext &context) {
 
 	for (const auto &schema : tables) {
 		CreateSchemaInfo info;
-		info.schema = schema.schema_name;
+		info.SetQualifiedName(QualifiedName(info.GetQualifiedName().Catalog(), Identifier(schema.schema_name),
+		                                    info.GetQualifiedName().Name()));
 		info.internal = IsInternalTable(schema.catalog_name, schema.schema_name);
 		auto schema_entry = make_uniq<UCSchemaEntry>(catalog, info);
 		schema_entry->schema_data = make_uniq<UCAPISchema>(schema);

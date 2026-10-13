@@ -14,6 +14,7 @@
 #include "duckdb/common/pair.hpp"
 
 namespace duckdb {
+class BoundAtClause;
 struct CreateTableInfo;
 class UCResult;
 class UnityCatalog;
@@ -58,7 +59,7 @@ public:
 private:
 	//! location holds no Delta table -> null; other failures throw
 	unique_ptr<CatalogEntry> EntryFromDeltaLog(ClientContext &context, const EntryLookupInfo &lookup_info);
-	string EntryKey(optional_idx version = optional_idx()) const;
+	string EntryKey(optional_ptr<BoundAtClause> at = nullptr) const;
 	string AttachedCatalogName() const;
 	// Copies outstanding staged commits to _delta_log/ (file I/O, NOT under commit_state's lock).
 	// Takes the current watermark, returns the highest version successfully copied.

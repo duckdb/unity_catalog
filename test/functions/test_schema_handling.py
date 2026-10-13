@@ -7,19 +7,15 @@ back what was registered, and one carrying no `type_json`, since a server that s
 SQL-text type map unreachable.
 """
 
-import http.server
 import json
-import os
-import re
-import subprocess
-import threading
 from pathlib import Path
 from typing import NamedTuple
 
 import pytest
 
+from uc.mock import MockUnityCatalog, delta_table, run
+
 _REPO = Path(__file__).resolve().parents[2]
-_CATALOG = "duck"
 _SCHEMA = "plain"
 
 _NESTED = _REPO / "data" / "nested_projection"
@@ -56,16 +52,12 @@ def _text(spelling):
 def _struct(**fields):
     body = ",".join(f'{{"name":"{n}","type":{t.json},"nullable":true,"metadata":{{}}}}' for n, t in fields.items())
     return _Type(
-        "struct<" + ",".join(f"{n}:{t.text}" for n, t in fields.items()) + ">",
-        f'{{"type":"struct","fields":[{body}]}}',
+        "struct<" + ",".join(f"{n}:{t.text}" for n, t in fields.items()) + ">", f'{{"type":"struct","fields":[{body}]}}'
     )
 
 
 def _array(element):
-    return _Type(
-        f"array<{element.text}>",
-        f'{{"type":"array","elementType":{element.json},"containsNull":true}}',
-    )
+    return _Type(f"array<{element.text}>", f'{{"type":"array","elementType":{element.json},"containsNull":true}}')
 
 
 def _map(key, value):
@@ -129,11 +121,7 @@ _CASES = {
         why="reported aligns with resolved; the baseline before the misaligned cases",
         fixture=_NESTED,
         table="nested_projection",
-        reported_schema=[
-            _col("id", _INT),
-            _col("records", _RECORDS),
-            _col("multi", _MULTI),
-        ],
+        reported_schema=[_col("id", _INT), _col("records", _RECORDS), _col("multi", _MULTI)],
         query=_NESTED_QUERY,
         expect=_Rows(_NESTED_ROWS),
     ),
@@ -141,11 +129,7 @@ _CASES = {
         why="reported lists its columns out of order but `position` is correct; the read follows position, not list order",
         fixture=_NESTED,
         table="nested_projection",
-        reported_schema=[
-            _col("multi", _MULTI),
-            _col("id", _INT),
-            _col("records", _RECORDS),
-        ],
+        reported_schema=[_col("multi", _MULTI), _col("id", _INT), _col("records", _RECORDS)],
         query=_NESTED_QUERY,
         expect=_Rows(_NESTED_ROWS),
     ),
@@ -165,10 +149,7 @@ _CASES = {
         why="children reordered but both strings, so reported and resolved agree on type and nothing stops the read",
         fixture=_PAIRS,
         table="pairs",
-        reported_schema=[
-            _col("id", _INT),
-            _col("rec", _struct(second=_STR, first=_STR)),
-        ],
+        reported_schema=[_col("id", _INT), _col("rec", _struct(second=_STR, first=_STR))],
         query=_PAIRS_QUERY,
         expect=_Rows(_PAIRS_ROWS),
     ),
@@ -192,10 +173,7 @@ _CASES = {
         why="reported has no type_json and text the fallback parser cannot read; the read falls back to resolved",
         fixture=_PAIRS,
         table="pairs",
-        reported_schema=[
-            _col("id", _text("int")),
-            _col("rec", _text("struct<first: string, second: string>")),
-        ],
+        reported_schema=[_col("id", _text("int")), _col("rec", _text("struct<first: string, second: string>"))],
         query=_PAIRS_QUERY,
         expect=_Rows(_PAIRS_ROWS),
     ),
@@ -203,10 +181,7 @@ _CASES = {
         why="reported gives unreadable type_text but correct type_json; the JSON map wins",
         fixture=_PAIRS,
         table="pairs",
-        reported_schema=[
-            _col("id", _INT),
-            _col("rec", _struct(first=_STR, second=_STR).as_text("bogus<not:a:type>")),
-        ],
+        reported_schema=[_col("id", _INT), _col("rec", _struct(first=_STR, second=_STR).as_text("bogus<not:a:type>"))],
         query=_PAIRS_QUERY,
         expect=_Rows(_PAIRS_ROWS),
     ),
@@ -257,83 +232,8 @@ def _columns(spec):
     return columns
 
 
-class _MockUnityCatalog:
-    """Serves the /catalogs + /schemas + /tables an ATTACH and a read need."""
-
-    def __init__(self, columns, fixture, table_name):
-        outer = self
-        self.requests = []
-
-        table = {
-            "name": table_name,
-            "catalog_name": _CATALOG,
-            "schema_name": _SCHEMA,
-            "table_type": "EXTERNAL",
-            "data_source_format": "DELTA",
-            # file:// keeps RefreshCredentials out of it.
-            "storage_location": f"file://{fixture}",
-            "table_id": "00000000-0000-0000-0000-000000000001",
-            "columns": columns,
-        }
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def log_message(self, *args):
-                pass
-
-            def do_GET(self):
-                outer.requests.append(self.path)
-                if "/catalogs" in self.path:
-                    body = {"catalogs": [{"name": _CATALOG}]}
-                elif "/schemas" in self.path:
-                    body = {"schemas": [{"name": _SCHEMA, "catalog_name": _CATALOG}]}
-                elif "/tables" in self.path:
-                    body = {"tables": [table]}
-                else:
-                    body = {}
-                payload = json.dumps(body).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(payload)
-
-        self._httpd = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
-
-    def __enter__(self):
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc):
-        self._httpd.shutdown()
-
-    @property
-    def endpoint(self):
-        host, port = self._httpd.server_address
-        return f"http://{host}:{port}"
-
-
-def _duckdb_bin():
-    binary = _REPO / os.environ.get("DUCKDB_BUILD_DIR", "build/debug") / "duckdb"
-    if not binary.exists():
-        pytest.skip(f"duckdb CLI not built at {binary} (set DUCKDB_BUILD_DIR)")
-    return str(binary)
-
-
-def _run(mock, sql):
-    """Attach the mock catalog, run `sql`, return (result, stdout with colour stripped)."""
-    prelude = (
-        # The listing fans out across the thread pool and is intermittently racy.
-        "SET threads TO 1;"
-        f"CREATE SECRET (TYPE UNITY_CATALOG, TOKEN 'x', ENDPOINT '{mock.endpoint}', AWS_REGION 'us-east-2');"
-        f"ATTACH '{_CATALOG}' AS unity (TYPE unity_catalog, DEFAULT_SCHEMA '{_SCHEMA}');"
-    )
-    result = subprocess.run(
-        [_duckdb_bin(), "-unsigned", "-list", "-noheader", "-c", prelude + sql],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    return result, re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+def _catalog(columns, fixture, table):
+    return MockUnityCatalog([delta_table(table, fixture, columns, schema=_SCHEMA)])
 
 
 def test_divergence_is_reported():
@@ -341,8 +241,8 @@ def test_divergence_is_reported():
     warning by itself while a stale one keeps saying so. Only the count is unassertable here: the
     CLI displays the first warning of a session and swallows the rest."""
     spec = [_col("id", _INT), _col("rec", _struct(second=_STR, first=_STR))]
-    with _MockUnityCatalog(_columns(spec), _PAIRS, "pairs") as mock:
-        result, stdout = _run(mock, "SELECT id FROM unity.plain.pairs;SELECT id FROM unity.plain.pairs;")
+    with _catalog(_columns(spec), _PAIRS, "pairs") as mock:
+        result, stdout = run(mock, "SELECT id FROM unity.plain.pairs;SELECT id FROM unity.plain.pairs;")
 
     assert result.returncode == 0, stdout + result.stderr
     warnings = [line for line in stdout.splitlines() if "schema.Resolve" in line]
@@ -357,8 +257,8 @@ def test_reported_columns_follow_position():
     spec = [_col("rec", _REC), _col("id", _INT)]
     columns = _columns(spec)
     columns[0]["position"], columns[1]["position"] = 1, 0
-    with _MockUnityCatalog(columns, _PAIRS, "pairs") as mock:
-        result, stdout = _run(mock, "SELECT column_names FROM (SHOW ALL TABLES) WHERE name = 'pairs';")
+    with _catalog(columns, _PAIRS, "pairs") as mock:
+        result, stdout = run(mock, "SELECT column_names FROM (SHOW ALL TABLES) WHERE name = 'pairs';")
 
     assert result.returncode == 0, stdout + result.stderr
     assert "[id, rec]" in stdout, stdout
@@ -367,8 +267,8 @@ def test_reported_columns_follow_position():
 def test_table_without_a_log_falls_back_to_the_report(tmp_path):
     """A table registered but never written to has no schema to resolve, so the reported schema
     stands in for the lookup. The read itself still has nothing to read, and says so."""
-    with _MockUnityCatalog(_columns([_col("id", _INT), _col("rec", _REC)]), tmp_path, "pairs") as mock:
-        result, stdout = _run(mock, "SELECT id FROM unity.plain.pairs;")
+    with _catalog(_columns([_col("id", _INT), _col("rec", _REC)]), tmp_path, "pairs") as mock:
+        result, stdout = run(mock, "SELECT id FROM unity.plain.pairs;")
 
     combined = stdout + result.stderr
     assert "no schema in the Delta log" in stdout, combined
@@ -380,13 +280,10 @@ def test_unreadable_column_without_a_log_is_refused(tmp_path):
     """The reported schema stands in only where every column it names resolves to a type. A column
     whose type neither the JSON nor the text parser could read binds to nothing, so the read is refused
     naming the column and the type UC gave it -- not with the binder's "parameter types could not be resolved"."""
-    spec = [
-        _col("id", _INT),
-        _col("rec", _text("struct<first: string, second: string>")),
-    ]
-    with _MockUnityCatalog(_columns(spec), tmp_path, "pairs") as mock:
-        listed, listed_out = _run(mock, "SELECT column_names FROM (SHOW ALL TABLES) WHERE name = 'pairs';")
-        read, read_out = _run(mock, "SELECT id FROM unity.plain.pairs;")
+    spec = [_col("id", _INT), _col("rec", _text("struct<first: string, second: string>"))]
+    with _catalog(_columns(spec), tmp_path, "pairs") as mock:
+        listed, listed_out = run(mock, "SELECT column_names FROM (SHOW ALL TABLES) WHERE name = 'pairs';")
+        read, read_out = run(mock, "SELECT id FROM unity.plain.pairs;")
 
     assert listed.returncode == 0, listed_out + listed.stderr
     assert "[id, rec]" in listed_out, listed_out
@@ -414,9 +311,9 @@ def test_unmapped_type_lists_but_is_refused_on_read(name, tmp_path):
     on what the log holds."""
     typ = _UNMAPPED_TYPES[name]
     spec = [_col("id", _INT), _col("v", typ)]
-    with _MockUnityCatalog(_columns(spec), tmp_path, "unmapped") as mock:
-        listed, listed_out = _run(mock, "SELECT column_types FROM (SHOW ALL TABLES) WHERE name = 'unmapped';")
-        read, read_out = _run(mock, "SELECT v FROM unity.plain.unmapped;")
+    with _catalog(_columns(spec), tmp_path, "unmapped") as mock:
+        listed, listed_out = run(mock, "SELECT column_types FROM (SHOW ALL TABLES) WHERE name = 'unmapped';")
+        read, read_out = run(mock, "SELECT v FROM unity.plain.unmapped;")
 
     assert listed.returncode == 0, listed_out + listed.stderr
     assert "[INTEGER, UNKNOWN]" in listed_out, listed_out
@@ -439,10 +336,7 @@ def _write_log(location, spec):
         "configuration": {},
         "createdTime": 0,
     }
-    actions = [
-        {"protocol": {"minReaderVersion": 1, "minWriterVersion": 2}},
-        {"metaData": metadata},
-    ]
+    actions = [{"protocol": {"minReaderVersion": 1, "minWriterVersion": 2}}, {"metaData": metadata}]
     log = location / "_delta_log"
     log.mkdir(parents=True)
     (log / "00000000000000000000.json").write_text("\n".join(json.dumps(a) for a in actions) + "\n")
@@ -456,10 +350,10 @@ def test_interval_column_is_refused(with_log, tmp_path):
     spec = [_col("id", _INT), _col("v", _INTERVAL)]
     if with_log:
         _write_log(tmp_path, spec)
-    with _MockUnityCatalog(_columns(spec), tmp_path, "intervals") as mock:
-        listed, listed_out = _run(mock, "SELECT column_types FROM (SHOW ALL TABLES) WHERE name = 'intervals';")
+    with _catalog(_columns(spec), tmp_path, "intervals") as mock:
+        listed, listed_out = run(mock, "SELECT column_types FROM (SHOW ALL TABLES) WHERE name = 'intervals';")
         reads = [
-            _run(mock, sql)
+            run(mock, sql)
             for sql in (
                 "SELECT * FROM unity.plain.intervals;",
                 "SELECT id FROM unity.plain.intervals;",
@@ -479,8 +373,8 @@ def test_timestamp_text_types_agree_with_the_log():
     """Both timestamps reported in text alone: reported types them as resolved does, so the listing
     is accurate and no read reports a divergence. Values are asserted here rather than as a case
     above, where resolved would carry them whatever the text map made of the reported type."""
-    with _MockUnityCatalog(_columns(_TIMESTAMP_COLUMNS), _TIMESTAMPS, "timestamps") as mock:
-        result, stdout = _run(
+    with _catalog(_columns(_TIMESTAMP_COLUMNS), _TIMESTAMPS, "timestamps") as mock:
+        result, stdout = run(
             mock,
             "SELECT column_types FROM (SHOW ALL TABLES) WHERE name = 'timestamps';"
             + _TIMESTAMP_QUERY.format(s=_SCHEMA, t="timestamps")
@@ -497,8 +391,8 @@ def test_timestamp_text_types_agree_with_the_log():
 @pytest.mark.parametrize("name", sorted(_CASES))
 def test_described_schema(name):
     case = _CASES[name]
-    with _MockUnityCatalog(_columns(case.reported_schema), case.fixture, case.table) as mock:
-        result, stdout = _run(mock, case.query.format(s=_SCHEMA, t=case.table) + ";")
+    with _catalog(_columns(case.reported_schema), case.fixture, case.table) as mock:
+        result, stdout = run(mock, case.query.format(s=_SCHEMA, t=case.table) + ";")
 
     detail = f"\n[{case.why}]\n--- stdout ---\n{stdout}\n--- stderr ---\n{result.stderr}"
 

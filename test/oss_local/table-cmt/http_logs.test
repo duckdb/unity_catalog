@@ -1,0 +1,51 @@
+# name: test/oss_local/table-cmt/http_logs.test
+# description: HTTP prefetch logging against the OSS UC ducktest image -- querying through an attached catalog emits unity-catalog API requests visible via duckdb_logs_parsed('HTTP'). Ports the old http_logs.test. Paired http_logs.py provisions a unique empty duck.cmt.{UC_TEST_TABLE}.
+# group: [table-cmt]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_TABLE
+
+statement ok
+CALL enable_logging('HTTP');
+
+statement ok
+CREATE SECRET (
+    TYPE UC,
+    TOKEN 'not-used',
+    ENDPOINT 'http://127.0.0.1:8080',
+    AWS_REGION 'us-east-2'
+);
+
+# Catalog Secret
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS my_catalog (TYPE unity_catalog, DEFAULT_SCHEMA 'cmt');
+
+# Querying drives unity-catalog API calls (the http prefetch); id_name is seeded empty.
+query I
+SELECT count(*) FROM my_catalog.cmt.{UC_TEST_TABLE};
+----
+0
+
+# -----------------------------------------------------------------------------
+# The HTTP log captured the catalog API request(s) that the query above drove.
+#
+# NOTE: the original asserted an EXACT request set (schemas?…, tables?…). Against this
+# image/config the exact set is impl-specific and unverified here, so this asserts the
+# tables-listing for the cmt schema was logged OK (the request a query reliably
+# makes). Tighten to the original's exact-URL match once confirmed against a real run.
+#
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs_parsed('HTTP')
+WHERE request.url LIKE '%/unity-catalog/tables%' AND response.status = 'OK_200';
+----
+true

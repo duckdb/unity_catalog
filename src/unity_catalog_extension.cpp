@@ -1,4 +1,5 @@
 #include "duckdb/common/exception.hpp"
+#include "duckdb/transaction/transaction_manager.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -6,11 +7,15 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
 #include "duckdb/storage/storage_extension.hpp"
+#include "duckdb/logging/logger.hpp"
 
 #include "storage/unity_catalog.hpp"
 #include "storage/uc_transaction_manager.hpp"
 #include "functions/uc_checkpoint.hpp"
+#include "functions/uc_deletion_vector.hpp"
+#include "functions/uc_plan_table_scan.hpp"
 #include "uc_api.hpp"
+#include "uc_logging.hpp"
 #include "unity_catalog_extension.hpp"
 
 namespace duckdb {
@@ -27,7 +32,7 @@ static unique_ptr<BaseSecret> CreateUCSecretFunction(ClientContext &, CreateSecr
 		name = "unity_catalog";
 	}
 
-	auto result = make_uniq<KeyValueSecret>(prefix_paths, name, "config", input.name);
+	auto result = make_uniq<KeyValueSecret>(prefix_paths, Identifier(name), "config", input.name);
 	for (const auto &named_param : input.options) {
 		auto lower_name = StringUtil::Lower(named_param.first);
 
@@ -78,7 +83,7 @@ static unique_ptr<Catalog> UnityCatalogAttach(optional_ptr<StorageExtensionInfo>
 
 	// check if we have a secret provided
 	string secret_name;
-	string default_schema;
+	Identifier default_schema;
 	for (auto &entry : info.options) {
 		auto lower_name = StringUtil::Lower(entry.first);
 		if (lower_name == "type" || lower_name == "read_only") {
@@ -86,7 +91,13 @@ static unique_ptr<Catalog> UnityCatalogAttach(optional_ptr<StorageExtensionInfo>
 		} else if (lower_name == "secret") {
 			secret_name = entry.second.ToString();
 		} else if (lower_name == "default_schema") {
-			default_schema = entry.second.ToString();
+			default_schema = Identifier(entry.second.ToString());
+		} else if (lower_name == "use_irc_scan_plan") {
+			credentials.use_irc_scan_plan = entry.second.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
+		} else if (lower_name == "api_irc_endpoint_override") {
+			// Hidden test escape hatch; users opt in with use_irc_scan_plan and let the URL derive.
+			credentials.irc_endpoint_override = entry.second.ToString();
+			StringUtil::RTrim(credentials.irc_endpoint_override, "/");
 		} else {
 			throw BinderException("Unrecognized option for UC attach: %s", entry.first);
 		}
@@ -134,9 +145,9 @@ static unique_ptr<Catalog> UnityCatalogAttach(optional_ptr<StorageExtensionInfo>
 		//! No explicit default schema provided, ask the catalog:
 		// Fixme: default namespace endpoint not available in OSS unity catalog, hence we throw
 		try {
-			default_schema = UCAPI::GetDefaultSchema(context, credentials);
+			default_schema = Identifier(UCAPI::GetDefaultSchema(context, credentials));
 		} catch (Exception &e) {
-			DUCKDB_LOG_ERROR(context, "Failed to fetch default schema: %s", e.what());
+			UC_LOG_ERROR(context, "api.GetDefaultSchema failed: %s", e.what());
 		}
 	}
 
@@ -195,6 +206,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register table checkpoint functions
 	loader.RegisterFunction(UCCheckpointTableFunction());
 	loader.RegisterFunction(UCForceCheckpointTableFunction());
+
+	// Inspect/decode Iceberg deletion vectors from SQL (see functions/uc_deletion_vector.hpp)
+	loader.RegisterFunction(UCReadDeletionVectorFunction());
+
+	// Internal: drive the IRC scan-plan request/poll directly (see functions/uc_plan_table_scan.hpp)
+	loader.RegisterFunction(UCInternalPlanTableScanFunction());
 }
 
 void UnityCatalogExtension::Load(ExtensionLoader &loader) {

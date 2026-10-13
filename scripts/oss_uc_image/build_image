@@ -1,0 +1,305 @@
+#!/bin/bash
+#
+# Build (and publish) the ducktest Unity Catalog test image in two steps:
+#   1. base   = unitycatalog built from a UC source checkout (its own multi-stage
+#               Dockerfile via Dockerfile.base; runs sbt -- the slow part)
+#   2. final  = thin overlay (duck config + seeding entrypoint) from this dir
+#
+# UC source checkout is located via $UC_REPO or --uc-repo (default below); build_image fetches +
+# switches it to $UC_REF / --uc-ref (default v0.5.1, DETACHED) so a local build and CI pin the exact
+# same commit. Pass --no-switch to build whatever is currently checked out (local WIP):
+#
+#   UC_REPO=/path/to/unitycatalog ./build_image                    # -> switches to v0.5.1
+#   ./build_image --uc-repo /path/to/unitycatalog --uc-ref v0.5.2
+#   ./build_image --no-switch                                      # build the current HEAD as-is
+#
+# Image names (registry-qualified; version + UC sha in the TAG):
+#
+#   base : ghcr.io/benfleis/ducktest-unitycatalog-base:<version>-uc<gitref7>
+#   final: ghcr.io/benfleis/ducktest-unitycatalog:<version>-uc<gitref7>
+#   alias: ghcr.io/benfleis/ducktest-unitycatalog:local   (local run/uctl/smoke)
+#
+# <version> from version.sbt (lowercased); <gitref7> = 7-char UC sha. The branch
+# and a -dirty flag are intentionally omitted from the published tag: this script
+# patches the UC source (so it always reads "dirty") and the checkout is usually
+# detached. Override the whole tag with $IMAGE_TAG, or names with $IMAGE_NS /
+# $IMAGE_NAME / $BASE_IMAGE / $FINAL_IMAGE / $STABLE_ALIAS.
+#
+# MULTI-ARCH PUBLISH FLOW (one tag serving both linux/arm64 + linux/amd64):
+#
+#   ./build_image --push                          # 1. host arch (arm64 on a Mac):
+#                                                 #    native build, loaded locally
+#                                                 #    AND pushed as :TAG-arm64
+#   ./build_image --platform linux/amd64 --push   # 2. amd64 via buildx + QEMU,
+#                                                 #    pushed as :TAG-amd64 (slow --
+#                                                 #    run it in the background)
+#   ./build_image --merge --alias ci              # 3. stitch :TAG-<arch> tags into
+#                                                 #    the canonical multi-arch :TAG
+#                                                 #    (+ move a :ci alias onto it)
+#
+# Every build pushes an arch-suffixed tag (:TAG-<arch>); --merge assembles the
+# canonical :TAG manifest list from whichever arch tags exist, and --alias NAME
+# additionally points a moving :NAME tag (e.g. :ci) at the final manifest so a
+# consumer can pull a stable tag. A cross-arch build REQUIRES --push (a foreign-arch
+# image can't load into the local daemon); CI instead builds each arch NATIVELY on a
+# matching runner (step 1 per arch), then merges. --alias also works with $PUBLISH_ALIAS.
+#
+# The base build is skipped if that arch's base image already exists (locally for a
+# native non-push build, else in the registry), unless --rebuild-base.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Registry namespace + repo stem. Override IMAGE_NS to publish elsewhere.
+IMAGE_NS="${IMAGE_NS:-ghcr.io/benfleis}"
+IMAGE_NAME="${IMAGE_NAME:-ducktest-unitycatalog}"
+
+# Dedicated buildx builder for cross-arch work. The docker-container driver
+# reliably does emulated cross builds + push; the default "docker" builder can't
+# always. Created on demand, only when a cross build is requested.
+XBUILDER="${XBUILDER:-ducktest-uc-xbuild}"
+
+UC_REPO="${UC_REPO:-$HOME/src/d/unitycatalog}"
+# The unitycatalog source ref to build from. Owned HERE (not the CI checkout) so local + CI pin the same
+# commit; build_image fetches + switches $UC_REPO to it. Default is the single source of truth; override
+# via --uc-ref / UC_REF (empty/unset -> v0.5.1), or --no-switch to build the checkout as-is.
+UC_REF="${UC_REF:-v0.5.1}"
+UC_REMOTE="${UC_REMOTE:-origin}"
+
+# Host (daemon) arch, normalized to docker/Go names (arm64 / amd64).
+HOST_ARCH="$(docker version -f '{{.Server.Arch}}' 2>/dev/null || uname -m)"
+case "$HOST_ARCH" in aarch64) HOST_ARCH=arm64 ;; x86_64) HOST_ARCH=amd64 ;; esac
+PLATFORM="${PLATFORM:-linux/$HOST_ARCH}"
+
+rebuild_base=
+push=
+merge=
+no_switch=
+PUBLISH_ALIAS="${PUBLISH_ALIAS:-}" # extra moving tag to stamp on --merge (e.g. `ci`); empty = none
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--rebuild-base)
+		rebuild_base=1
+		shift
+		;;
+	--push)
+		push=1
+		shift
+		;;
+	--merge)
+		merge=1
+		shift
+		;;
+	--alias)
+		PUBLISH_ALIAS="${2:?--alias needs a tag, e.g. ci}"
+		shift 2
+		;;
+	--alias=*)
+		PUBLISH_ALIAS="${1#*=}"
+		shift
+		;;
+	--platform)
+		PLATFORM="${2:?--platform needs e.g. linux/amd64}"
+		shift 2
+		;;
+	--platform=*)
+		PLATFORM="${1#*=}"
+		shift
+		;;
+	--uc-repo)
+		UC_REPO="${2:?--uc-repo needs a path}"
+		shift 2
+		;;
+	--uc-repo=*)
+		UC_REPO="${1#*=}"
+		shift
+		;;
+	--uc-ref)
+		UC_REF="${2?--uc-ref needs a ref}"
+		shift 2
+		;;
+	--uc-ref=*)
+		UC_REF="${1#*=}"
+		shift
+		;;
+	--no-switch)
+		no_switch=1
+		shift
+		;;
+	-h | --help)
+		awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+		exit 0
+		;;
+	*)
+		echo "unknown arg: $1" >&2
+		exit 2
+		;;
+	esac
+done
+
+ARCH="${PLATFORM##*/}"
+
+if [ ! -f "$UC_REPO/build.sbt" ]; then
+	echo "error: UC source checkout not found at '$UC_REPO' (no build.sbt)." >&2
+	echo "       set UC_REPO=/path/to/unitycatalog or pass --uc-repo." >&2
+	exit 1
+fi
+REPO_DIR="$(cd "$UC_REPO" && pwd)"
+
+# --- pin the UC source to UC_REF (ref logic lives HERE, not in the CI checkout) -----------------------
+# fetch + switch $REPO_DIR to UC_REF (detached) so local and CI build the same commit, which is also
+# what lets a republish reuse the pushed base (base tag is keyed to the sha). We un-apply our OWN patches
+# first so they don't block the switch (re-applied in build mode below); UNRELATED uncommitted changes
+# still (correctly) block it and we bail. --no-switch skips this and builds the current HEAD as-is.
+if [ -z "$no_switch" ] && [ -n "$UC_REF" ]; then
+	shopt -s nullglob
+	for patch in "$SCRIPT_DIR"/patches/*.patch; do
+		if git -C "$REPO_DIR" apply --reverse --check "$patch" >/dev/null 2>&1; then
+			git -C "$REPO_DIR" apply --reverse "$patch"
+		fi
+	done
+	shopt -u nullglob
+	git -C "$REPO_DIR" fetch --tags "$UC_REMOTE" "$UC_REF" >/dev/null 2>&1 &&
+		git -C "$REPO_DIR" switch --detach FETCH_HEAD >/dev/null 2>&1 ||
+		{
+			echo "error: could not fetch+switch '$REPO_DIR' to UC_REF='$UC_REF' via remote '$UC_REMOTE'." >&2
+			echo "       is the ref valid on the remote, and the tree free of unrelated changes?" >&2
+			echo "       (pass --no-switch to build the current checkout as-is.)" >&2
+			exit 1
+		}
+	echo ">> UC source pinned to $UC_REF ($(git -C "$REPO_DIR" rev-parse --short=7 HEAD))"
+fi
+
+# --- derive version / gitref from the checkout -------------------------------
+VERSION="$(sed -n 's/.*version[[:space:]]*:=[[:space:]]*"\(.*\)".*/\1/p' "$REPO_DIR/version.sbt" |
+	head -1 | tr '[:upper:]' '[:lower:]')"
+VERSION="${VERSION:-unknown}"
+if FULL_SHA="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null)"; then
+	GITREF7="$(git -C "$REPO_DIR" rev-parse --short=7 HEAD)"
+else
+	FULL_SHA="unknown"
+	GITREF7="nogit"
+fi
+
+TAG="${IMAGE_TAG:-${VERSION}-uc${GITREF7}}"
+BASE_IMAGE="${BASE_IMAGE:-${IMAGE_NS}/${IMAGE_NAME}-base:${TAG}}"
+FINAL_IMAGE="${FINAL_IMAGE:-${IMAGE_NS}/${IMAGE_NAME}:${TAG}}"
+STABLE_ALIAS="${STABLE_ALIAS:-${IMAGE_NS}/${IMAGE_NAME}:local}"
+
+ensure_xbuilder() {
+	docker buildx inspect "$XBUILDER" >/dev/null 2>&1 ||
+		docker buildx create --name "$XBUILDER" --driver docker-container >/dev/null
+}
+
+# --- merge mode: assemble the canonical multi-arch tags from per-arch tags ----
+if [ -n "$merge" ]; then
+	for repo_image in "$BASE_IMAGE" "$FINAL_IMAGE"; do
+		srcs=()
+		for a in arm64 amd64; do
+			if docker buildx imagetools inspect "${repo_image}-${a}" >/dev/null 2>&1; then
+				srcs+=("${repo_image}-${a}")
+			else
+				echo ">> note: ${repo_image}-${a} not in registry -- skipping" >&2
+			fi
+		done
+		if [ "${#srcs[@]}" -eq 0 ]; then
+			echo "error: no per-arch tags for ${repo_image} -- build+push them first." >&2
+			exit 1
+		fi
+		[ "${#srcs[@]}" -lt 2 ] && echo ">> WARNING: only ${#srcs[@]} arch for ${repo_image} (not multi-arch)" >&2
+		echo ">> merging -> ${repo_image}   (${srcs[*]})"
+		docker buildx imagetools create -t "$repo_image" "${srcs[@]}"
+	done
+	# Optional moving alias (e.g. `ci`) pointing at the canonical final manifest, so a consumer can pull a
+	# stable tag without knowing the version/sha. Points to FINAL only (the base is an implementation detail).
+	if [ -n "$PUBLISH_ALIAS" ]; then
+		alias_ref="${IMAGE_NS}/${IMAGE_NAME}:${PUBLISH_ALIAS}"
+		echo ">> aliasing -> ${alias_ref} -> ${FINAL_IMAGE}"
+		docker buildx imagetools create -t "$alias_ref" "$FINAL_IMAGE"
+	fi
+	echo ">> done. canonical final image:"
+	docker buildx imagetools inspect "$FINAL_IMAGE"
+	exit 0
+fi
+
+# --- build mode --------------------------------------------------------------
+NATIVE=
+[ "$ARCH" = "$HOST_ARCH" ] && NATIVE=1
+if [ -z "$NATIVE" ] && [ -z "$push" ]; then
+	echo "error: cross-arch build ($PLATFORM on $HOST_ARCH host) can't load locally;" >&2
+	echo "       re-run with --push (it publishes the ${ARCH}-suffixed tag)." >&2
+	exit 1
+fi
+
+BASE_ARCH_IMAGE="${BASE_IMAGE}-${ARCH}"
+FINAL_ARCH_IMAGE="${FINAL_IMAGE}-${ARCH}"
+
+# --- apply kit patches to the UC source (idempotent) -------------------------
+# Local UC fixes the duck image needs (e.g. ambient-S3 creds in the CLI Delta
+# writer) live in patches/ so the build is reproducible from a clean checkout.
+# Already-applied -> no-op; non-applying -> warn+skip (local FS still works; only
+# S3-external would NPE).
+shopt -s nullglob
+for patch in "$SCRIPT_DIR"/patches/*.patch; do
+	name="$(basename "$patch")"
+	if git -C "$REPO_DIR" apply --reverse --check "$patch" >/dev/null 2>&1; then
+		echo ">> patch already applied: $name"
+	elif git -C "$REPO_DIR" apply --check "$patch" >/dev/null 2>&1; then
+		git -C "$REPO_DIR" apply "$patch" && echo ">> applied patch: $name"
+	else
+		echo ">> WARNING: $name does not apply cleanly to $REPO_DIR -- skipping" >&2
+	fi
+done
+shopt -u nullglob
+
+echo ">> UC checkout : $REPO_DIR"
+echo ">> version     : $VERSION   uc-sha: $GITREF7   platform: $PLATFORM   native: ${NATIVE:-no}"
+echo ">> final image : $FINAL_ARCH_IMAGE"
+
+LABELS=(--label "org.opencontainers.image.title=${IMAGE_NS}/${IMAGE_NAME}"
+	--label "org.opencontainers.image.version=$VERSION"
+	--label "org.opencontainers.image.revision=$FULL_SHA")
+
+# --- step 1: base ------------------------------------------------------------
+base_exists() {
+	# A native build normally checks the local daemon -- but when pushing (CI publish), a fresh runner has
+	# no local images, so check the REGISTRY too: a base pushed by an earlier publish is then reused (the
+	# final overlay's --build-arg BASE pulls it), skipping the slow sbt rebuild on every dispatch.
+	if [ -n "$NATIVE" ] && [ -z "$push" ]; then
+		docker image inspect "$BASE_ARCH_IMAGE" >/dev/null 2>&1
+	else docker buildx imagetools inspect "$BASE_ARCH_IMAGE" >/dev/null 2>&1; fi
+}
+if [ -n "$rebuild_base" ] || ! base_exists; then
+	echo ">> building base image $BASE_ARCH_IMAGE (sbt build, slow)..."
+	# Dockerfile.base = unitycatalog/Dockerfile + one COURSIER_CACHE line so the
+	# dependency jars land where the runtime stage copies from. Context is the repo.
+	if [ -n "$NATIVE" ]; then
+		docker build -t "$BASE_ARCH_IMAGE" -f "$SCRIPT_DIR/Dockerfile.base" "$REPO_DIR"
+		[ -n "$push" ] && docker push "$BASE_ARCH_IMAGE"
+	else
+		ensure_xbuilder
+		docker buildx build --builder "$XBUILDER" --platform "$PLATFORM" \
+			-t "$BASE_ARCH_IMAGE" -f "$SCRIPT_DIR/Dockerfile.base" --push "$REPO_DIR"
+	fi
+else
+	echo ">> reusing existing base image $BASE_ARCH_IMAGE (pass --rebuild-base to force)"
+fi
+
+# --- step 2: final overlay ---------------------------------------------------
+echo ">> building final image $FINAL_ARCH_IMAGE..."
+if [ -n "$NATIVE" ]; then
+	docker build -t "$FINAL_ARCH_IMAGE" --build-arg "BASE=$BASE_ARCH_IMAGE" "${LABELS[@]}" "$SCRIPT_DIR"
+	# Local convenience tags (single-arch, local only). The canonical registry :TAG
+	# is created by --merge so it's always a proper multi-arch manifest list.
+	docker tag "$FINAL_ARCH_IMAGE" "$FINAL_IMAGE"
+	docker tag "$FINAL_ARCH_IMAGE" "$STABLE_ALIAS"
+	[ -n "$push" ] && docker push "$FINAL_ARCH_IMAGE"
+else
+	ensure_xbuilder
+	docker buildx build --builder "$XBUILDER" --platform "$PLATFORM" \
+		-t "$FINAL_ARCH_IMAGE" --build-arg "BASE=$BASE_ARCH_IMAGE" "${LABELS[@]}" --push "$SCRIPT_DIR"
+fi
+
+echo ">> done: $FINAL_ARCH_IMAGE"
+[ -n "$NATIVE" ] && echo ">>       $STABLE_ALIAS -> same image (local run/uctl/smoke default to this)"
+[ -n "$push" ] && echo ">> pushed $FINAL_ARCH_IMAGE; once the other arch is pushed run: $0 --merge"

@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Rebuild the premade TPC-H schema `test/databricks/tpch.test` reads.
+
+The tables have no def and no generator, so a catalog reset loses them. Run:
+
+    scripts/env_databricks uv run --with duckdb scripts/databricks-tpch-load
+
+`--with duckdb`: dbgen comes from a RELEASED duckdb (the build's own has no tpch extension --
+extensions.duckdb.org has nothing for an unreleased submodule SHA), while the insert goes through
+the build's duckdb, the only one with the UC write path. Parquet in a temp dir joins the two.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from databricks_gen import DATABRICKS_TYPE_MAP, execute, external_location  # noqa: E402
+
+# tpch.test attaches this catalog and schema literally, so both are fixed here rather than
+# configurable: a loader that can write elsewhere just moves the data away from its only reader.
+SCALE_FACTOR = "0.01"
+SCHEMA = "tpch_sf0_01"
+
+TABLES = (
+    "customer",
+    "lineitem",
+    "nation",
+    "orders",
+    "part",
+    "partsupp",
+    "region",
+    "supplier",
+)
+
+
+def _duckdb_bin():
+    if os.environ.get("DUCKDB_BIN"):
+        return os.environ["DUCKDB_BIN"]
+    if os.environ.get("BUILD_DIR"):
+        return os.path.join(os.environ["BUILD_DIR"], "duckdb")
+    return "duckdb"
+
+
+def _databricks_type(duck_type):
+    """DuckDB's type spelling -> Databricks'. Parameters ride along: DECIMAL(15,2) keeps them.
+
+    NOTE: only correct for the flat types tpc* generates; nested or parameterized-and-renamed
+    types (VARCHAR(10) -> STRING(10)) come out invalid.
+    """
+    base = duck_type.split("(")[0].strip().upper()
+    mapped = DATABRICKS_TYPE_MAP.get(base, base)
+    return duck_type.replace(base, mapped, 1) if "(" in duck_type else mapped
+
+
+def generate(out_dir):
+    """dbgen into `out_dir`/<table>.parquet; return {table: "col TYPE, ..."}."""
+    import duckdb
+
+    con = duckdb.connect()
+    con.sql("INSTALL tpch; LOAD tpch;")
+    con.sql(f"CALL dbgen(sf={SCALE_FACTOR})")
+    columns = {}
+    for table in TABLES:
+        path = os.path.join(out_dir, f"{table}.parquet")
+        con.sql(f"COPY {table} TO '{path}' (FORMAT parquet)")
+        described = con.sql(f"DESCRIBE {table}").fetchall()
+        columns[table] = ", ".join(f"{row[0]} {_databricks_type(row[1])}" for row in described)
+    return columns
+
+
+def create_tables(catalog, columns, bucket, managed, dry_run):
+    statements = [f"CREATE SCHEMA IF NOT EXISTS {catalog}.{SCHEMA}"]
+    for table, cols in columns.items():
+        fqn = f"{catalog}.{SCHEMA}.{table}"
+        location = "" if managed else f"\nLOCATION '{external_location(bucket, catalog, SCHEMA, table)}'"
+        statements.append(f"CREATE OR REPLACE TABLE {fqn} ({cols}){location}")
+    for statement in statements:
+        print(f"{'[dry-run] ' if dry_run else ''}{statement};")
+        if not dry_run:
+            execute(statement)
+
+
+def insert_rows(catalog, out_dir, duckdb_bin, dry_run):
+    """One duckdb invocation: attach the catalog, then load each table from its parquet."""
+    lines = [
+        "CREATE SECRET (TYPE UNITY_CATALOG, TOKEN '${DATABRICKS_TOKEN}', "
+        "ENDPOINT '${DATABRICKS_ENDPOINT}', AWS_REGION '${DATABRICKS_REGION}');",
+        f"ATTACH '{catalog}' (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{SCHEMA}');",
+    ]
+    for table in TABLES:
+        path = os.path.join(out_dir, f"{table}.parquet")
+        lines.append(f"INSERT INTO {catalog}.{SCHEMA}.{table} SELECT * FROM read_parquet('{path}');")
+    sql = os.path.expandvars("\n".join(lines))
+    if dry_run:
+        print("\n".join(lines))
+        return
+    proc = subprocess.run([duckdb_bin, "-unsigned", "-c", sql], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise SystemExit(f"duckdb insert failed:\n{proc.stderr.strip()}")
+    print(f"loaded {len(TABLES)} tables into {catalog}.{SCHEMA}")
+
+
+def main():
+    p = argparse.ArgumentParser(description="Rebuild the premade Databricks TPC-H tables.")
+    p.add_argument("--catalog", default="duckdb_testing", help="catalog tpch.test attaches")
+    p.add_argument(
+        "--bucket",
+        default=os.environ.get("DATABRICKS_S3_BUCKET", "ducklabs-uc-testing-rw"),
+        help="bucket for the tables' LOCATION (ignored with --managed)",
+    )
+    p.add_argument("--managed", action="store_true", help="UC-managed tables, no LOCATION")
+    p.add_argument("--duckdb-bin", default=None, help="the duckdb with the UC write path")
+    p.add_argument("--dry-run", action="store_true", help="print SQL, touch nothing")
+    args = p.parse_args()
+
+    with tempfile.TemporaryDirectory(prefix="tpch-") as out_dir:
+        columns = generate(out_dir)
+        create_tables(args.catalog, columns, args.bucket, args.managed, args.dry_run)
+        insert_rows(args.catalog, out_dir, args.duckdb_bin or _duckdb_bin(), args.dry_run)
+
+
+if __name__ == "__main__":
+    main()

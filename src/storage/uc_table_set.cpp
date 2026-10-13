@@ -2,6 +2,9 @@
 
 #include "uc_api.hpp"
 #include "uc_logging.hpp"
+#include "duckdb/main/database_manager.hpp"
+#include "duckdb/parser/parsed_data/attach_info.hpp"
+#include "duckdb/transaction/transaction_manager.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
 #include "uc_utils.hpp"
 
@@ -13,27 +16,30 @@
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/catalog/dependency_list.hpp"
-#include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/constraints/list.hpp"
 #include "storage/uc_schema_entry.hpp"
 #include "storage/uc_transaction.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
 
-static idx_t ParseDeltaVersionFromAtClause(const BoundAtClause &at_clause) {
-	if (StringUtil::Lower(at_clause.Unit()) != "version") {
-		throw InvalidConfigurationException("Delta tables only support at_clause with unit 'version'");
+// Casts exactly like the Delta extension does, so a key and Delta's read agree on the instant, to the millisecond
+// Delta commit timestamps carry. Delta holds a resolved timestamp for the rest of the transaction, which is
+// what lets the timestamp itself key the entry.
+static string AtClauseKeySuffix(const BoundAtClause &at_clause) {
+	auto &unit = at_clause.Unit();
+	if (unit == "version") {
+		return "@" + to_string(at_clause.GetValue().DefaultCastAs(LogicalType::UBIGINT).GetValue<idx_t>());
 	}
-	Value version_value = at_clause.GetValue();
-	if (!version_value.DefaultTryCastAs(LogicalType::UBIGINT, false)) {
-		throw InvalidInputException("Failed to parse version number '%s' into a valid version",
-		                            at_clause.GetValue().ToString().c_str());
+	if (unit == "timestamp") {
+		auto timestamp = at_clause.GetValue().DefaultCastAs(LogicalType::TIMESTAMP_TZ).GetValue<timestamp_tz_t>();
+		return "@ts:" + to_string(Timestamp::GetEpochMs(timestamp_t(timestamp)));
 	}
-	return version_value.GetValue<idx_t>();
+	throw InvalidConfigurationException("Delta tables only support at_clause with unit 'version' or 'timestamp'");
 }
 
 UCTableSet::UCTableSet(UCSchemaEntry &schema) : catalog(schema.ParentCatalog().Cast<UnityCatalog>()), schema(schema) {
@@ -60,7 +66,7 @@ static string DescribeColumns(const TableCatalogEntry &entry) {
 		if (!result.empty()) {
 			result += ", ";
 		}
-		result += column.GetName() + " " + column.GetType().ToString();
+		result += column.GetName().GetIdentifierName() + " " + column.GetType().ToString();
 	}
 	return result;
 }
@@ -74,7 +80,8 @@ static bool SameColumns(const CatalogEntry &left, const CatalogEntry &right) {
 	for (idx_t i = 0; i < left_columns.LogicalColumnCount(); i++) {
 		auto &left_column = left_columns.GetColumn(LogicalIndex(i));
 		auto &right_column = right_columns.GetColumn(LogicalIndex(i));
-		if (left_column.GetName() != right_column.GetName() || left_column.GetType() != right_column.GetType()) {
+		if (left_column.GetName().GetIdentifierName() != right_column.GetName().GetIdentifierName() ||
+		    left_column.GetType() != right_column.GetType()) {
 			return false;
 		}
 	}
@@ -91,7 +98,8 @@ static void WarnOnSchemaDivergence(ClientContext &context, const CatalogEntry &r
 	               "schema.Resolve %s: the catalog reports (%s) but the Delta log holds (%s); reading the log. A "
 	               "commit the catalog has not caught up with resolves itself; repeated, the registration is stale "
 	               "or the table was written by an engine the catalog does not see",
-	               resolved_table.name, DescribeColumns(reported_table), DescribeColumns(resolved_table));
+	               resolved_table.name.GetIdentifierName(), DescribeColumns(reported_table),
+	               DescribeColumns(resolved_table));
 }
 
 unique_ptr<CatalogEntry> TableInformation::EntryFromDeltaLog(ClientContext &context,
@@ -118,8 +126,8 @@ optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, 
 	ThrowIfIntervalColumns();
 	auto at = lookup_info.GetAtClause();
 	if (!at) {
-		// A non-Delta table has no log to resolve against, so the catalog's report is all there is.
-		if (reported && table_data->data_source_format != "DELTA") {
+		// Neither ScanPlan/non-delta has a log to resolve against, return reported a la UCTableEntry::GetScanFunction.
+		if (reported && (catalog.ShouldTryScanPlan() || table_data->data_source_format != "DELTA")) {
 			ThrowIfUnreadableColumns();
 			return reported.get();
 		}
@@ -152,9 +160,8 @@ optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, 
 		return transaction.SetTableEntry(key, std::move(entry));
 	}
 
-	auto version = ParseDeltaVersionFromAtClause(*at);
 	auto &transaction = UCTransaction::Get(context, catalog);
-	auto key = EntryKey(version);
+	auto key = EntryKey(at);
 	auto bound = transaction.GetTableEntry(key);
 	if (bound) {
 		return bound;
@@ -166,10 +173,10 @@ optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, 
 	return transaction.SetTableEntry(key, std::move(entry));
 };
 
-//! Qualified name, plus the version where the query named one; unversioned means latest.
-string TableInformation::EntryKey(optional_idx version) const {
-	auto key = schema.name + "." + table_data->name;
-	return version.IsValid() ? key + "@" + to_string(version.GetIndex()) : key;
+//! Qualified name, plus the version or timestamp where the query named one; neither means latest.
+string TableInformation::EntryKey(optional_ptr<BoundAtClause> at) const {
+	auto key = schema.name.GetIdentifierName() + "." + table_data->name;
+	return at ? key + AtClauseKeySuffix(*at) : key;
 }
 
 // `reported` describes a table, and tracks unrepresentables; this throws at bind with nice error
@@ -238,7 +245,7 @@ void TableInformation::RefreshCredentials(ClientContext &context) {
 	CreateSecretInput input;
 	input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
 	input.persist_type = SecretPersistType::TEMPORARY;
-	input.name = "__internal_uc_" + table_data->table_id;
+	input.name = Identifier("__internal_uc_" + table_data->table_id);
 	input.type = "s3";
 	input.provider = "config";
 	input.options = {
@@ -265,7 +272,10 @@ void TableInformation::InternalDetach(ClientContext &context, const lock_guard<m
 	}
 	auto &db_manager = DatabaseManager::Get(context);
 	auto name = AttachedCatalogName();
-	db_manager.DetachDatabase(context, name, OnEntryNotFound::THROW_EXCEPTION);
+	// This pointer is ours, but the attachment it names belongs to DuckDB, which undoes it when the
+	// statement that attached it rolls back -- leaving the pointer set and nothing to detach. Tolerate
+	// that: the name has to be released either way, or the next attach collides with it.
+	db_manager.DetachDatabase(context, Identifier(name), OnEntryNotFound::RETURN_NULL);
 	internal_attached_database = nullptr;
 }
 
@@ -323,8 +333,8 @@ optional_idx TableInformation::BackfillCommits(ClientContext &context, const vec
 			// Real failure — stop to avoid advancing backfilled_version past a gap. Surface it: a
 			// silently-swallowed backfill failure lets staged commits accumulate until the server
 			// rejects further commits (HTTP 429, "too many un-backfilled commits").
-			UC_LOG_WARNING(context, "uc.BackfillCommits version=%lld src=%s dst=%s failed: %s", (int64_t)commit.version,
-			               src.c_str(), dst.c_str(), e.what());
+			UC_LOG_WARNING(context, "api.BackfillCommits version=%lld src=%s dst=%s failed: %s",
+			               (int64_t)commit.version, src.c_str(), dst.c_str(), e.what());
 			break;
 		}
 	}
@@ -387,7 +397,7 @@ void TableInformation::InternalAttach(ClientContext &context) {
 
 	// Create the attach info for the table
 	AttachInfo info;
-	info.name = AttachedCatalogName();
+	info.name = Identifier(AttachedCatalogName());
 	info.options = {{"type", Value("Delta")},
 	                {"child_catalog_mode", Value(true)},
 	                {"internal_table_name", Value(name)},
@@ -399,7 +409,7 @@ void TableInformation::InternalAttach(ClientContext &context) {
 		auto commits = UCAPI::LoadTable(context, table_data->catalog_name, table_data->schema_name, table_data->name,
 		                                uc_catalog.credentials);
 		info.options["parent_catalog"] = Value(catalog.GetName());
-		info.options["parent_catalog_schema"] = Value(schema.name);
+		info.options["parent_catalog_schema"] = Value(schema.name.GetIdentifierName());
 		info.options["parent_commit"] = Value(true);
 		info.options["max_catalog_version"] = Value::BIGINT((int64_t)commits.ratified_version);
 		// Backfill outside commit_state's lock (file I/O), then publish {etag, watermark} atomically.
@@ -413,7 +423,7 @@ void TableInformation::InternalAttach(ClientContext &context) {
 		optional_idx start_wm = commit_state.with_locked([](const UCCommitState &s) { return s.backfilled_version; });
 		if (read_only) {
 			UC_LOG_DEBUG(context,
-			             "uc.InternalAttach %s.%s.%s read-only: skipping backfill (%zu backfillable commit(s))",
+			             "api.InternalAttach %s.%s.%s read-only: skipping backfill (%zu backfillable commit(s))",
 			             table_data->catalog_name, table_data->schema_name, table_data->name, commits.commits.size());
 		}
 		optional_idx new_wm = read_only ? start_wm : BackfillCommits(context, commits.commits, start_wm);
@@ -478,7 +488,8 @@ void UCTableSet::Checkpoint(ClientContext &context, bool force) {
 
 void UCTableSet::LoadEntries(ClientContext &context, const lock_guard<mutex> &_entry_lock) {
 	auto &unity_catalog = catalog.Cast<UnityCatalog>();
-	auto get_tables_result = UCAPI::GetTables(context, catalog, schema.name, unity_catalog.credentials);
+	auto get_tables_result =
+	    UCAPI::GetTables(context, catalog, schema.name.GetIdentifierName(), unity_catalog.credentials);
 
 	for (auto &table : get_tables_result) {
 		D_ASSERT(schema.name == table.schema_name);
@@ -507,7 +518,7 @@ void UCTableSet::LoadEntries(ClientContext &context, const lock_guard<mutex> &_e
 		                          std::forward_as_tuple(catalog, schema));
 		auto &table_info = res.first->second;
 
-		info.table = table.name;
+		info.SetTableName(Identifier(table.name));
 		auto table_entry = make_uniq<UCTableEntry>(catalog, schema, table_info, info);
 
 		table_info.table_data = make_uniq<UCAPITable>(table);

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Inject the Databricks test credentials, then exec env "$@". Used for both dev and CI.
+set -euo pipefail
+
+if ! creds="$(op read op://testing-rw/databricks_ccv2/_env | op inject)"; then
+	echo "env_databricks: could not read Databricks creds from 1Password" \
+		"(sign in with \`op\`, or export OP_SERVICE_ACCOUNT_TOKEN)." >&2
+	exit 1
+fi
+
+# set -a auto-exports every assignment from the bundle
+set -a
+eval "$creds"
+set +a
+
+exec env "$@"
