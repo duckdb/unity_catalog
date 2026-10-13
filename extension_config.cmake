@@ -9,6 +9,6 @@ duckdb_extension_load(unity_catalog
 # NOTE: replace with SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/../delta for local dev
 duckdb_extension_load(delta
     GIT_URL https://github.com/duckdb/duckdb-delta
-    GIT_TAG 0ebdebdf6ed9d2c8c6b17b077152ee1a00c4f2e4
+    GIT_TAG de3e086bd72bc7b819ab85c03dba526af775793c
     SUBMODULES extension-ci-tools
 )
