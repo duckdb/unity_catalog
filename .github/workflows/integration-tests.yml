@@ -86,6 +86,10 @@ jobs:
           make $BUILD_KIND
           sccache --show-stats || true
 
+      # The repository is this build's own set of installable extensions, and `require <name>` in a
+      # sqllogictest body reaches for it: autoinstall defaults to it by absolute path, so a test job
+      # without it skips every such file instead of running it. Its directory is named after the duckdb
+      # pin, hence the glob.
       - name: Upload test binary + extensions
         uses: actions/upload-artifact@v4
         with:
@@ -95,6 +99,7 @@ jobs:
             build/${{ env.BUILD_KIND }}/test/unittest_cpp
             build/${{ env.BUILD_KIND }}/duckdb
             build/${{ env.BUILD_KIND }}/extension/**/*.duckdb_extension
+            build/${{ env.BUILD_KIND }}/repository/**
             build/${{ env.BUILD_KIND }}/src/libduckdb.so
           if-no-files-found: error
           retention-days: 3
