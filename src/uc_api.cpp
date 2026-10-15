@@ -406,8 +406,7 @@ static duckdb_yyjson::yyjson_mut_val *WireSchemaCopy(duckdb_yyjson::yyjson_mut_d
 	return duckdb_yyjson::yyjson_val_mut_copy(doc, value);
 }
 
-//! A Delta `schemaString` as the `columns` of a create-table request.
-static string WireSchema(const string &schema_json) {
+string UCAPI::WireSchema(const string &schema_json) {
 	YYJsonDoc parsed(schema_json);
 	if (!parsed.Root()) {
 		throw InvalidInputException("could not parse the table schema written to the Delta log");

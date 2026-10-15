@@ -18,7 +18,8 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../src/include)
 
 add_executable(
   unittest_cpp main.cpp test_uc_irc_expression.cpp
-               test_uc_position_delete_filter.cpp test_uc_type_mapping.cpp)
+               test_uc_position_delete_filter.cpp test_uc_type_mapping.cpp
+               test_uc_wire_schema.cpp)
 set_target_properties(unittest_cpp PROPERTIES RUNTIME_OUTPUT_DIRECTORY
                                               ${CMAKE_BINARY_DIR}/test)
 

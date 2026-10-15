@@ -195,6 +195,9 @@ public:
 	// Registers a staged table that has its version 0 written, describing it as the log does.
 	static void CreateTable(ClientContext &ctx, const string &catalog_name, const string &schema_name,
 	                        const UCAPICommittedTable &table, const UCCredentials &credentials);
+	//! A Delta `schemaString` as the `columns` of a create-table request, which spells multi-word keys
+	//! with dashes where the log uses camelCase
+	static string WireSchema(const string &schema_json);
 	// delta.yaml v1: GET /delta/v1/staging-tables/{table_id}/credentials
 	// Always READ_WRITE: the caller writes the table's version 0.
 	static UCAPITableCredentials GetStagingTableCredentials(ClientContext &ctx, const string &table_id,
