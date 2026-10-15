@@ -232,3 +232,33 @@ CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_time (t TIME);
 ----
 does not support column 't' of type TIME
 
+# -----------------------------------------------------------------------------
+# Inside a transaction
+#
+# The catalog registers the table during the CREATE itself, so a ROLLBACK does not undo it: the
+# table stays, empty and usable. Spark has no multi-statement transactions to compare with, and this
+# pins the current behaviour so that a change to it is a deliberate one.
+#
+
+statement ok
+BEGIN;
+
+statement ok
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_rolledback (id INTEGER);
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM duck.cmt.{UC_TEST_NEW_TABLE}_rolledback;
+----
+0
+
+statement ok
+INSERT INTO duck.cmt.{UC_TEST_NEW_TABLE}_rolledback VALUES (1);
+
+query I
+SELECT count(*) FROM duck.cmt.{UC_TEST_NEW_TABLE}_rolledback;
+----
+1
+

@@ -44,5 +44,5 @@ def test_create_table(request, uc_server):
             },
         )
     finally:
-        for name in (table, nested):
+        for name in (table, nested, f"{table}_rolledback"):
             _delete_table(endpoint, f"{catalog}.cmt.{name}")
