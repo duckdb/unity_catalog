@@ -204,8 +204,8 @@ public:
 	}
 
 public:
-	//! Observed on OSS 0.5.1 as {"error": {"type": "AlreadyExistsException", "code": 409}}; the legacy
-	//! all.yaml shape spells the same condition in error_code.
+	//! Observed on OSS 0.5.1 as {"error": {"message": "Table already exists: t", "type":
+	//! "AlreadyExistsException", "code": 409}}; the legacy all.yaml shape spells it in error_code.
 	bool IsAlreadyExists() const {
 		return error_code == "AlreadyExistsException" || error_code == "ALREADY_EXISTS" ||
 		       error_code == "TABLE_ALREADY_EXISTS";
@@ -296,11 +296,26 @@ static vector<pair<string, string>> ReadStringMap(duckdb_yyjson::yyjson_val *obj
 	size_t idx, max;
 	duckdb_yyjson::yyjson_val *key, *val;
 	yyjson_obj_foreach(obj, idx, max, key, val) {
-		if (!yyjson_is_str(val)) {
-			// A null value means "UC has no opinion", which is not a property to set
+		if (yyjson_is_null(val)) {
+			// UC has no opinion, which is not a property to set
 			continue;
 		}
-		result.emplace_back(yyjson_get_str(key), yyjson_get_str(val));
+		if (yyjson_is_str(val)) {
+			result.emplace_back(yyjson_get_str(key), yyjson_get_str(val));
+		} else if (yyjson_is_bool(val) || yyjson_is_num(val)) {
+			// Delta keeps every property as a string; a server that sends `true` or `10` means its text
+			size_t len = 0;
+			char *text = duckdb_yyjson::yyjson_val_write(val, duckdb_yyjson::YYJSON_WRITE_NOFLAG, &len);
+			if (!text) {
+				throw InvalidInputException("yyjson property encoding failed");
+			}
+			result.emplace_back(yyjson_get_str(key), string(text, len));
+			free(text);
+		} else {
+			throw InvalidInputException("Unity Catalog sent property \"%s\" as a JSON object or array, which a "
+			                            "Delta table property cannot hold",
+			                            yyjson_get_str(key));
+		}
 	}
 	return result;
 }
@@ -422,9 +437,9 @@ UCAPIStagingTable UCAPI::CreateStagingTable(ClientContext &ctx, const string &ca
 	UC_LOG_DEBUG(ctx, "api.CreateStagingTable %s.%s.%s", catalog_name, schema_name, table_name);
 	// A taken name comes back as a 409, and CREATE IF NOT EXISTS treats that as a no-op, so the body
 	// is parsed instead of thrown.
-	auto api_result = MakeRequest(ctx, url, credentials.token, body, false, HTTPStatusCode::Conflict_409);
+	auto response = MakeRequestResp(ctx, url, credentials.token, body, false, HTTPStatusCode::Conflict_409);
 
-	YYJsonDoc doc(api_result);
+	YYJsonDoc doc(response->body);
 	auto *root = doc.Root();
 	auto error = CheckError(root);
 	if (error.HasError()) {
@@ -434,6 +449,12 @@ UCAPIStagingTable UCAPI::CreateStagingTable(ClientContext &ctx, const string &ca
 			throw CatalogException::EntryAlreadyExists(CatalogType::TABLE_ENTRY, Identifier(table_name));
 		}
 		error.ThrowError(StringUtil::Format("Failed to stage table %s.%s.%s", catalog_name, schema_name, table_name));
+	}
+	if (!response->Success()) {
+		// A 409 without UC's error body, e.g. from a proxy in front of it: report the status, not a missing field.
+		throw IOException("Request to '%s' failed (HTTP %d): %s\nResponse body: %s", url,
+		                  static_cast<int>(response->status), response->GetError(),
+		                  response->body.empty() ? "(empty)" : response->body);
 	}
 
 	result.table_id = TryGetStrFromObject(root, "table-id");
@@ -454,8 +475,6 @@ void UCAPI::CreateTable(ClientContext &ctx, const string &catalog_name, const st
                         const UCAPICommittedTable &table, const UCCredentials &credentials) {
 	string url = StringUtil::Format("%s/api/2.1/unity-catalog/delta/v1/catalogs/%s/schemas/%s/tables",
 	                                credentials.endpoint, catalog_name, schema_name);
-	// The protocol, properties and columns describe what was committed, not what was asked for, so the
-	// catalog cannot end up describing a table that differs from its own version 0.
 	string body = StringUtil::Format(
 	    R"({"name": %s, "location": %s, "table-type": "MANAGED", "columns": %s, "partition-columns": %s, )"
 	    R"("protocol": {"min-reader-version": %d, "min-writer-version": %d, "reader-features": %s, )"

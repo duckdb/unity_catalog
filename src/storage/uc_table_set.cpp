@@ -689,6 +689,13 @@ static UCAPICommittedTable ReadCommittedTable(ClientContext &context, const stri
 	return result;
 }
 
+static bool IsEntryAlreadyExists(const CatalogException &e) {
+	ErrorData error(e);
+	auto &extra = error.ExtraInfo();
+	auto subtype = extra.find("error_subtype");
+	return subtype != extra.end() && subtype->second == "ENTRY_ALREADY_EXISTS";
+}
+
 optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, BoundCreateTableInfo &info) {
 	auto &uc_catalog = catalog.Cast<UnityCatalog>();
 	if (uc_catalog.access_mode == AccessMode::READ_ONLY) {
@@ -704,8 +711,8 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	UCAPIStagingTable staging;
 	try {
 		staging = UCAPI::CreateStagingTable(context, catalog_name, schema_name, table_name, uc_catalog.credentials);
-	} catch (const CatalogException &) {
-		if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+	} catch (const CatalogException &e) {
+		if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT && IsEntryAlreadyExists(e)) {
 			return nullptr;
 		}
 		throw;
@@ -766,10 +773,10 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 		} catch (const InterruptException &) {
 			throw;
 		} catch (std::exception &e) {
-			// Check: table may be registered even though the call reported failure -- a 5xx after the write, a dropped
-			// connection. The spec resolves that by loading the name and matching its uuid against the staged id
-			// (tasks/ManagedTablesSpec.md:446); anything else is the real error, and a retry of it would fail at
-			// staging with a 409 instead.
+			// The table may be registered even though the call reported failure -- a 5xx after the write, a
+			// dropped connection. UC's managed-tables protocol settles that by loading the name and comparing its
+			// table-uuid with the staged id; on any other outcome this is the real error, and a retry would only
+			// fail at staging with a 409.
 			string loaded_uuid;
 			try {
 				loaded_uuid =
@@ -785,7 +792,12 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 			               catalog_name, schema_name, table_name, e.what());
 		}
 	} catch (...) {
-		db_manager.DetachDatabase(context, Identifier(attached_name), OnEntryNotFound::RETURN_NULL);
+		try {
+			db_manager.DetachDatabase(context, Identifier(attached_name), OnEntryNotFound::RETURN_NULL);
+		} catch (std::exception &detach_error) {
+			UC_LOG_WARNING(context, "CreateTable %s.%s.%s could not detach its staging database: %s", catalog_name,
+			               schema_name, table_name, detach_error.what());
+		}
 		throw;
 	}
 	db_manager.DetachDatabase(context, Identifier(attached_name), OnEntryNotFound::RETURN_NULL);
