@@ -52,6 +52,14 @@ WHERE message LIKE 'api.CreateTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE}%';
 ----
 1
 
+# UC suggests column mapping, and taking it would leave nested and partitioned tables impossible to
+# create: it is the one suggestion skipped on purpose rather than for want of kernel support
+query I
+SELECT count(*) FROM duckdb_logs()
+WHERE message = 'CreateTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE} skipped suggested property delta.columnMapping.mode';
+----
+1
+
 # The catalog serves it, with the columns as written. Scoped to the attachment: once a table has been
 # resolved, the internal Delta database holding it is attached too, and duckdb_columns() reports both.
 query II
@@ -75,6 +83,16 @@ WHERE database_name = 'duck' AND table_name = '{UC_TEST_NEW_TABLE}' ORDER BY col
 ----
 id	INTEGER
 name	VARCHAR
+
+# It was the catalog that refused: the name was staged a second time, and nothing was registered.
+# A check against the tables already loaded would have skipped the staging call altogether.
+query II
+SELECT
+    count(*) FILTER (WHERE message LIKE 'api.CreateStagingTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE}%'),
+    count(*) FILTER (WHERE message LIKE 'api.CreateTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE}%')
+FROM duckdb_logs();
+----
+2	1
 
 statement error
 CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE} (id INTEGER, name VARCHAR);
@@ -161,3 +179,56 @@ query III
 SELECT tags, scores, who FROM nested.cmt.{UC_TEST_NEW_NESTED_TABLE};
 ----
 [a, b]	{x=1}	{'first': ann, 'ages': [3, 4]}
+
+statement ok
+DETACH nested;
+
+# -----------------------------------------------------------------------------
+# What a CREATE here refuses
+#
+# Each of these is a table the statement cannot describe faithfully, so it has to fail rather than
+# create something else. The names are per run because a refusal from the Delta writer comes after
+# the name was staged.
+#
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'cmt');
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS ro (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'cmt', READ_ONLY);
+
+statement error
+CREATE TABLE ro.cmt.{UC_TEST_NEW_TABLE}_ro (id INTEGER);
+----
+attached in read-only mode
+
+statement error
+CREATE OR REPLACE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_replace (id INTEGER);
+----
+REPLACE ON CONFLICT in CreateTable
+
+statement error
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_as AS SELECT 1 AS id;
+----
+PlanCreateTableAs
+
+statement error
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_part (id INTEGER, p VARCHAR) PARTITIONED BY (p);
+----
+PARTITIONED BY is not supported
+
+statement error
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_notnull (id INTEGER NOT NULL);
+----
+does not support NOT NULL constraints
+
+statement error
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_pk (id INTEGER PRIMARY KEY);
+----
+does not support constraints
+
+statement error
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_time (t TIME);
+----
+does not support column 't' of type TIME
+

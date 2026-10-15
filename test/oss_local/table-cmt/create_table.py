@@ -6,10 +6,10 @@ because DROP TABLE is not supported yet and a fixed name would collide with the 
 and deletes the tables afterwards through UC's REST API so a long-lived server does not fill
 up with them.
 
-`UC_ENDPOINT` is where the server answers. It defaults to the address the other bodies
-hardcode; a run from somewhere that reaches the container by another address (a dev
-container talking to a server on its host, say) sets it and both the body and the cleanup
-below follow.
+`UC_ENDPOINT` is where the server answers. It defaults to the endpoint of the server the
+fixture provisioned or attached to (--existing-service); a run that reaches that server by another
+address (a dev container talking to a server on its host, say) sets it, and both the body and the
+cleanup below follow.
 """
 
 import os
@@ -18,8 +18,6 @@ import urllib.request
 import uuid
 
 from ducktest import run_paired
-
-DEFAULT_ENDPOINT = "http://127.0.0.1:8080"
 
 
 def _delete_table(endpoint, full_name):
@@ -32,7 +30,7 @@ def _delete_table(endpoint, full_name):
 
 
 def test_create_table(request, uc_server):
-    endpoint = os.environ.get("UC_ENDPOINT", DEFAULT_ENDPOINT)
+    endpoint = os.environ.get("UC_ENDPOINT", uc_server.endpoint)
     catalog = os.environ.get("UC_TEST_CATALOG", "duck")
     table = f"created_by_duckdb_{uuid.uuid4().hex[:8]}"
     nested = f"created_by_duckdb_nested_{uuid.uuid4().hex[:8]}"
