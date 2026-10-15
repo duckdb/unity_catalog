@@ -7,6 +7,7 @@
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
+#include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/storage/database_size.hpp"
 #include "storage/uc_schema_entry.hpp"
 #include "storage/uc_transaction.hpp"
@@ -36,6 +37,28 @@ optional_ptr<CatalogEntry> UnityCatalog::CreateSchema(CatalogTransaction transac
 		schemas.DropEntry(transaction.GetContext(), try_drop);
 	}
 	return schemas.CreateSchema(transaction.GetContext(), info);
+}
+
+ErrorData UnityCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
+	auto &base = info.Base().Cast<CreateTableInfo>();
+	// Unlike the base catalog we accept PARTITIONED BY, whose columns the Delta writer has a use for.
+	// Nothing here maps onto SORTED BY.
+	if (!base.sort_keys.empty()) {
+		return ErrorData(ExceptionType::CATALOG,
+		                 StringUtil::Format("SORTED BY is not supported for tables in a %s catalog", GetCatalogType()));
+	}
+	// `location` is accepted so that UCTableSet::CreateTable can refuse it saying what it would mean;
+	// every other option is refused by name. Keys arrive lowercased from the parser, as that check assumes.
+	for (auto &option : base.options) {
+		if (option.first == "location") {
+			continue;
+		}
+		return ErrorData(ExceptionType::CATALOG,
+		                 StringUtil::Format("Unrecognized option \"%s\" for a table in a %s catalog; CREATE TABLE "
+		                                    "takes \"location\", which asks for an external table",
+		                                    option.first, GetCatalogType()));
+	}
+	return ErrorData();
 }
 
 void UnityCatalog::DropSchema(ClientContext &context, DropInfo &info) {

@@ -16,6 +16,8 @@ require-env UC_TEST_NEW_TABLE
 
 require-env UC_TEST_NEW_NESTED_TABLE
 
+require-env UC_TEST_NEW_PARTITIONED_TABLE
+
 require-env UC_ENDPOINT
 
 statement ok
@@ -213,11 +215,6 @@ CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_as AS SELECT 1 AS id;
 PlanCreateTableAs
 
 statement error
-CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_part (id INTEGER, p VARCHAR) PARTITIONED BY (p);
-----
-PARTITIONED BY is not supported
-
-statement error
 CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_notnull (id INTEGER NOT NULL);
 ----
 does not support NOT NULL constraints
@@ -233,6 +230,24 @@ CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_time (t TIME);
 does not support column 't' of type TIME
 
 # -----------------------------------------------------------------------------
+# Partitioned
+#
+# PARTITIONED BY reaches the Delta writer, which lays the rows out by partition. Paired
+# create_table.py checks that UC registered the partition column too, which SQL cannot see.
+#
+
+statement ok
+CREATE TABLE duck.cmt.{UC_TEST_NEW_PARTITIONED_TABLE} (id INTEGER, p VARCHAR) PARTITIONED BY (p);
+
+statement ok
+INSERT INTO duck.cmt.{UC_TEST_NEW_PARTITIONED_TABLE} VALUES (1, 'a'), (2, 'b'), (3, 'a');
+
+query II
+SELECT p, count(*) FROM duck.cmt.{UC_TEST_NEW_PARTITIONED_TABLE} GROUP BY p ORDER BY p;
+----
+a	2
+b	1
+
 # Inside a transaction
 #
 # The catalog registers the table during the CREATE itself, so a ROLLBACK does not undo it: the

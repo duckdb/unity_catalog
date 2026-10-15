@@ -12,6 +12,7 @@ address (a dev container talking to a server on its host, say) sets it, and both
 cleanup below follow.
 """
 
+import json
 import os
 import urllib.error
 import urllib.request
@@ -29,20 +30,30 @@ def _delete_table(endpoint, full_name):
         pass
 
 
+def _partition_indexes(endpoint, full_name):
+    with urllib.request.urlopen(f"{endpoint}/api/2.1/unity-catalog/tables/{full_name}", timeout=10) as response:
+        return {c["name"]: c.get("partition_index") for c in json.load(response)["columns"]}
+
+
 def test_create_table(request, uc_server):
     endpoint = os.environ.get("UC_ENDPOINT", uc_server.endpoint)
     catalog = os.environ.get("UC_TEST_CATALOG", "duck")
     table = f"created_by_duckdb_{uuid.uuid4().hex[:8]}"
     nested = f"created_by_duckdb_nested_{uuid.uuid4().hex[:8]}"
+    partitioned = f"created_by_duckdb_partitioned_{uuid.uuid4().hex[:8]}"
     try:
         run_paired(
             request,
             env={
                 "UC_TEST_NEW_TABLE": table,
                 "UC_TEST_NEW_NESTED_TABLE": nested,
+                "UC_TEST_NEW_PARTITIONED_TABLE": partitioned,
+                "UC_TEST_CATALOG": catalog,
                 "UC_ENDPOINT": endpoint,
             },
         )
+        # The partition column is registered as one, which no query through DuckDB shows
+        assert _partition_indexes(endpoint, f"{catalog}.cmt.{partitioned}") == {"id": None, "p": 0}
     finally:
-        for name in (table, nested, f"{table}_rolledback"):
+        for name in (table, nested, partitioned, f"{table}_rolledback"):
             _delete_table(endpoint, f"{catalog}.cmt.{name}")
