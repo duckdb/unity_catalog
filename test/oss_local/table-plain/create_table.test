@@ -1,0 +1,182 @@
+# name: test/oss_local/table-plain/create_table.test
+# description: CREATE TABLE with a location makes an EXTERNAL table: DuckDB writes version 0 at that location and registers it with UC, without staging it. Paired create_table.py picks the names and the location root, checks over REST what UC registered, and deletes the tables afterwards.
+# group: [table-plain]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_ENDPOINT
+
+require-env UC_TEST_NEW_TABLE
+
+require-env UC_TEST_LOCATION
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT '{UC_ENDPOINT}',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'plain');
+
+statement ok
+CALL enable_logging(level='DEBUG');
+
+# -----------------------------------------------------------------------------
+# Creating it
+#
+
+statement ok
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE} (id INTEGER, name VARCHAR)
+WITH (location = '{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}');
+
+# Registered as written, and never staged: staging is how UC hands out a location of its own
+query II
+SELECT
+    count(*) FILTER (WHERE message LIKE 'api.CreateStagingTable %'),
+    count(*) FILTER (WHERE message = 'api.CreateTable {UC_TEST_CATALOG}.plain.{UC_TEST_NEW_TABLE} EXTERNAL')
+FROM duckdb_logs();
+----
+0	1
+
+query I
+SELECT count(*) FROM glob('{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}/_delta_log/00000000000000000000.json');
+----
+1
+
+query II
+SELECT column_name, data_type FROM duckdb_columns()
+WHERE database_name = 'duck' AND table_name = '{UC_TEST_NEW_TABLE}' ORDER BY column_index;
+----
+id	INTEGER
+name	VARCHAR
+
+# -----------------------------------------------------------------------------
+# Creating it again
+#
+# The name is checked before anything is written, so neither statement leaves a log at its location.
+#
+
+statement ok
+CREATE TABLE IF NOT EXISTS duck.plain.{UC_TEST_NEW_TABLE} (id INTEGER)
+WITH (location = '{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_again');
+
+statement error
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE} (id INTEGER)
+WITH (location = '{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_again');
+----
+already exists
+
+query I
+SELECT count(*) FROM glob('{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_again/**');
+----
+0
+
+# -----------------------------------------------------------------------------
+# Refused after the write
+#
+# UC refuses a location under managed storage only at registration, once version 0 is written. That
+# log is removed again: kernel would refuse any later create at the location while it is there.
+#
+
+statement error
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}_refused (id INTEGER)
+WITH (location = '{UC_TEST_LOCATION}/__unitystorage/{UC_TEST_NEW_TABLE}_refused');
+----
+__unitystorage
+
+query II
+SELECT
+    (SELECT count(*) FROM duckdb_logs() WHERE message LIKE 'CreateTable %_refused removed the unregistered version 0 %'),
+    (SELECT count(*) FROM glob('{UC_TEST_LOCATION}/__unitystorage/{UC_TEST_NEW_TABLE}_refused/_delta_log/*'));
+----
+1	0
+
+# -----------------------------------------------------------------------------
+# Using it
+#
+# An external table is not catalog-managed, so its commits go straight to its log.
+#
+
+statement ok
+INSERT INTO duck.plain.{UC_TEST_NEW_TABLE} VALUES (1, 'one'), (2, 'two');
+
+query II
+SELECT id, name FROM duck.plain.{UC_TEST_NEW_TABLE} ORDER BY id;
+----
+1	one
+2	two
+
+# -----------------------------------------------------------------------------
+# Partitioned, at a computed location
+#
+
+statement ok
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}_part (id INTEGER, p VARCHAR) PARTITIONED BY (p)
+WITH (location = concat('{UC_TEST_LOCATION}/', '{UC_TEST_NEW_TABLE}_part'));
+
+statement ok
+INSERT INTO duck.plain.{UC_TEST_NEW_TABLE}_part VALUES (1, 'a'), (2, 'b'), (3, 'a');
+
+query II
+SELECT p, count(*) FROM duck.plain.{UC_TEST_NEW_TABLE}_part GROUP BY p ORDER BY p;
+----
+a	2
+b	1
+
+# A volatile location is evaluated once: version 0 is written where the table is registered
+statement ok
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}_uuid (id INTEGER)
+WITH (location = concat('{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_uuid_', gen_random_uuid()));
+
+query I
+SELECT count(*) FROM glob('{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_uuid_*/_delta_log/00000000000000000000.json');
+----
+1
+
+# -----------------------------------------------------------------------------
+# In a schema with managed storage
+#
+# The location decides, not the schema: a table with one is EXTERNAL wherever it is created.
+#
+
+statement ok
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_ext (id INTEGER)
+WITH (location = '{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_ext');
+
+statement ok
+INSERT INTO duck.cmt.{UC_TEST_NEW_TABLE}_ext VALUES (7);
+
+# -----------------------------------------------------------------------------
+# A session that did not create them
+#
+
+statement ok
+CALL disable_logging();
+
+statement ok
+DETACH duck;
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS fresh (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'plain');
+
+query II
+SELECT id, name FROM fresh.plain.{UC_TEST_NEW_TABLE} ORDER BY id;
+----
+1	one
+2	two
+
+query I
+SELECT id FROM fresh.cmt.{UC_TEST_NEW_TABLE}_ext;
+----
+7

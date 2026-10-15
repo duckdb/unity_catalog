@@ -64,6 +64,8 @@ struct UCAPICommitsResult {
 	vector<UCAPICommit> commits;
 	//! JSON: metadata.table-uuid -- the id a create can be recognized by when its outcome is unclear
 	string table_uuid;
+	//! JSON: metadata.location -- what recognizes an external table, whose id UC picks at registration
+	string location;
 	// Newest version the catalog has assigned (may not yet be backfilled into _delta_log/).
 	idx_t ratified_version = 0; // JSON: latest-table-version
 	string etag;
@@ -192,9 +194,15 @@ public:
 	                                            const string &schema_name, const string &table_name,
 	                                            const UCCredentials &credentials);
 	// delta.yaml v1: POST /delta/v1/catalogs/{catalog}/schemas/{schema}/tables
-	// Registers a staged table that has its version 0 written, describing it as the log does.
+	// Registers a table whose version 0 is written, describing it as the log does. `table_type` is MANAGED for
+	// a staged table and EXTERNAL for one at a location the caller chose. A taken name throws
+	// CatalogException::EntryAlreadyExists.
 	static void CreateTable(ClientContext &ctx, const string &catalog_name, const string &schema_name,
-	                        const UCAPICommittedTable &table, const UCCredentials &credentials);
+	                        const UCAPICommittedTable &table, const string &table_type,
+	                        const UCCredentials &credentials);
+	// all.yaml: GET /tables/{catalog}.{schema}.{table}, false on a 404
+	static bool TableExists(ClientContext &ctx, const string &catalog_name, const string &schema_name,
+	                        const string &table_name, const UCCredentials &credentials);
 	//! A Delta `schemaString` as the `columns` of a create-table request, which spells multi-word keys
 	//! with dashes where the log uses camelCase
 	static string WireSchema(const string &schema_json);

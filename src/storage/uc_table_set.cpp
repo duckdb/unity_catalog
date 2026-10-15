@@ -28,6 +28,11 @@
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/common/types/uuid.hpp"
+#include "duckdb/planner/expression_binder/table_function_binder.hpp"
+#include "duckdb/planner/binder.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 
 namespace duckdb {
 
@@ -696,22 +701,175 @@ static bool IsEntryAlreadyExists(const CatalogException &e) {
 	return subtype != extra.end() && subtype->second == "ENTRY_ALREADY_EXISTS";
 }
 
+//! Attaches a Delta catalog at `location`, writes the table's version 0 through it, and returns what that
+//! version committed. The attachment is gone again when this returns, whichever way it returns.
+static UCAPICommittedTable WriteVersionZero(ClientContext &context, BoundCreateTableInfo &info, AttachInfo &attach_info,
+                                            const string &table_name, const string &location) {
+	AttachOptions attach_options(context.db->config.options);
+	attach_options.access_mode = AccessMode::READ_WRITE;
+	attach_options.db_type = "delta";
+
+	auto &db_manager = DatabaseManager::Get(context);
+	auto attached_name = attach_info.name;
+	auto delta_db = db_manager.AttachDatabase(context, attach_info, attach_options);
+	UCAPICommittedTable committed;
+	try {
+		auto &delta_catalog = delta_db->GetCatalog();
+		auto &delta_schema = delta_catalog.GetSchema(context, Identifier::DefaultSchema());
+		delta_schema.CreateTable(delta_schema.GetCatalogTransaction(context), info);
+		committed = ReadCommittedTable(context, table_name, location);
+	} catch (...) {
+		try {
+			db_manager.DetachDatabase(context, attached_name, OnEntryNotFound::RETURN_NULL);
+		} catch (std::exception &detach_error) {
+			UC_LOG_WARNING(context, "CreateTable %s could not detach the database it wrote through: %s", table_name,
+			               detach_error.what());
+		}
+		throw;
+	}
+	db_manager.DetachDatabase(context, attached_name, OnEntryNotFound::RETURN_NULL);
+	return committed;
+}
+
+//! Registers `committed` with UC. A failed call may hide a registration that went through -- a 5xx after the
+//! write, a dropped connection -- so on failure the name is loaded, and `is_ours` decides whether the table
+//! registered under it is the one just written. Anything else is the real error.
+static void RegisterTable(ClientContext &context, UnityCatalog &uc_catalog, const string &catalog_name,
+                          const string &schema_name, const UCAPICommittedTable &committed, const string &table_type,
+                          const std::function<bool(const UCAPICommitsResult &)> &is_ours) {
+	try {
+		UCAPI::CreateTable(context, catalog_name, schema_name, committed, table_type, uc_catalog.credentials);
+	} catch (const InterruptException &) {
+		throw;
+	} catch (const CatalogException &) {
+		throw;
+	} catch (std::exception &e) {
+		bool registered = false;
+		try {
+			registered =
+			    is_ours(UCAPI::LoadTable(context, catalog_name, schema_name, committed.name, uc_catalog.credentials));
+		} catch (std::exception &) {
+		}
+		if (!registered) {
+			throw;
+		}
+		UC_LOG_WARNING(context,
+		               "api.CreateTable %s.%s.%s reported an error but the table is registered as written; "
+		               "treating it as created: %s",
+		               catalog_name, schema_name, committed.name, e.what());
+	}
+}
+
+//! A location as a path that can be compared: no `file://` prefix, one leading slash, no trailing one.
+static string ComparableLocation(string location) {
+	if (StringUtil::StartsWith(location, "file:")) {
+		location = location.substr(5);
+		auto first = location.find_first_not_of('/');
+		location = "/" + (first == string::npos ? string() : location.substr(first));
+	}
+	while (location.size() > 1 && location.back() == '/') {
+		location.pop_back();
+	}
+	return location;
+}
+
+//! The `location` option, evaluated as delta evaluates its options. It must be absolute: UC resolves a
+//! relative path against the server's own working directory, which no client can see.
+static string ExternalLocation(ClientContext &context, const ParsedExpression &option) {
+	auto binder = Binder::CreateBinder(context);
+	TableFunctionBinder option_binder(*binder, context, "CREATE TABLE", "Table option");
+	auto copy = option.Copy();
+	auto bound = option_binder.Bind(copy);
+	auto value = ExpressionExecutor::EvaluateScalar(context, *bound, true);
+	if (value.IsNull()) {
+		throw BinderException("NULL is not a valid CREATE TABLE location");
+	}
+	auto location = value.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>();
+	if (!StringUtil::StartsWith(location, "/") && !StringUtil::Contains(location, "://")) {
+		throw BinderException("CREATE TABLE location must be an absolute path or a URI, found '%s'", location);
+	}
+	return location;
+}
+
+//! Removes the version 0 a failed external create wrote: kernel refuses to create where `_delta_log` holds
+//! any file, so it would block every later create at `location`, and SQL has no way to remove it. Kept when
+//! UC lists the table at `location` after all, or cannot say, since a registered table owns that log.
+static void RemoveUnregisteredVersionZero(ClientContext &context, UnityCatalog &uc_catalog, const string &catalog_name,
+                                          const string &schema_name, const string &table_name, const string &location) {
+	auto log_dir = location;
+	try {
+		if (UCAPI::TableExists(context, catalog_name, schema_name, table_name, uc_catalog.credentials)) {
+			auto loaded = UCAPI::LoadTable(context, catalog_name, schema_name, table_name, uc_catalog.credentials);
+			if (ComparableLocation(loaded.location) == ComparableLocation(location)) {
+				return;
+			}
+		}
+		auto &fs = FileSystem::GetFileSystem(context);
+		log_dir = fs.JoinPath(location, "_delta_log");
+		// The filesystem committer writes version 0 only if absent, so every version 0 file here is ours
+		for (auto &file : fs.Glob(fs.JoinPath(log_dir, "00000000000000000000.*"))) {
+			fs.RemoveFile(file.path);
+		}
+		UC_LOG_DEBUG(context, "CreateTable %s.%s.%s removed the unregistered version 0 at %s", catalog_name,
+		             schema_name, table_name, log_dir);
+	} catch (std::exception &e) {
+		UC_LOG_WARNING(context,
+		               "CreateTable %s.%s.%s could not remove the version 0 it wrote at %s, which blocks any later "
+		               "create there: %s",
+		               catalog_name, schema_name, table_name, log_dir, e.what());
+	}
+}
+
 optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, BoundCreateTableInfo &info) {
 	auto &uc_catalog = catalog.Cast<UnityCatalog>();
 	if (uc_catalog.access_mode == AccessMode::READ_ONLY) {
 		throw InvalidInputException("Can not create a table in a read only Unity Catalog");
 	}
 	auto &base = info.Base().Cast<CreateTableInfo>();
-	// The bind accepts `location` so the option can be refused here, where the message can say what it
-	// would mean, rather than in DuckDB's own "WITH clause is not supported" before binding finishes.
-	if (base.options.find("location") != base.options.end()) {
-		throw NotImplementedException("CREATE TABLE with a location, which asks for an external table, is not "
-		                              "supported yet; a table created here is catalog-managed and Unity Catalog "
-		                              "chooses where it lives");
-	}
 	auto table_name = base.GetTableName().GetIdentifierName();
 	auto catalog_name = catalog.GetDBPath();
 	auto schema_name = schema.name.GetIdentifierName();
+
+	auto location_option = base.options.find("location");
+	if (location_option != base.options.end()) {
+		// The caller chose where the table lives, which in UC makes it EXTERNAL: no staging, no catalog committer,
+		// nothing UC requires of the log. Version 0 is written before UC hears of the table, so a taken name is
+		// checked first rather than found at registration, after a write.
+		auto location = ExternalLocation(context, *location_option->second);
+		// Delta evaluates the option again, and must see the same path even when the expression is volatile
+		location_option->second = ConstantExpression::String(location);
+		if (UCAPI::TableExists(context, catalog_name, schema_name, table_name, uc_catalog.credentials)) {
+			if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+				return nullptr;
+			}
+			throw CatalogException::EntryAlreadyExists(CatalogType::TABLE_ENTRY, Identifier(table_name));
+		}
+		AttachInfo attach_info;
+		// Unique, as the staging id makes the managed one: concurrent creates of a name must not collide here
+		attach_info.name = Identifier("__unity_catalog_internal_create_" + UUID::ToString(UUID::GenerateRandomUUID()));
+		attach_info.path = location;
+		attach_info.options = {
+		    {"type", Value("Delta")}, {"child_catalog_mode", Value(true)}, {"internal_table_name", Value(table_name)}};
+		auto committed = WriteVersionZero(context, info, attach_info, table_name, location);
+		auto written = ComparableLocation(location);
+		try {
+			RegisterTable(
+			    context, uc_catalog, catalog_name, schema_name, committed, "EXTERNAL",
+			    [&](const UCAPICommitsResult &loaded) { return ComparableLocation(loaded.location) == written; });
+		} catch (const CatalogException &e) {
+			RemoveUnregisteredVersionZero(context, uc_catalog, catalog_name, schema_name, table_name, location);
+			// Taken between the check and the registration
+			if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT && IsEntryAlreadyExists(e)) {
+				return nullptr;
+			}
+			throw;
+		} catch (std::exception &) {
+			RemoveUnregisteredVersionZero(context, uc_catalog, catalog_name, schema_name, table_name, location);
+			throw;
+		}
+		MarkNeedsReload();
+		return nullptr;
+	}
 
 	// UC allocates the location and the table id, and says what the table has to be. The catalog is
 	// the only authority on whether the name is taken, so the name is not checked here first.
@@ -726,11 +884,36 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	}
 	StageCredentials(context, uc_catalog, staging);
 
+	// A suggestion is UC saying "this is how we would write it", so take the ones that can be taken.
+	// Two reasons one cannot: column mapping, which the writer maps for top-level, unpartitioned
+	// columns only, so applying it by default would leave nested and partitioned tables impossible to
+	// create; and any `delta.*` key kernel does not accept at creation, which it refuses outright.
+	for (auto &property : staging.suggested_properties) {
+		if (property.first == "delta.columnMapping.mode" || !CreatableDeltaProperty(property.first)) {
+			UC_LOG_DEBUG(context, "CreateTable %s.%s.%s skipped suggested property %s", catalog_name, schema_name,
+			             table_name, property.first);
+			continue;
+		}
+		base.options[property.first] = ConstantExpression::String(property.second);
+	}
+	// What UC requires becomes part of the statement kernel sees: its properties as they are, and its
+	// protocol features as `delta.feature.<name> = supported`, which is how a table asks for them at
+	// creation. Without `catalogManaged` among them kernel refuses to commit through a catalog
+	// committer at all. Written after the suggestions, so a key UC names in both is the way it
+	// requires it, not the way it would prefer it.
+	for (auto &property : staging.required_properties) {
+		base.options[property.first] = ConstantExpression::String(property.second);
+	}
+	for (auto &features : {staging.reader_features, staging.writer_features}) {
+		for (auto &feature : features) {
+			base.options["delta.feature." + feature] = ConstantExpression::String("supported");
+		}
+	}
+
 	// Version 0 is written through this catalog's committer, so the delta catalog is attached the way a
 	// read attaches one, minus what only an existing table has (its commits and ratified version).
-	auto attached_name = "__unity_catalog_internal_staging_" + staging.table_id;
 	AttachInfo attach_info;
-	attach_info.name = Identifier(attached_name);
+	attach_info.name = Identifier("__unity_catalog_internal_staging_" + staging.table_id);
 	attach_info.path = staging.location;
 	attach_info.options = {{"type", Value("Delta")},
 	                       {"child_catalog_mode", Value(true)},
@@ -739,75 +922,17 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	                       {"parent_catalog", Value(catalog.GetName())},
 	                       {"parent_catalog_schema", Value(schema_name)},
 	                       {"parent_commit", Value(true)}};
-	AttachOptions attach_options(context.db->config.options);
-	attach_options.access_mode = AccessMode::READ_WRITE;
-	attach_options.db_type = "delta";
-
-	auto &db_manager = DatabaseManager::Get(context);
-	auto staging_db = db_manager.AttachDatabase(context, attach_info, attach_options);
+	auto committed = WriteVersionZero(context, info, attach_info, table_name, staging.location);
 	try {
-		// A suggestion is UC saying "this is how we would write it", so take the ones that can be taken.
-		// Two reasons one cannot: column mapping, which the writer maps for top-level, unpartitioned
-		// columns only, so applying it by default would leave nested and partitioned tables impossible to
-		// create; and any `delta.*` key kernel does not accept at creation, which it refuses outright.
-		for (auto &property : staging.suggested_properties) {
-			if (property.first == "delta.columnMapping.mode" || !CreatableDeltaProperty(property.first)) {
-				UC_LOG_DEBUG(context, "CreateTable %s.%s.%s skipped suggested property %s", catalog_name, schema_name,
-				             table_name, property.first);
-				continue;
-			}
-			base.options[property.first] = ConstantExpression::String(property.second);
-		}
-		// What UC requires becomes part of the statement kernel sees: its properties as they are, and its
-		// protocol features as `delta.feature.<name> = supported`, which is how a table asks for them at
-		// creation. Without `catalogManaged` among them kernel refuses to commit through a catalog
-		// committer at all. Written after the suggestions, so a key UC names in both is the way it
-		// requires it, not the way it would prefer it.
-		for (auto &property : staging.required_properties) {
-			base.options[property.first] = ConstantExpression::String(property.second);
-		}
-		for (auto &features : {staging.reader_features, staging.writer_features}) {
-			for (auto &feature : features) {
-				base.options["delta.feature." + feature] = ConstantExpression::String("supported");
-			}
-		}
-		auto &delta_catalog = staging_db->GetCatalog();
-		auto &delta_schema = delta_catalog.GetSchema(context, Identifier::DefaultSchema());
-		delta_schema.CreateTable(delta_schema.GetCatalogTransaction(context), info);
-		auto committed = ReadCommittedTable(context, table_name, staging.location);
-		try {
-			UCAPI::CreateTable(context, catalog_name, schema_name, committed, uc_catalog.credentials);
-		} catch (const InterruptException &) {
-			throw;
-		} catch (std::exception &e) {
-			// The table may be registered even though the call reported failure -- a 5xx after the write, a
-			// dropped connection. UC's managed-tables protocol settles that by loading the name and comparing its
-			// table-uuid with the staged id; on any other outcome this is the real error, and a retry would only
-			// fail at staging with a 409.
-			string loaded_uuid;
-			try {
-				loaded_uuid =
-				    UCAPI::LoadTable(context, catalog_name, schema_name, table_name, uc_catalog.credentials).table_uuid;
-			} catch (std::exception &) {
-			}
-			if (loaded_uuid.empty() || loaded_uuid != staging.table_id) {
-				throw;
-			}
-			UC_LOG_WARNING(context,
-			               "api.CreateTable %s.%s.%s reported an error but the table is registered with the "
-			               "staged id; treating it as created: %s",
-			               catalog_name, schema_name, table_name, e.what());
-		}
-	} catch (...) {
-		try {
-			db_manager.DetachDatabase(context, Identifier(attached_name), OnEntryNotFound::RETURN_NULL);
-		} catch (std::exception &detach_error) {
-			UC_LOG_WARNING(context, "CreateTable %s.%s.%s could not detach its staging database: %s", catalog_name,
-			               schema_name, table_name, detach_error.what());
+		RegisterTable(context, uc_catalog, catalog_name, schema_name, committed, "MANAGED",
+		              [&](const UCAPICommitsResult &loaded) { return loaded.table_uuid == staging.table_id; });
+	} catch (const CatalogException &e) {
+		// Taken between staging and registration
+		if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT && IsEntryAlreadyExists(e)) {
+			return nullptr;
 		}
 		throw;
 	}
-	db_manager.DetachDatabase(context, Identifier(attached_name), OnEntryNotFound::RETURN_NULL);
 
 	// The catalog now owns a table this set has never seen; its next lookup loads it from UC.
 	MarkNeedsReload();
