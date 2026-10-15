@@ -66,7 +66,7 @@ public:
 	}
 
 	//! What a CREATE may say here: the base class refuses a WITH clause outright, so without this
-	//! override `location` -- the option that asks for an external table -- never reaches the catalog.
+	//! override `location` -- the option that makes a table EXTERNAL -- never reaches the catalog.
 	ErrorData SupportsCreateTable(BoundCreateTableInfo &info) override;
 
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;

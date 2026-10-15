@@ -26,16 +26,21 @@ statement ok
 ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'cmt');
 
 # -----------------------------------------------------------------------------
-# location reaches the catalog
+# What a location has to be
 #
-# The option asking for an external table is not implemented yet, and the refusal has to come from
-# the extension -- a message about the WITH clause itself would mean the bind never got here.
+# UC would resolve a relative path against the server's own working directory, which no client can
+# read, so only an absolute path or a URI is taken.
 #
 
 statement error
-CREATE TABLE duck.cmt.opts_location (id INTEGER) WITH (location = 's3://bucket/opts_location');
+CREATE TABLE duck.cmt.opts_location (id INTEGER) WITH (location = 'relative/opts_location');
 ----
-asks for an external table
+must be an absolute path or a URI
+
+statement error
+CREATE TABLE duck.cmt.opts_location (id INTEGER) WITH (location = concat('/tmp/', 'opts_location'));
+----
+must be a string constant
 
 # -----------------------------------------------------------------------------
 # what else the clause takes

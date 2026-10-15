@@ -471,25 +471,43 @@ UCAPIStagingTable UCAPI::CreateStagingTable(ClientContext &ctx, const string &ca
 }
 
 void UCAPI::CreateTable(ClientContext &ctx, const string &catalog_name, const string &schema_name,
-                        const UCAPICommittedTable &table, const UCCredentials &credentials) {
+                        const UCAPICommittedTable &table, const string &table_type, const UCCredentials &credentials) {
 	string url = StringUtil::Format("%s/api/2.1/unity-catalog/delta/v1/catalogs/%s/schemas/%s/tables",
 	                                credentials.endpoint, catalog_name, schema_name);
 	string body = StringUtil::Format(
-	    R"({"name": %s, "location": %s, "table-type": "MANAGED", "columns": %s, "partition-columns": %s, )"
+	    R"({"name": %s, "location": %s, "table-type": %s, "columns": %s, "partition-columns": %s, )"
 	    R"("protocol": {"min-reader-version": %d, "min-writer-version": %d, "reader-features": %s, )"
 	    R"("writer-features": %s}, "properties": %s, "last-commit-timestamp-ms": %d})",
-	    YYJsonEncodeString(table.name), YYJsonEncodeString(table.location), WireSchema(table.schema_json),
-	    JsonStringArray(table.partition_columns), table.min_reader_version, table.min_writer_version,
-	    JsonStringArray(table.reader_features), JsonStringArray(table.writer_features), JsonStringMap(table.properties),
-	    table.last_commit_timestamp_ms);
-	UC_LOG_DEBUG(ctx, "api.CreateTable %s.%s.%s", catalog_name, schema_name, table.name);
-	auto api_result = MakeRequest(ctx, url, credentials.token, body);
+	    YYJsonEncodeString(table.name), YYJsonEncodeString(table.location), YYJsonEncodeString(table_type),
+	    WireSchema(table.schema_json), JsonStringArray(table.partition_columns), table.min_reader_version,
+	    table.min_writer_version, JsonStringArray(table.reader_features), JsonStringArray(table.writer_features),
+	    JsonStringMap(table.properties), table.last_commit_timestamp_ms);
+	UC_LOG_DEBUG(ctx, "api.CreateTable %s.%s.%s %s", catalog_name, schema_name, table.name, table_type);
+	// An external table has no staging call to find its name taken, so the 409 comes from here.
+	auto response = MakeRequestResp(ctx, url, credentials.token, body, false, HTTPStatusCode::Conflict_409);
 
-	YYJsonDoc doc(api_result);
+	YYJsonDoc doc(response->body);
 	auto error = CheckError(doc.Root());
 	if (error.HasError()) {
+		if (error.IsAlreadyExists()) {
+			throw CatalogException::EntryAlreadyExists(CatalogType::TABLE_ENTRY, Identifier(table.name));
+		}
 		error.ThrowError(StringUtil::Format("Failed to create table %s.%s.%s", catalog_name, schema_name, table.name));
 	}
+	if (!response->Success()) {
+		throw IOException("Request to '%s' failed (HTTP %d): %s\nResponse body: %s", url,
+		                  static_cast<int>(response->status), response->GetError(),
+		                  response->body.empty() ? "(empty)" : response->body);
+	}
+}
+
+bool UCAPI::TableExists(ClientContext &ctx, const string &catalog_name, const string &schema_name,
+                        const string &table_name, const UCCredentials &credentials) {
+	string url = StringUtil::Format("%s/api/2.1/unity-catalog/tables/%s.%s.%s", credentials.endpoint, catalog_name,
+	                                schema_name, table_name);
+	UC_LOG_DEBUG(ctx, "api.TableExists %s.%s.%s", catalog_name, schema_name, table_name);
+	auto response = MakeRequestResp(ctx, url, credentials.token, "", false, HTTPStatusCode::NotFound_404);
+	return response->status != HTTPStatusCode::NotFound_404;
 }
 
 UCAPICommitsResult UCAPI::LoadTable(ClientContext &ctx, const string &catalog_name, const string &schema_name,
@@ -512,6 +530,7 @@ UCAPICommitsResult UCAPI::LoadTable(ClientContext &ctx, const string &catalog_na
 	if (metadata && yyjson_is_obj(metadata)) {
 		result.etag = TryGetStrFromObject(metadata, "etag", false);
 		result.table_uuid = TryGetStrFromObject(metadata, "table-uuid", false);
+		result.location = TryGetStrFromObject(metadata, "location", false);
 	}
 
 	// `latest-table-version` is optional per spec but gates which staged commits are visible

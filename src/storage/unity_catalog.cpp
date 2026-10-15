@@ -47,8 +47,8 @@ ErrorData UnityCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 		return ErrorData(ExceptionType::CATALOG,
 		                 StringUtil::Format("SORTED BY is not supported for tables in a %s catalog", GetCatalogType()));
 	}
-	// `location` is accepted so that UCTableSet::CreateTable can refuse it saying what it would mean;
-	// every other option is refused by name. Keys arrive lowercased from the parser, as that check assumes.
+	// `location` makes the table EXTERNAL (UCTableSet::CreateTable); every other option is refused by name.
+	// Keys arrive lowercased from the parser, as that check assumes.
 	for (auto &option : base.options) {
 		if (option.first == "location") {
 			continue;
