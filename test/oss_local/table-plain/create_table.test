@@ -83,6 +83,26 @@ SELECT count(*) FROM glob('{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_again/**');
 0
 
 # -----------------------------------------------------------------------------
+# Refused after the write
+#
+# UC refuses a location under managed storage only at registration, once version 0 is written. That
+# log is removed again: kernel would refuse any later create at the location while it is there.
+#
+
+statement error
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}_refused (id INTEGER)
+WITH (location = '{UC_TEST_LOCATION}/__unitystorage/{UC_TEST_NEW_TABLE}_refused');
+----
+__unitystorage
+
+query II
+SELECT
+    (SELECT count(*) FROM duckdb_logs() WHERE message LIKE 'CreateTable %_refused removed the unregistered version 0 %'),
+    (SELECT count(*) FROM glob('{UC_TEST_LOCATION}/__unitystorage/{UC_TEST_NEW_TABLE}_refused/_delta_log/*'));
+----
+1	0
+
+# -----------------------------------------------------------------------------
 # Using it
 #
 # An external table is not catalog-managed, so its commits go straight to its log.
@@ -98,12 +118,12 @@ SELECT id, name FROM duck.plain.{UC_TEST_NEW_TABLE} ORDER BY id;
 2	two
 
 # -----------------------------------------------------------------------------
-# Partitioned
+# Partitioned, at a computed location
 #
 
 statement ok
 CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}_part (id INTEGER, p VARCHAR) PARTITIONED BY (p)
-WITH (location = '{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_part');
+WITH (location = concat('{UC_TEST_LOCATION}/', '{UC_TEST_NEW_TABLE}_part'));
 
 statement ok
 INSERT INTO duck.plain.{UC_TEST_NEW_TABLE}_part VALUES (1, 'a'), (2, 'b'), (3, 'a');
@@ -113,6 +133,16 @@ SELECT p, count(*) FROM duck.plain.{UC_TEST_NEW_TABLE}_part GROUP BY p ORDER BY 
 ----
 a	2
 b	1
+
+# A volatile location is evaluated once: version 0 is written where the table is registered
+statement ok
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}_uuid (id INTEGER)
+WITH (location = concat('{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_uuid_', gen_random_uuid()));
+
+query I
+SELECT count(*) FROM glob('{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_uuid_*/_delta_log/00000000000000000000.json');
+----
+1
 
 # -----------------------------------------------------------------------------
 # In a schema with managed storage

@@ -38,6 +38,8 @@ def test_create_external_table(request, uc_server, tmp_path):
         f"{catalog}.plain.{table}_part": tmp_path / f"{table}_part",
         f"{catalog}.cmt.{table}_ext": tmp_path / f"{table}_ext",
     }
+    # Its location holds a uuid only the body knows
+    unchecked = [f"{catalog}.plain.{table}_uuid"]
     try:
         run_paired(
             request,
@@ -60,5 +62,5 @@ def test_create_external_table(request, uc_server, tmp_path):
         }
         assert partitions == {"id": None, "p": 0}
     finally:
-        for full_name in created:
+        for full_name in [*created, *unchecked]:
             _delete_table(endpoint, full_name)

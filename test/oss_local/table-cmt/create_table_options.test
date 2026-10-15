@@ -29,7 +29,7 @@ ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'cmt');
 # What a location has to be
 #
 # UC would resolve a relative path against the server's own working directory, which no client can
-# read, so only an absolute path or a URI is taken.
+# read, so only an absolute path or a URI is taken. The check applies to the evaluated value.
 #
 
 statement error
@@ -38,9 +38,14 @@ CREATE TABLE duck.cmt.opts_location (id INTEGER) WITH (location = 'relative/opts
 must be an absolute path or a URI
 
 statement error
-CREATE TABLE duck.cmt.opts_location (id INTEGER) WITH (location = concat('/tmp/', 'opts_location'));
+CREATE TABLE duck.cmt.opts_location (id INTEGER) WITH (location = concat('relative/', 'opts_location'));
 ----
-must be a string constant
+must be an absolute path or a URI, found 'relative/opts_location'
+
+statement error
+CREATE TABLE duck.cmt.opts_location (id INTEGER) WITH (location = NULL);
+----
+NULL is not a valid CREATE TABLE location
 
 # -----------------------------------------------------------------------------
 # what else the clause takes
