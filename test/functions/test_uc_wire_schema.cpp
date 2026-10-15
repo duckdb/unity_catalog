@@ -32,8 +32,7 @@ TEST_CASE("uc wire schema: flat columns pass through", "[uc][wire]") {
 
 TEST_CASE("uc wire schema: array and map parameters take dashes", "[uc][wire]") {
 	auto list = Field("tags", R"j({"type":"array","elementType":"string","containsNull":true})j");
-	auto map =
-	    Field("scores", R"j({"type":"map","keyType":"string","valueType":"integer","valueContainsNull":true})j");
+	auto map = Field("scores", R"j({"type":"map","keyType":"string","valueType":"integer","valueContainsNull":true})j");
 	auto wire_list = Field("tags", R"j({"type":"array","element-type":"string","contains-null":true})j");
 	auto wire_map =
 	    Field("scores", R"j({"type":"map","key-type":"string","value-type":"integer","value-contains-null":true})j");
@@ -43,10 +42,9 @@ TEST_CASE("uc wire schema: array and map parameters take dashes", "[uc][wire]") 
 TEST_CASE("uc wire schema: renames reach every level of nesting", "[uc][wire]") {
 	// map<string, struct<xs: array<decimal(18,4)>>>: a struct in the map's value, an array in the struct
 	auto inner = Schema(Field("xs", R"j({"type":"array","elementType":"decimal(18,4)","containsNull":true})j"));
-	auto wire_inner =
-	    Schema(Field("xs", R"j({"type":"array","element-type":"decimal(18,4)","contains-null":true})j"));
-	auto col = Field("m", R"j({"type":"map","keyType":"string","valueType":)j" + inner +
-	                          R"j(,"valueContainsNull":false})j");
+	auto wire_inner = Schema(Field("xs", R"j({"type":"array","element-type":"decimal(18,4)","contains-null":true})j"));
+	auto col =
+	    Field("m", R"j({"type":"map","keyType":"string","valueType":)j" + inner + R"j(,"valueContainsNull":false})j");
 	auto wire_col = Field("m", R"j({"type":"map","key-type":"string","value-type":)j" + wire_inner +
 	                               R"j(,"value-contains-null":false})j");
 	CHECK(UCAPI::WireSchema(Schema(col)) == Schema(wire_col));
