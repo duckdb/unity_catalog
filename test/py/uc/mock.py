@@ -38,12 +38,19 @@ def delta_table(name, location, columns, *, schema="plain"):
     }
 
 
+DROP = "drop"
+
+
 class MockUnityCatalog:
     """Serves `tables`, each listed under its own schema. `schemas` defaults to the tables' schemas, in
     order; the first is the default schema `run` attaches with. `plan(path) -> dict` answers the POSTs
-    of an IRC scan plan, for a catalog attached with `USE_IRC_SCAN_PLAN`."""
+    of an IRC scan plan, for a catalog attached with `USE_IRC_SCAN_PLAN`.
 
-    def __init__(self, tables, schemas=None, plan=None):
+    `respond(method, path, body) -> (status, dict) | DROP | None` answers a request before the defaults
+    do: a status and a JSON body, DROP to close the connection without a reply, or None to fall through.
+    """
+
+    def __init__(self, tables, schemas=None, plan=None, respond=None):
         self.requests = []
         self.schemas = list(schemas or dict.fromkeys(t["schema_name"] for t in tables))
         outer = self
@@ -52,8 +59,23 @@ class MockUnityCatalog:
             def log_message(self, *args):
                 pass
 
+            def _respond(self, method, body):
+                if respond is None:
+                    return False
+                answer = respond(method, self.path, body)
+                if answer is None:
+                    return False
+                if answer == DROP:
+                    self.close_connection = True
+                    return True
+                status, payload = answer
+                self._reply(payload, status)
+                return True
+
             def do_GET(self):
                 outer.requests.append(self.path)
+                if self._respond("GET", b""):
+                    return
                 if "/catalogs" in self.path:
                     body = {"catalogs": [{"name": CATALOG}]}
                 elif "/schemas" in self.path:
@@ -66,15 +88,17 @@ class MockUnityCatalog:
 
             def do_POST(self):
                 outer.requests.append(self.path)
-                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                if self._respond("POST", body):
+                    return
                 if plan is None:
                     self.send_error(404)
                     return
                 self._reply(plan(self.path))
 
-            def _reply(self, body):
+            def _reply(self, body, status=200):
                 payload = json.dumps(body).encode()
-                self.send_response(200)
+                self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(payload)
