@@ -103,6 +103,32 @@ SELECT
 1	0
 
 # -----------------------------------------------------------------------------
+# Refused before the write
+#
+# DuckDB cannot apply a Delta column default. The refusal comes before anything is written, so there
+# is nothing to remove.
+#
+
+statement error
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}_default (id INTEGER, n INTEGER DEFAULT 1)
+WITH (location = '{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_default');
+----
+does not support DEFAULT values
+
+statement error
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}_generated (id INTEGER, twice INTEGER GENERATED ALWAYS AS (id * 2))
+WITH (location = '{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_generated');
+----
+does not support generated columns
+
+query I
+SELECT
+    (SELECT count(*) FROM glob('{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_default/**')) +
+    (SELECT count(*) FROM glob('{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_generated/**'));
+----
+0
+
+# -----------------------------------------------------------------------------
 # Using it
 #
 # An external table is not catalog-managed, so its commits go straight to its log.
