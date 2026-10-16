@@ -229,6 +229,22 @@ CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_time (t TIME);
 ----
 does not support column 't' of type TIME
 
+# DuckDB cannot apply a Delta column default, so a table with one would get NULLs instead
+statement error
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_default (id INTEGER, n INTEGER DEFAULT 1);
+----
+does not support DEFAULT values
+
+statement error
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_default_null (id INTEGER, n INTEGER DEFAULT NULL);
+----
+does not support DEFAULT values
+
+statement error
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_generated (id INTEGER, twice INTEGER GENERATED ALWAYS AS (id * 2));
+----
+does not support generated columns
+
 # -----------------------------------------------------------------------------
 # Partitioned
 #
