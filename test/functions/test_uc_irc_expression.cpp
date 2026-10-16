@@ -86,9 +86,9 @@ TEST_CASE("uc irc: value formatting", "[uc][irc]") {
 
 	CHECK(One(Cmp(ExpressionType::COMPARE_EQUAL, Col("name", LogicalType::VARCHAR), Const(Value("bob")))) ==
 	      R"({"type":"eq","term":"name","value":"bob"})");
-	// String escaping.
-	CHECK(One(Cmp(ExpressionType::COMPARE_EQUAL, Col("name", LogicalType::VARCHAR), Const(Value("a\"b")))) ==
-	      R"({"type":"eq","term":"name","value":"a\"b"})");
+	// String escaping. MSVC misreads a raw string holding \" inside a macro argument, so it stays outside CHECK.
+	auto escaped = R"({"type":"eq","term":"name","value":"a\"b"})";
+	CHECK(One(Cmp(ExpressionType::COMPARE_EQUAL, Col("name", LogicalType::VARCHAR), Const(Value("a\"b")))) == escaped);
 }
 
 TEST_CASE("uc irc: non-finite double drops the term", "[uc][irc]") {
@@ -100,8 +100,8 @@ TEST_CASE("uc irc: non-finite double drops the term", "[uc][irc]") {
 TEST_CASE("uc irc: a column name needing escapes is quoted", "[uc][irc]") {
 	// The term was concatenated in raw while values went through the escaper, so a quote in a
 	// column name produced a request body that is not valid JSON at all.
-	CHECK(One(Cmp(ExpressionType::COMPARE_EQUAL, Col(R"(we"ird)"), Const(Value::INTEGER(1)))) ==
-	      R"({"type":"eq","term":"we\"ird","value":1})");
+	auto quoted = R"({"type":"eq","term":"we\"ird","value":1})";
+	CHECK(One(Cmp(ExpressionType::COMPARE_EQUAL, Col(R"(we"ird)"), Const(Value::INTEGER(1)))) == quoted);
 }
 
 TEST_CASE("uc irc: is-null / not-null", "[uc][irc]") {
