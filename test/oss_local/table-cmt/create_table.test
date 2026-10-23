@@ -54,13 +54,12 @@ WHERE message LIKE 'api.CreateTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE}%';
 ----
 1
 
-# UC suggests column mapping, and taking it would leave nested and partitioned tables impossible to
-# create: it is the one suggestion skipped on purpose rather than for want of kernel support
+# UC suggests column mapping, which a table of top-level columns takes (column_mapping.test)
 query I
 SELECT count(*) FROM duckdb_logs()
 WHERE message = 'CreateTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE} skipped suggested property delta.columnMapping.mode';
 ----
-1
+0
 
 # The catalog serves it, with the columns as written. Scoped to the attachment: once a table has been
 # resolved, the internal Delta database holding it is attached too, and duckdb_columns() reports both.

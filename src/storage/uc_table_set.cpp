@@ -136,7 +136,8 @@ optional_ptr<CatalogEntry> TableInformation::GetVersion(ClientContext &context, 
 	auto at = lookup_info.GetAtClause();
 	if (!at) {
 		// Neither ScanPlan/non-delta has a log to resolve against, return reported a la UCTableEntry::GetScanFunction.
-		if (reported && (catalog.ShouldTryScanPlan() || table_data->data_source_format != "DELTA")) {
+		if (reported &&
+		    ((ScanPlanCanRead() && catalog.ShouldTryScanPlan()) || table_data->data_source_format != "DELTA")) {
 			ThrowIfUnreadableColumns();
 			return reported.get();
 		}
@@ -367,6 +368,23 @@ bool TableInformation::IsCatalogManaged() const {
 	}
 	// Databricks GA + OSS UC v0.5+: set for tables that use the Delta CMT protocol
 	return HasDeltaFeature("catalogManaged");
+}
+
+// A planned scan reads the planned files with parquet alone, bound by position to the columns UC reports. Spark
+// leaves partition columns out of the files, and a mapped table's files name their columns physically, so once a
+// column is dropped or added nothing lines them up. Such a table reads through its Delta log instead. A table that
+// is not Delta has no log to read, and only a planned scan can read it.
+bool TableInformation::ScanPlanCanRead() const {
+	if (table_data->data_source_format != "DELTA") {
+		return true;
+	}
+	for (auto &column : table_data->columns) {
+		if (column.is_partition_column) {
+			return false;
+		}
+	}
+	auto mode = table_data->properties.find("delta.columnMapping.mode");
+	return mode == table_data->properties.end() || mode->second == "none";
 }
 
 static Value BuildLogTailFromCommits(const UCAPICommitsResult &commits, const string &storage_location) {
@@ -884,12 +902,10 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	}
 	StageCredentials(context, uc_catalog, staging);
 
-	// A suggestion is UC saying "this is how we would write it", so take the ones that can be taken.
-	// Two reasons one cannot: column mapping, which the writer maps for top-level, unpartitioned
-	// columns only, so applying it by default would leave nested and partitioned tables impossible to
-	// create; and any `delta.*` key kernel does not accept at creation, which it refuses outright.
+	// A suggestion is UC saying "this is how we would write it", so take the ones that can be taken: kernel
+	// refuses at creation any `delta.*` key it does not accept.
 	for (auto &property : staging.suggested_properties) {
-		if (property.first == "delta.columnMapping.mode" || !CreatableDeltaProperty(property.first)) {
+		if (!CreatableDeltaProperty(property.first)) {
 			UC_LOG_DEBUG(context, "CreateTable %s.%s.%s skipped suggested property %s", catalog_name, schema_name,
 			             table_name, property.first);
 			continue;

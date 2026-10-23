@@ -22,6 +22,7 @@ struct UCAPIColumnDefinition {
 	idx_t precision;
 	idx_t scale;
 	idx_t position;
+	bool is_partition_column = false;
 };
 
 struct UCAPITable {

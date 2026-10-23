@@ -1,0 +1,185 @@
+# name: test/oss_local/table-cmt/column_mapping.test
+# description: a managed CREATE takes the column mapping UC suggests, and the catalog-managed table it makes reads and takes INSERTs mapped, partitioned or nested. Paired column_mapping.py picks the names, checks the mode UC registered, and deletes the tables afterwards.
+# group: [table-cmt]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require json
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_MAPPED_TABLE
+
+require-env UC_TEST_PARTITIONED_TABLE
+
+require-env UC_TEST_NESTED_TABLE
+
+require-env UC_ENDPOINT
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT '{UC_ENDPOINT}',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'cmt');
+
+statement ok
+CALL enable_logging(level='DEBUG');
+
+# -----------------------------------------------------------------------------
+# Top-level columns: mapped
+#
+
+statement ok
+CREATE TABLE duck.cmt.{UC_TEST_MAPPED_TABLE} (id INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO duck.cmt.{UC_TEST_MAPPED_TABLE} VALUES (1, 'one'), (2, 'two');
+
+query II
+SELECT id, name FROM duck.cmt.{UC_TEST_MAPPED_TABLE} ORDER BY id;
+----
+1	one
+2	two
+
+# The insert committed through the catalog
+query I
+SELECT count(*) >= 1 FROM duckdb_logs()
+WHERE message LIKE 'api.UpdateTable {UC_TEST_CATALOG}.cmt.{UC_TEST_MAPPED_TABLE}%';
+----
+true
+
+# The internal Delta database a read attaches is the one place SQL can see where UC put the table
+statement ok
+SET VARIABLE mapped = (SELECT path FROM duckdb_databases() WHERE database_name = '__unity_catalog_internal_duck_cmt_{UC_TEST_MAPPED_TABLE}');
+
+query I
+SELECT json_extract_string(metaData.configuration, '$."delta.columnMapping.mode"')
+FROM read_json(getvariable('mapped') || '/_delta_log/00000000000000000000.json') WHERE metaData IS NOT NULL;
+----
+name
+
+query I
+SELECT count(*) FROM parquet_schema(getvariable('mapped') || '/*.parquet')
+WHERE name LIKE 'col-%' AND field_id IS NOT NULL;
+----
+2
+
+# -----------------------------------------------------------------------------
+# Partitioned: mapped
+#
+
+statement ok
+CREATE TABLE duck.cmt.{UC_TEST_PARTITIONED_TABLE} (id INTEGER, p VARCHAR) PARTITIONED BY (p);
+
+statement ok
+INSERT INTO duck.cmt.{UC_TEST_PARTITIONED_TABLE} VALUES (1, 'a'), (2, 'b'), (3, NULL);
+
+query II
+SELECT p, count(*) FROM duck.cmt.{UC_TEST_PARTITIONED_TABLE} GROUP BY p ORDER BY p;
+----
+a	1
+b	1
+NULL	1
+
+statement ok
+SET VARIABLE partitioned = (SELECT path FROM duckdb_databases() WHERE database_name = '__unity_catalog_internal_duck_cmt_{UC_TEST_PARTITIONED_TABLE}');
+
+# Every add is keyed by p's physical name. Staged commits included: the catalog may not have backfilled
+# them yet, and a backfilled one is a copy, so files are counted once each.
+query II
+SELECT count(DISTINCT path), bool_and(k LIKE 'col-%')
+FROM (SELECT add.path AS path, unnest(json_keys(add.partitionValues)) AS k
+      FROM read_json(getvariable('partitioned') || '/_delta_log/**/*.json') WHERE add IS NOT NULL);
+----
+3	true
+
+# -----------------------------------------------------------------------------
+# Nested columns: mapped
+#
+
+statement ok
+CREATE TABLE duck.cmt.{UC_TEST_NESTED_TABLE} (id INTEGER,
+    s STRUCT(x INTEGER, inner_s STRUCT(z VARCHAR), sl INTEGER[]), l INTEGER[], m MAP(VARCHAR, STRUCT(b INTEGER)));
+
+statement ok
+INSERT INTO duck.cmt.{UC_TEST_NESTED_TABLE} VALUES
+    (1, {'x': 1, 'inner_s': {'z': 'a'}, 'sl': [5]}, [1], MAP {'k': {'b': 10}}), (2, NULL, NULL, NULL);
+
+query IIII
+SELECT * FROM duck.cmt.{UC_TEST_NESTED_TABLE} ORDER BY id;
+----
+1	{'x': 1, 'inner_s': {'z': a}, 'sl': [5]}	[1]	{k={'b': 10}}
+2	NULL	NULL	NULL
+
+query III
+SELECT s.inner_s.z, s.sl[1], m['k'].b FROM duck.cmt.{UC_TEST_NESTED_TABLE} WHERE s.x = 1;
+----
+a	5	10
+
+statement ok
+SET VARIABLE nested = (SELECT path FROM duckdb_databases() WHERE database_name = '__unity_catalog_internal_duck_cmt_{UC_TEST_NESTED_TABLE}');
+
+# No logical name reaches the file; field ids on the columns and every struct field, none on list elements or map
+# entries
+query II
+SELECT count(*) FILTER (name IN ('s', 'x', 'inner_s', 'z', 'sl', 'l', 'm', 'b')),
+       count(*) FILTER (field_id IS NOT NULL)
+FROM parquet_schema(getvariable('nested') || '/*.parquet');
+----
+0	9
+
+# -----------------------------------------------------------------------------
+# A session that did not create them
+#
+
+statement ok
+CALL disable_logging();
+
+statement ok
+DETACH duck;
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS fresh (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'cmt');
+
+statement ok
+INSERT INTO fresh.cmt.{UC_TEST_MAPPED_TABLE} VALUES (3, 'three');
+
+statement ok
+INSERT INTO fresh.cmt.{UC_TEST_PARTITIONED_TABLE} VALUES (4, 'a');
+
+statement ok
+INSERT INTO fresh.cmt.{UC_TEST_NESTED_TABLE} VALUES (3, {'x': 3, 'inner_s': {'z': 'c'}, 'sl': []}, [], MAP {});
+
+query II
+SELECT id, s.inner_s.z FROM fresh.cmt.{UC_TEST_NESTED_TABLE} WHERE s IS NOT NULL ORDER BY id;
+----
+1	a
+3	c
+
+query II
+SELECT p, count(*) FROM fresh.cmt.{UC_TEST_PARTITIONED_TABLE} GROUP BY p ORDER BY p;
+----
+a	2
+b	1
+NULL	1
+
+query II
+SELECT id, name FROM fresh.cmt.{UC_TEST_MAPPED_TABLE} ORDER BY id;
+----
+1	one
+2	two
+3	three
+
+statement ok
+DETACH fresh;

@@ -48,6 +48,8 @@ public:
 	void InternalDetach(ClientContext &context, const lock_guard<mutex> &_attach_lock);
 	void InternalCheckpoint(ClientContext &context, bool force);
 	bool IsCatalogManaged() const;
+	//! Whether a planned scan reads this table right, judged by what the catalog reports of it
+	bool ScanPlanCanRead() const;
 	// is_dirty still lives under attach_lock; the guard-by-ref proves the caller holds it (idiom
 	// from InternalDetach). commit_state moved to a MutexProtected member below.
 	void MarkDirty(const lock_guard<mutex> &_attach_lock);
