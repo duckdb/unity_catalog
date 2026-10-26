@@ -17,7 +17,7 @@ static bool IsInternalTable(const string &catalog, const string &schema) {
 	return false;
 }
 
-void UCSchemaSet::LoadEntries(ClientContext &context) {
+void UCSchemaSet::LoadEntries(ClientContext &context, SchemaSetState &state) {
 	auto tables = UCAPI::GetSchemas(context, catalog, catalog.credentials);
 
 	for (const auto &schema : tables) {
@@ -27,37 +27,51 @@ void UCSchemaSet::LoadEntries(ClientContext &context) {
 		info.internal = IsInternalTable(schema.catalog_name, schema.schema_name);
 		auto schema_entry = make_uniq<UCSchemaEntry>(catalog, info);
 		schema_entry->schema_data = make_uniq<UCAPISchema>(schema);
-		CreateEntry(std::move(schema_entry));
+		AddEntry(state, std::move(schema_entry));
 	}
+}
+
+void UCSchemaSet::EnsureLoaded(ClientContext &context, SchemaSetState &state) {
+	if (state.is_loaded) {
+		return;
+	}
+	// The list-schemas call is remote, so this holds the lock across I/O -- that exclusivity IS the
+	// load-once guarantee; the alternative is readers racing an in-flight load.
+	LoadEntries(context, state);
+	state.is_loaded = true; // only after the fetch succeeded: a throw leaves the load retryable
 }
 
 optional_ptr<CatalogEntry> UCSchemaSet::GetEntry(ClientContext &context, const EntryLookupInfo &lookup) {
-	if (!is_loaded) {
-		is_loaded = true;
-		LoadEntries(context);
-	}
-	lock_guard<mutex> l(entry_lock);
-	auto &name = lookup.GetEntryName();
-	auto schema = schemas.find(name);
-	if (schema == schemas.end()) {
-		return nullptr;
-	}
-	return schema->second.get();
+	return state.with_locked([&](SchemaSetState &s) -> optional_ptr<CatalogEntry> {
+		EnsureLoaded(context, s);
+		auto &name = lookup.GetEntryName();
+		auto schema = s.schemas.find(name);
+		if (schema == s.schemas.end()) {
+			return nullptr;
+		}
+		return schema->second.get();
+	});
 }
 
-optional_ptr<CatalogEntry> UCSchemaSet::CreateEntry(unique_ptr<CatalogEntry> entry) {
-	lock_guard<mutex> l(entry_lock);
+optional_ptr<CatalogEntry> UCSchemaSet::AddEntry(SchemaSetState &state, unique_ptr<CatalogEntry> entry) {
 	auto result = entry.get();
 	if (result->name.empty()) {
 		throw InternalException("UCSchemaSet::CreateEntry called with empty name");
 	}
-	schemas.emplace(result->name, unique_ptr_cast<CatalogEntry, SchemaCatalogEntry>(std::move(entry)));
+	state.schemas.emplace(result->name, unique_ptr_cast<CatalogEntry, SchemaCatalogEntry>(std::move(entry)));
 	return result;
 }
 
+optional_ptr<CatalogEntry> UCSchemaSet::CreateEntry(unique_ptr<CatalogEntry> entry) {
+	return state.with_locked(
+	    [&](SchemaSetState &s) -> optional_ptr<CatalogEntry> { return AddEntry(s, std::move(entry)); });
+}
+
 void UCSchemaSet::ClearEntries() {
-	schemas.clear();
-	is_loaded = false;
+	state.with_locked([](SchemaSetState &s) {
+		s.schemas.clear();
+		s.is_loaded = false;
+	});
 }
 
 void UCSchemaSet::DropEntry(ClientContext &context, DropInfo &info) {
@@ -65,14 +79,12 @@ void UCSchemaSet::DropEntry(ClientContext &context, DropInfo &info) {
 }
 
 void UCSchemaSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
-	if (!is_loaded) {
-		is_loaded = true;
-		LoadEntries(context);
-	}
-	lock_guard<mutex> l(entry_lock);
-	for (auto &schema : schemas) {
-		callback(*schema.second);
-	}
+	state.with_locked([&](SchemaSetState &s) {
+		EnsureLoaded(context, s);
+		for (auto &schema : s.schemas) {
+			callback(*schema.second);
+		}
+	});
 }
 
 optional_ptr<CatalogEntry> UCSchemaSet::CreateSchema(ClientContext &context, CreateSchemaInfo &info) {

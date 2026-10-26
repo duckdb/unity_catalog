@@ -132,8 +132,6 @@ def run(mock, sql, attach_options=""):
     not."""
     prelude = (
         f"{load_statements(build_dir())}"
-        # The listing fans out across the thread pool and is intermittently racy.
-        "SET threads TO 1;"
         f"CREATE SECRET (TYPE UNITY_CATALOG, TOKEN 'x', ENDPOINT '{mock.endpoint}', AWS_REGION 'us-east-2');"
         f"ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, DEFAULT_SCHEMA '{mock.schemas[0]}'{attach_options});"
     )

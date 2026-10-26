@@ -9,6 +9,7 @@
 #pragma once
 
 #include "storage/uc_schema_entry.hpp"
+#include "uc_mutex_protected.hpp"
 
 namespace duckdb {
 struct CreateSchemaInfo;
@@ -26,14 +27,22 @@ public:
 	virtual optional_ptr<CatalogEntry> CreateEntry(unique_ptr<CatalogEntry> entry);
 	void ClearEntries();
 
-protected:
-	void LoadEntries(ClientContext &context);
-
 private:
+	//! The lazily-loaded schema list plus its load-once flag: both must move together, or a reader can
+	//! see is_loaded == true over a map the loader has not finished populating.
+	struct SchemaSetState {
+		case_insensitive_map_t<unique_ptr<SchemaCatalogEntry>> schemas;
+		bool is_loaded = false;
+	};
+
+	//! Load-once. The flag check, the fetch and the flag set are one critical section, so concurrent
+	//! readers block until the list is complete rather than observing a partial one.
+	void EnsureLoaded(ClientContext &context, SchemaSetState &state);
+	void LoadEntries(ClientContext &context, SchemaSetState &state);
+	optional_ptr<CatalogEntry> AddEntry(SchemaSetState &state, unique_ptr<CatalogEntry> entry);
+
 	UnityCatalog &catalog;
-	mutex entry_lock;
-	case_insensitive_map_t<unique_ptr<SchemaCatalogEntry>> schemas;
-	bool is_loaded = false;
+	MutexProtected<SchemaSetState> state;
 };
 
 } // namespace duckdb
