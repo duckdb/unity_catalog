@@ -55,6 +55,13 @@ Local OSS (`oss_local/`):
 
 - delta.yaml v1 read/write on a catalog-managed (CMT) table: `LoadTable` / `UpdateTable`
   (`table-cmt/catalog_managed.test`).
+- Column mapping on catalog-managed tables (`table-cmt/column_mapping.test`): a managed CREATE takes
+  UC's suggested name mode; the table, flat, partitioned or nested, reads and takes INSERTs mapped.
+- Column mapping on an EXTERNAL partitioned table Spark wrote (`column_mapping_partitioned.test`), name
+  and id mode: partition values read, at earlier versions too, and INSERTs key them physically.
+- Column mapping on EXTERNAL nested tables Spark wrote (`column_mapping_nested.test`), name and id mode:
+  STRUCT, LIST and MAP columns read and take INSERTs with field ids at every struct level; a struct field
+  physically named `__duckdb_field_id` is refused.
 - Managed vs non-managed dispatch: `IsCatalogManaged()` selects the v1 path; a MANAGED table without
   the `catalogManaged` feature and EXTERNAL tables take the plain Delta path and do **not** call
   `LoadTable`/`UpdateTable` (asserted via `duckdb_logs()` counts — `table-plain/`).
@@ -84,6 +91,11 @@ Server-free (`functions/`):
 
 - The type text map a column falls back to without `type_json` (`test_uc_type_mapping.cpp`, tag
   `[uc][types]`): scalars, `decimal(p,s)`, nested `array`/`map`/`struct` spellings, and malformed text.
+- Column mapping on Spark-written tables (`test_column_mapping.py`), name and id mode: partition values
+  and a renamed column read through the catalog, and a partitioned or mapped table reads its Delta log
+  even when scan planning is on. INSERTs into the partitioned table key partition values physically;
+  INSERTs into the nested one write field ids, and a reserved physical name is refused. A managed
+  CREATE takes the mapping mode UC suggests, nested columns included.
 - VARIANT from the mock catalog (`test_variant_types.py`): listing from `type_json` and from text
   alone, a map of variants, log reads with and without the shredding feature, time travel, a table
   without a log, and scan-plan reads.

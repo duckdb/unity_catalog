@@ -1,0 +1,125 @@
+# name: test/oss_local/column_mapping_partitioned.test
+# description: a column-mapped partitioned table Spark wrote reads its partition values and takes INSERTs through the UC catalog path -- column_mapping_partitioned.py registers the fixture and drives this body once per mapping mode
+# group: [oss_local]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require json
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_SCHEMA
+
+require-env UC_TEST_TABLE
+
+require-env UC_TEST_TABLE_LOCATION
+
+require-env UC_ENDPOINT
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT '{UC_ENDPOINT}',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+statement ok
+USE duck.{UC_TEST_SCHEMA};
+
+# -----------------------------------------------------------------------------
+# Reading what Spark wrote
+#
+
+query III
+SELECT id, p, v FROM {UC_TEST_TABLE} ORDER BY id;
+----
+1	a	10
+2	a	20
+3	b	30
+4	NULL	40
+
+query I
+SELECT id FROM {UC_TEST_TABLE} WHERE p = 'b';
+----
+3
+
+query I
+SELECT id FROM {UC_TEST_TABLE} WHERE p IS NULL;
+----
+4
+
+# Version 0 is Spark's CREATE, version 1 its write
+query I
+SELECT count(*) FROM {UC_TEST_TABLE} AT (VERSION => 0);
+----
+0
+
+query II
+SELECT p, count(*) FROM {UC_TEST_TABLE} AT (VERSION => 1) GROUP BY p ORDER BY p;
+----
+a	2
+b	1
+NULL	1
+
+# -----------------------------------------------------------------------------
+# Appending to it
+#
+
+statement ok
+INSERT INTO {UC_TEST_TABLE} VALUES (5, 'a', 50), (6, 'c', 60), (7, NULL, 70);
+
+query II
+SELECT p, count(*) FROM {UC_TEST_TABLE} GROUP BY p ORDER BY p;
+----
+a	3
+b	1
+c	1
+NULL	2
+
+# Spark's adds and ours share one partition key: p's physical name
+query III
+SELECT count(*), count(DISTINCT k), bool_and(k LIKE 'col-%')
+FROM (SELECT unnest(json_keys(add.partitionValues)) AS k
+      FROM read_json('{UC_TEST_TABLE_LOCATION}/_delta_log/*.json') WHERE add IS NOT NULL);
+----
+6	1	true
+
+# Our files, one per partition, carry physical names and field ids for every column
+query I
+SELECT count(*) FROM parquet_schema('{UC_TEST_TABLE_LOCATION}/part-*/duckdb_*.parquet')
+WHERE name LIKE 'col-%' AND field_id IS NOT NULL;
+----
+9
+
+# -----------------------------------------------------------------------------
+# A session that did not write it
+#
+
+statement ok
+USE memory;
+
+statement ok
+DETACH duck;
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS fresh (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+query III
+SELECT id, p, v FROM fresh.{UC_TEST_SCHEMA}.{UC_TEST_TABLE} WHERE id > 4 ORDER BY id;
+----
+5	a	50
+6	c	60
+7	NULL	70
+
+statement ok
+DETACH fresh;

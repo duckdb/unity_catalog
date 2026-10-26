@@ -715,6 +715,9 @@ static UCAPIColumnDefinition ParseColumnDefinition(duckdb_yyjson::yyjson_val *co
 	result.precision = TryGetNumFromObject(column_def, "type_precision", false);
 	result.scale = TryGetNumFromObject(column_def, "type_scale", false);
 	result.position = TryGetNumFromObject(column_def, "position");
+	// Present on partition columns only
+	auto *partition_index = yyjson_obj_get(column_def, "partition_index");
+	result.is_partition_column = partition_index && yyjson_is_num(partition_index);
 
 	return result;
 }

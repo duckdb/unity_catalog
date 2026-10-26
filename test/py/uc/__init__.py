@@ -104,3 +104,31 @@ def register_external_table(endpoint, table, location, columns, properties=None,
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.load(response)
+
+
+def _type_text(delta_type):
+    """UC's `type_text` for a Delta schema type, in Spark's simple-string spelling."""
+    if isinstance(delta_type, str):
+        return {"integer": "int", "long": "bigint"}.get(delta_type, delta_type)
+    if delta_type["type"] == "struct":
+        return "struct<" + ",".join(f"{f['name']}:{_type_text(f['type'])}" for f in delta_type["fields"]) + ">"
+    if delta_type["type"] == "array":
+        return f"array<{_type_text(delta_type['elementType'])}>"
+    return f"map<{_type_text(delta_type['keyType'])},{_type_text(delta_type['valueType'])}>"
+
+
+def delta_log_columns(location):
+    """The (name, type_text, type_name, type_json) columns UC reports for the Delta table at `location`: its
+    latest schema, as `register_external_table` takes them."""
+    schema = None
+    for commit in sorted(Path(location, "_delta_log").glob("*.json")):
+        for line in commit.read_text().splitlines():
+            action = json.loads(line)
+            if "metaData" in action:
+                schema = json.loads(action["metaData"]["schemaString"])
+    columns = []
+    for field in schema["fields"]:
+        type_text = _type_text(field["type"])
+        type_name = {"bigint": "LONG"}.get(type_text, type_text.split("<")[0].upper())
+        columns.append((field["name"], type_text, type_name, json.dumps(field)))
+    return columns

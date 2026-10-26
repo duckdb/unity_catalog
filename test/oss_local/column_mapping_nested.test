@@ -1,0 +1,100 @@
+# name: test/oss_local/column_mapping_nested.test
+# description: column-mapped tables with nested columns, which Spark wrote, read and take INSERTs through the UC catalog path, and a struct field physically named __duckdb_field_id is refused -- column_mapping_nested.py registers the fixtures and drives this body once per mapping mode
+# group: [oss_local]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_SCHEMA
+
+require-env UC_TEST_TABLE
+
+require-env UC_TEST_TABLE_LOCATION
+
+require-env UC_TEST_RESERVED_TABLE
+
+require-env UC_TEST_RESERVED_LOCATION
+
+require-env UC_ENDPOINT
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT '{UC_ENDPOINT}',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA '{UC_TEST_SCHEMA}');
+
+statement ok
+USE duck.{UC_TEST_SCHEMA};
+
+# -----------------------------------------------------------------------------
+# Reading what Spark wrote
+#
+
+query IIIII
+SELECT * FROM {UC_TEST_TABLE} ORDER BY id;
+----
+1	{'x2': 10, 'y': one}	[1, 2]	[{'a': 1}]	{k1={'b': 100}}
+2	{'x2': 20, 'y': two}	[3]	[{'a': 2}]	{k2={'b': 200}}
+
+# Version 1 is Spark's first write, before s.x was renamed to s.x2
+query II
+SELECT id, s.x FROM {UC_TEST_TABLE} AT (VERSION => 1);
+----
+1	10
+
+# -----------------------------------------------------------------------------
+# Appending to it
+#
+
+statement ok
+INSERT INTO {UC_TEST_TABLE} VALUES (3, {'x2': 30, 'y': 'three'}, [4, 5], [{'a': 3}], MAP {'k3': {'b': 300}});
+
+query II
+SELECT s.x2, ls[1].a FROM {UC_TEST_TABLE} WHERE m['k3'].b = 300;
+----
+30	3
+
+# Field ids and physical names on every column and struct field, none on list elements or map entries, as
+# Spark writes them
+query II
+SELECT count(*) FILTER (field_id IS NOT NULL), count(*) FILTER (name LIKE 'col-%')
+FROM parquet_schema('{UC_TEST_TABLE_LOCATION}/duckdb-*.parquet');
+----
+9	9
+
+statement error
+INSERT INTO {UC_TEST_TABLE} VALUES (4, {'x2': 40, 'y': NULL}, [], [], MAP {});
+----
+NOT NULL constraint failed
+
+# -----------------------------------------------------------------------------
+# A struct field written as __duckdb_field_id
+#
+
+statement error
+INSERT INTO {UC_TEST_RESERVED_TABLE} VALUES ({'x': 7});
+----
+a name DuckDB's parquet writer reserves for field ids
+
+query I
+SELECT count(*) FROM glob('{UC_TEST_RESERVED_LOCATION}/**/*.parquet');
+----
+0
+
+statement ok
+USE memory;
+
+statement ok
+DETACH duck;
