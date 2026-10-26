@@ -467,7 +467,7 @@ void TableInformation::InternalAttach(ClientContext &context) {
 		}
 	}
 
-	AttachOptions options(context.db->config.options);
+	AttachOptions options(info.options, AccessMode::READ_WRITE);
 	options.access_mode = AccessMode::READ_WRITE;
 	options.db_type = "delta";
 
@@ -723,7 +723,7 @@ static bool IsEntryAlreadyExists(const CatalogException &e) {
 //! version committed. The attachment is gone again when this returns, whichever way it returns.
 static UCAPICommittedTable WriteVersionZero(ClientContext &context, BoundCreateTableInfo &info, AttachInfo &attach_info,
                                             const string &table_name, const string &location) {
-	AttachOptions attach_options(context.db->config.options);
+	AttachOptions attach_options(attach_info.options, AccessMode::READ_WRITE);
 	attach_options.access_mode = AccessMode::READ_WRITE;
 	attach_options.db_type = "delta";
 
