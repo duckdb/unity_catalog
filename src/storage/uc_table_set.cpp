@@ -256,15 +256,9 @@ void TableInformation::RefreshCredentials(ClientContext &context) {
 	input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
 	input.persist_type = SecretPersistType::TEMPORARY;
 	input.name = Identifier("__internal_uc_" + table_data->table_id);
-	input.type = "s3";
 	input.provider = "config";
-	input.options = {
-	    {"key_id", table_credentials.key_id},
-	    {"secret", table_credentials.secret},
-	    {"session_token", table_credentials.session_token},
-	    {"region", catalog.credentials.aws_region},
-	};
 	input.scope = {table_data->storage_location};
+	ApplyVendedCredentials(context, input, table_data->storage_location, table_credentials, catalog.credentials.aws_region);
 
 	secret_manager.CreateSecret(context, input);
 }
@@ -637,15 +631,9 @@ static void StageCredentials(ClientContext &context, UnityCatalog &uc_catalog, c
 	input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
 	input.persist_type = SecretPersistType::TEMPORARY;
 	input.name = Identifier("__internal_uc_" + staging.table_id);
-	input.type = "s3";
 	input.provider = "config";
-	input.options = {
-	    {"key_id", credentials.key_id},
-	    {"secret", credentials.secret},
-	    {"session_token", credentials.session_token},
-	    {"region", uc_catalog.credentials.aws_region},
-	};
 	input.scope = {staging.location};
+	ApplyVendedCredentials(context, input, staging.location, credentials, uc_catalog.credentials.aws_region);
 	auto &secret_manager = SecretManager::Get(context);
 	secret_manager.CreateSecret(context, input);
 }
