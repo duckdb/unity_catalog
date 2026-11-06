@@ -1,0 +1,506 @@
+"""CREATE TABLE ... AS SELECT through Unity Catalog, against a mock catalog.
+
+A CTAS with a location makes an EXTERNAL table: the name is checked with UC first, delta writes version 0 with the
+query's rows at the location (one commit: protocol, metadata and the add actions), and the table is registered with
+UC afterwards. A registration that fails removes what the statement wrote. A CTAS without a location would make a
+managed table, which is refused for now.
+
+The mock keeps what it is told: a registered table is listed and loadable afterwards, so a later statement, or a
+fresh session, reads it through the catalog.
+"""
+
+import json
+import re
+from pathlib import Path
+
+import pytest
+
+from uc import delta_log_columns
+from uc.mock import CATALOG, DROP, MockUnityCatalog, delta_table, run
+
+REGISTER = f"/delta/v1/catalogs/{CATALOG}/schemas/plain/tables"
+STAGING = f"/delta/v1/catalogs/{CATALOG}/schemas/plain/staging-tables"
+VERSION_ZERO = Path("_delta_log") / "00000000000000000000.json"
+
+
+def _reported_columns(location):
+    return [
+        {"name": name, "type_text": text, "type_name": type_name, "position": i, "nullable": True, "type_json": js}
+        for i, (name, text, type_name, js) in enumerate(delta_log_columns(location))
+    ]
+
+
+class Catalog(MockUnityCatalog):
+    """A catalog that registers what it is sent, in any schema of `schemas`. `register(body) -> (status, dict) |
+    DROP | None` answers the register call before the default, which accepts it; with `register_lands`, the table
+    is registered even when `register` answers otherwise (a registration whose reply was lost). `taken` names
+    tables UC already has (in every schema)."""
+
+    def __init__(self, register=None, taken=(), register_lands=False, schemas=("plain",)):
+        self.tables = []
+        self.registered = []
+        self.taken = set(taken)
+        self.calls = []
+
+        def find(schema, name):
+            return next((t for t in self.tables if (t["schema_name"], t["name"]) == (schema, name)), None)
+
+        def register_table(schema, body):
+            location = body["location"].removeprefix("file://")
+            # UC lists a registered table with the properties it derived from the protocol
+            entry = delta_table(body["name"], location, _reported_columns(location), schema=schema)
+            self.tables.append({**entry, "properties": {}})
+
+        def respond(method, path, body):
+            path = path.split("?")[0]
+            self.calls.append((method, path))
+            if method == "GET" and (m := re.fullmatch(rf"/api/2.1/unity-catalog/tables/{CATALOG}\.(\w+)\.(\w+)", path)):
+                schema, name = m.groups()
+                if find(schema, name) or name in self.taken:
+                    return 200, {"name": name}
+                return 404, {"error_code": "TABLE_DOES_NOT_EXIST", "message": f"Table not found: {name}"}
+            m = re.fullmatch(
+                rf"/api/2.1/unity-catalog/delta/v1/catalogs/{CATALOG}/schemas/(\w+)/tables(?:/(\w+))?", path
+            )
+            if m and method == "GET" and m.group(2):
+                table = find(*m.groups())
+                if table:
+                    metadata = {"etag": "e", "table-uuid": table["table_id"], "location": table["storage_location"]}
+                    return 200, {"metadata": metadata, "commits": []}
+                return 404, {
+                    "error": {"message": f"Table not found: {m.group(2)}", "type": "NoSuchTableException", "code": 404}
+                }
+            if m and method == "POST" and not m.group(2):
+                schema = m.group(1)
+                request = json.loads(body)
+                self.registered.append(request)
+                answer = register(request) if register else None
+                if register_lands and answer is not None:
+                    register_table(schema, request)
+                if answer is not None:
+                    return answer
+                if find(schema, request["name"]) or request["name"] in self.taken:
+                    return 409, {
+                        "error": {
+                            "message": f"Table already exists: {request['name']}",
+                            "type": "AlreadyExistsException",
+                            "code": 409,
+                        }
+                    }
+                register_table(schema, request)
+                metadata = {
+                    "etag": "e",
+                    "table-uuid": "00000000-0000-0000-0000-000000000001",
+                    "location": request["location"],
+                }
+                return 200, {"metadata": metadata, "commits": []}
+            return None
+
+        super().__init__(self.tables, schemas=list(schemas), respond=respond)
+
+
+def _ok(uc, sql, **kwargs):
+    result, stdout = run(uc, sql, **kwargs)
+    assert result.returncode == 0, f"{sql}\n--- stderr ---\n{result.stderr}"
+    return stdout.splitlines()
+
+
+def _fails(uc, sql, **kwargs):
+    result, _ = run(uc, sql, **kwargs)
+    assert result.returncode != 0, f"{sql} succeeded"
+    return result.stderr
+
+
+def _version_zero(location):
+    return [json.loads(line) for line in (location / VERSION_ZERO).read_text().splitlines()]
+
+
+def _files(path):
+    return sorted(str(p.relative_to(path)) for p in path.rglob("*")) if path.exists() else []
+
+
+def _writes(uc):
+    return [c for c in uc.calls if c[0] == "POST"]
+
+
+# -----------------------------------------------------------------------------
+# Creating it
+#
+
+
+def test_ctas_writes_version_zero_with_its_rows_and_registers_it(tmp_path):
+    location = tmp_path / "t"
+    with Catalog() as uc:
+        _ok(
+            uc,
+            f"CREATE TABLE unity.plain.t WITH (location = '{location}') AS "
+            "SELECT range AS id, 'v' || range AS name FROM range(3);",
+        )
+        # One commit, holding the protocol, the schema and the files with the rows
+        assert sorted(p.name for p in (location / "_delta_log").glob("*.json")) == [VERSION_ZERO.name]
+        actions = _version_zero(location)
+        kinds = [next(iter(a)) for a in actions]
+        assert {"protocol", "metaData", "add"} <= set(kinds), kinds
+        adds = [a["add"] for a in actions if "add" in a]
+        assert sum(json.loads(a["stats"])["numRecords"] for a in adds) == 3
+        assert all(a["dataChange"] for a in adds)
+        # Named first, registered after the write, never staged
+        assert [c for c in uc.calls if c[1].endswith("tables/duck.plain.t")] == [
+            ("GET", "/api/2.1/unity-catalog/tables/duck.plain.t")
+        ]
+        assert not any(c[1].endswith(STAGING) for c in uc.calls)
+        [registered] = uc.registered
+        assert (registered["name"], registered["table-type"]) == ("t", "EXTERNAL")
+        assert registered["location"] == str(location)
+        assert [f["name"] for f in registered["columns"]["fields"]] == ["id", "name"]
+        assert registered["partition-columns"] == []
+        assert "catalogManaged" not in registered["protocol"]["reader-features"]
+
+        # Readable, and writable, through the catalog afterwards (each run is a new session)
+        assert _ok(uc, "SELECT id, name FROM unity.plain.t ORDER BY id;") == ["0|v0", "1|v1", "2|v2"]
+        assert _ok(uc, "INSERT INTO unity.plain.t VALUES (3, 'v3'); SELECT count(*) FROM unity.plain.t;") == ["4"]
+
+
+def test_a_partitioned_ctas_registers_its_partition_column(tmp_path):
+    location = tmp_path / "part"
+    with Catalog() as uc:
+        _ok(
+            uc,
+            f"CREATE TABLE unity.plain.part PARTITIONED BY (p) WITH (location = '{location}') AS "
+            "SELECT * FROM (VALUES (1, 'a b'), (2, 'x%y'), (3, 'a b'), (4, NULL)) v(id, p);",
+        )
+        [registered] = uc.registered
+        assert registered["partition-columns"] == ["p"]
+        assert _ok(uc, "SELECT p, count(*) FROM unity.plain.part GROUP BY p ORDER BY p NULLS LAST;") == [
+            "a b|2",
+            "x%y|1",
+            "NULL|1",
+        ]
+
+
+def test_an_empty_query_makes_an_empty_table(tmp_path):
+    location = tmp_path / "empty"
+    with Catalog() as uc:
+        _ok(
+            uc, f"CREATE TABLE unity.plain.empty WITH (location = '{location}') AS SELECT 1::INTEGER AS id WHERE false;"
+        )
+        assert _ok(uc, "SELECT count(*) FROM unity.plain.empty;") == ["0"]
+        assert len(uc.registered) == 1
+
+
+def test_inside_a_transaction(tmp_path):
+    # Statement-scoped as plain CREATE is: the table exists once the statement ends, and ROLLBACK leaves it
+    location = tmp_path / "txn"
+    with Catalog() as uc:
+        _ok(uc, f"BEGIN; CREATE TABLE unity.plain.txn WITH (location = '{location}') AS SELECT 42 AS id; ROLLBACK;")
+        assert len(uc.registered) == 1
+        assert _ok(uc, "SELECT id FROM unity.plain.txn;") == ["42"]
+
+
+# -----------------------------------------------------------------------------
+# A name UC already has
+#
+
+
+def test_a_taken_name_is_refused_before_anything_is_written(tmp_path):
+    location = tmp_path / "taken"
+    with Catalog(taken={"taken"}) as uc:
+        err = _fails(uc, f"CREATE TABLE unity.plain.taken WITH (location = '{location}') AS SELECT 1 AS id;")
+        assert "already exists" in err, err
+        assert not location.exists()
+        assert uc.registered == []
+
+
+def test_if_not_exists_on_a_taken_name_skips_the_query(tmp_path):
+    location = tmp_path / "taken"
+    with Catalog(taken={"taken"}) as uc:
+        # The query would fail if it ran
+        _ok(
+            uc,
+            f"CREATE TABLE IF NOT EXISTS unity.plain.taken WITH (location = '{location}') AS "
+            "SELECT error('the query ran') AS id;",
+        )
+        assert not location.exists()
+        assert uc.registered == []
+
+
+def test_if_not_exists_on_a_listed_table_skips_the_query(tmp_path):
+    location = tmp_path / "t"
+    with Catalog() as uc:
+        _ok(uc, f"CREATE TABLE unity.plain.t WITH (location = '{location}') AS SELECT 1 AS id;")
+        _ok(
+            uc,
+            f"CREATE TABLE IF NOT EXISTS unity.plain.t WITH (location = '{tmp_path / 'again'}') AS "
+            "SELECT error('the query ran') AS id;",
+        )
+        err = _fails(uc, f"CREATE TABLE unity.plain.t WITH (location = '{tmp_path / 'again'}') AS SELECT 1 AS id;")
+        assert "already exists" in err, err
+        assert not (tmp_path / "again").exists()
+        assert len(uc.registered) == 1
+
+
+# -----------------------------------------------------------------------------
+# Registration refused: what the statement wrote is removed
+#
+
+REFUSED = (
+    400,
+    {
+        "error": {
+            "message": "Input path overlaps with managed storage.",
+            "type": "InvalidParameterValueException",
+            "code": 400,
+        }
+    },
+)
+
+
+@pytest.mark.parametrize("existing_directory", [False, True], ids=["new-directory", "existing-directory"])
+def test_a_refused_registration_removes_what_was_written(tmp_path, existing_directory):
+    location = tmp_path / "refused"
+    if existing_directory:
+        location.mkdir()
+        (location / "keep.txt").write_text("not ours")
+    with Catalog(register=lambda body: REFUSED) as uc:
+        err = _fails(
+            uc,
+            f"CREATE TABLE unity.plain.refused PARTITIONED BY (p) WITH (location = '{location}') AS "
+            "SELECT range AS id, ['a b', 'x%y', 'q/r', NULL][range % 4 + 1] AS p FROM range(10);",
+        )
+        assert "overlaps with managed storage" in err, err
+        assert len(uc.registered) == 1
+        # The log, the data files, the partition directories (whose names the log escapes once more than the
+        # filesystem); the directory itself only if the statement made it
+        assert _files(location) == (["keep.txt"] if existing_directory else [])
+        assert location.exists() == existing_directory
+    # So the location takes a create again
+    with Catalog() as uc:
+        _ok(uc, f"CREATE TABLE unity.plain.refused WITH (location = '{location}') AS SELECT 1 AS id;")
+
+
+def test_a_refused_registration_keeps_a_file_another_writer_put_in_the_log(tmp_path):
+    # Directories go only if empty, and only them: never with what is in them
+    location = tmp_path / "shared_log"
+
+    def another_writer_then_refuse(body):
+        (location / "_delta_log" / "other_writer.txt").write_text("not ours")
+        return REFUSED
+
+    with Catalog(register=another_writer_then_refuse) as uc:
+        _fails(uc, f"CREATE TABLE unity.plain.shared_log WITH (location = '{location}') AS SELECT 1 AS id;")
+    assert _files(location) == ["_delta_log", "_delta_log/other_writer.txt"]
+
+
+def test_a_refused_registration_removes_nested_partition_directories(tmp_path):
+    location = tmp_path / "nested"
+    with Catalog(register=lambda body: REFUSED) as uc:
+        _fails(
+            uc,
+            f"CREATE TABLE unity.plain.nested PARTITIONED BY (p, q) WITH (location = '{location}') AS "
+            "SELECT range AS id, (range % 2)::VARCHAR AS p, ['a b', NULL][range % 2 + 1] AS q FROM range(8);",
+        )
+        assert _files(location) == []
+        assert not location.exists()
+
+
+def test_a_name_taken_during_the_write_removes_what_was_written(tmp_path):
+    location = tmp_path / "raced"
+    taken = (409, {"error": {"message": "Table already exists: raced", "type": "AlreadyExistsException", "code": 409}})
+    with Catalog(register=lambda body: taken) as uc:
+        err = _fails(uc, f"CREATE TABLE unity.plain.raced WITH (location = '{location}') AS SELECT 1 AS id;")
+        assert "already exists" in err, err
+        assert _files(location) == []
+        # IF NOT EXISTS: someone else's table has the name, so this statement created nothing
+        _ok(uc, f"CREATE TABLE IF NOT EXISTS unity.plain.raced WITH (location = '{location}') AS SELECT 1 AS id;")
+        assert _files(location) == []
+
+
+def test_a_registration_that_went_through_counts_as_created(tmp_path):
+    # The register call fails as seen from here, but UC has the table at this location: the files stay
+    location = tmp_path / "landed"
+    with Catalog(register=lambda body: DROP, register_lands=True) as uc:
+        result, _ = run(uc, f"CREATE TABLE unity.plain.landed WITH (location = '{location}') AS SELECT 7 AS id;")
+        assert result.returncode == 0, result.stderr
+        assert (location / VERSION_ZERO).exists()
+        assert _ok(uc, "SELECT id FROM unity.plain.landed;") == ["7"]
+
+
+def test_a_registration_that_did_not_go_through_is_reported(tmp_path):
+    location = tmp_path / "lost"
+    failed = (500, {"error": {"message": "registration blew up", "type": "InternalError", "code": 500}})
+    with Catalog(register=lambda body: failed) as uc:
+        err = _fails(uc, f"CREATE TABLE unity.plain.lost WITH (location = '{location}') AS SELECT 7 AS id;")
+        assert f"HTTP 500 for HTTP POST to '{uc.endpoint}/api/2.1/unity-catalog{REGISTER}'" in err, err
+        assert _files(location) == []
+
+
+# -----------------------------------------------------------------------------
+# Refused before anything is written
+#
+
+
+@pytest.mark.parametrize(
+    "sql, message",
+    [
+        (
+            "CREATE TABLE unity.plain.m AS SELECT 1 AS id",
+            "CREATE TABLE AS for a managed Unity Catalog table is not supported yet",
+        ),
+        (
+            "CREATE OR REPLACE TABLE unity.plain.m WITH (location = '{loc}') AS SELECT 1 AS id",
+            "CREATE OR REPLACE TABLE ... AS is not supported",
+        ),
+        (
+            "CREATE TABLE unity.plain.m WITH (location = '{loc}', owner = 'me') AS SELECT 1 AS id",
+            'Unrecognized option "owner"',
+        ),
+        (
+            "CREATE TABLE unity.plain.m SORTED BY (id) WITH (location = '{loc}') AS SELECT 1 AS id",
+            "SORTED BY is not supported",
+        ),
+        (
+            "CREATE TABLE unity.plain.m WITH (location = 'relative/m') AS SELECT 1 AS id",
+            "must be an absolute path or a URI",
+        ),
+        (
+            "CREATE TABLE unity.plain.m WITH (location = '{loc}') AS SELECT 1::UHUGEINT AS id",
+            "does not support column 'id' of type UHUGEINT",
+        ),
+    ],
+    ids=["managed", "or-replace", "unknown-option", "sorted-by", "relative-location", "unstorable-type"],
+)
+def test_refused_before_any_write(tmp_path, sql, message):
+    location = tmp_path / "m"
+    with Catalog() as uc:
+        err = _fails(uc, sql.format(loc=location) + ";")
+        assert message in err, err
+        assert not location.exists()
+        assert uc.registered == []
+        assert not any(c[1].endswith(STAGING) for c in uc.calls), uc.calls
+
+
+def test_a_read_only_catalog_refuses_it(tmp_path):
+    location = tmp_path / "ro"
+    with Catalog() as uc:
+        err = _fails(
+            uc,
+            f"CREATE TABLE unity.plain.ro WITH (location = '{location}') AS SELECT 1 AS id;",
+            attach_options=", READ_ONLY",
+        )
+        assert "read only" in err, err
+        assert not location.exists()
+
+
+def test_a_query_that_fails_midway_leaves_nothing(tmp_path):
+    # Delta undoes the write; UC never hears of the table. One thread, so files are written before the error
+    location = tmp_path / "boom"
+    with Catalog() as uc:
+        err = _fails(
+            uc,
+            "SET threads = 1; SET preserve_insertion_order = true; "
+            f"CREATE TABLE unity.plain.boom WITH (location = '{location}') AS "
+            "SELECT CASE WHEN range < 300000 THEN range ELSE error('boom at the end') END AS id "
+            "FROM range(400000);",
+        )
+        assert "boom at the end" in err, err
+        assert uc.registered == []
+        assert _files(location) == []
+
+
+def test_explain_writes_and_registers_nothing(tmp_path):
+    location = tmp_path / "explained"
+    with Catalog() as uc:
+        plan = "\n".join(
+            _ok(uc, f"EXPLAIN CREATE TABLE unity.plain.explained WITH (location = '{location}') AS SELECT 1 AS id;")
+        )
+        assert "Uc Create Table As" in plan and "Delta Create Table As" in plan, plan
+        assert uc.registered == []
+        assert _files(location) == []
+
+
+# -----------------------------------------------------------------------------
+# A name or a location someone else has
+#
+
+ALREADY_EXISTS = (
+    409,
+    {"error": {"message": "Table already exists: raced", "type": "AlreadyExistsException", "code": 409}},
+)
+
+
+def test_if_not_exists_on_a_name_taken_at_registration_lists_the_winner(tmp_path):
+    location = tmp_path / "loser"
+    winner = tmp_path / "winner"
+
+    with Catalog() as setup:
+        _ok(setup, f"CREATE TABLE unity.plain.winner WITH (location = '{winner}') AS SELECT 7 AS id;")
+
+    def won_meanwhile(body):
+        uc.tables.append({**delta_table("raced", winner, _reported_columns(winner)), "properties": {}})
+        return ALREADY_EXISTS
+
+    with Catalog(register=won_meanwhile) as uc:
+        assert _ok(
+            uc,
+            f"CREATE TABLE IF NOT EXISTS unity.plain.raced WITH (location = '{location}') AS SELECT 42 AS id; "
+            "SELECT id FROM unity.plain.raced;",
+        ) == ["7"]
+        assert _files(location) == []
+
+
+def test_if_not_exists_on_a_name_unlisted_at_bind_lists_it(tmp_path):
+    winner = tmp_path / "winner"
+    with Catalog() as setup:
+        _ok(setup, f"CREATE TABLE unity.plain.t WITH (location = '{winner}') AS SELECT 7 AS id;")
+        entry = setup.tables[0]
+    tables = []
+
+    def respond(method, path, body):
+        # UC has the table, but this session listed the schema before it appeared
+        if method == "GET" and path == f"/api/2.1/unity-catalog/tables/{CATALOG}.plain.t":
+            tables.append(entry)
+            return 200, {"name": "t"}
+        return None
+
+    with MockUnityCatalog(tables, schemas=["plain"], respond=respond) as uc:
+        assert _ok(
+            uc,
+            f"CREATE TABLE IF NOT EXISTS unity.plain.t WITH (location = '{tmp_path / 'unused'}') "
+            "AS SELECT error('the query ran') AS id; SELECT id FROM unity.plain.t;",
+        ) == ["7"]
+        assert not (tmp_path / "unused").exists()
+
+
+def test_plain_create_if_not_exists_at_an_existing_table_never_removes_it(tmp_path):
+    # Delta skips a CREATE IF NOT EXISTS at a location that holds a Delta table, so the statement wrote nothing;
+    # a refused registration must leave that table as it was
+    location = tmp_path / "theirs"
+    with Catalog() as setup:
+        _ok(setup, f"CREATE TABLE unity.plain.mine WITH (location = '{location}') AS SELECT 1 AS id;")
+    before = _files(location)
+    with Catalog(register=lambda body: REFUSED) as uc:
+        err = _fails(uc, f"CREATE TABLE IF NOT EXISTS unity.plain.theirs (id INTEGER) WITH (location = '{location}');")
+        assert "overlaps with managed storage" in err, err
+    assert _files(location) == before
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="open question: CTAS whose name the session has cached but UC no longer has becomes an empty CREATE",
+)
+def test_ctas_on_a_stale_cached_name_does_not_drop_its_rows(tmp_path):
+    location = tmp_path / "stale"
+    listed = delta_table("stale", tmp_path / "gone", [])
+
+    def respond(method, path, body):
+        if method == "GET" and path == f"/api/2.1/unity-catalog/tables/{CATALOG}.plain.stale":
+            return 404, {"error_code": "TABLE_DOES_NOT_EXIST", "message": "Table not found: stale"}
+        if method == "POST" and path.endswith(REGISTER):
+            return 200, {"metadata": {"etag": "e", "table-uuid": "u", "location": json.loads(body)["location"]}}
+        return None
+
+    with MockUnityCatalog([{**listed, "properties": {}}], schemas=["plain"], respond=respond) as uc:
+        result, _ = run(uc, f"CREATE TABLE unity.plain.stale WITH (location = '{location}') AS SELECT 42 AS id;")
+        adds = [a for a in _version_zero(location) if "add" in a] if (location / VERSION_ZERO).exists() else []
+        # Either refused as already existing, or created with its row; never an empty table
+        assert result.returncode != 0 or adds, "CTAS reported success and wrote no rows"

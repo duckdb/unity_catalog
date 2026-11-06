@@ -15,7 +15,11 @@
 
 namespace duckdb {
 class BoundAtClause;
+struct AttachInfo;
 struct CreateTableInfo;
+class LogicalCreateTable;
+class PhysicalOperator;
+class PhysicalPlanGenerator;
 class UCResult;
 class UnityCatalog;
 class UCSchemaEntry;
@@ -103,12 +107,33 @@ public:
 	vector<pair<string, string>> unreadable_columns;
 };
 
+//! An EXTERNAL create on its way to UC: where its version 0 goes, and what undoing it must know
+struct UCExternalCreate {
+	string catalog_name;
+	string schema_name;
+	string table_name;
+	//! Evaluated from the statement's `location`, absolute
+	string location;
+	//! Whether the location was a local directory that did not exist yet, which a failed create may remove again
+	bool created_directory = false;
+	//! Whether this statement committed the version 0 at the location. False when IF NOT EXISTS found a Delta table
+	//! there and delta skipped the create: that table's files are never removed.
+	bool wrote_version_zero = true;
+	OnCreateConflict on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
+};
+
 class UCTableSet {
 public:
 	explicit UCTableSet(UCSchemaEntry &schema);
 
 public:
 	optional_ptr<CatalogEntry> CreateTable(ClientContext &context, BoundCreateTableInfo &info);
+	//! CREATE TABLE AS with a location: writes version 0 with the query's rows through delta, then registers it
+	PhysicalOperator &PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner, LogicalCreateTable &op,
+	                                    PhysicalOperator &plan);
+	//! Registers the version 0 a CREATE TABLE AS committed at `create.location`; removes what it wrote if UC refuses
+	//! it. False when IF NOT EXISTS found the name taken at registration, so nothing was created.
+	bool FinishExternalCreateTableAs(ClientContext &context, const UCExternalCreate &create);
 	void AlterTable(ClientContext &context, AlterTableInfo &info);
 
 	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const EntryLookupInfo &lookup);
@@ -131,6 +156,16 @@ protected:
 	void AlterTable(ClientContext &context, RemoveColumnInfo &info);
 
 private:
+	//! Fills `create` for the statement's `location`, pinning the evaluated location in `base`. False when the name
+	//! is taken and the statement says IF NOT EXISTS; throws when it is taken otherwise.
+	bool PrepareExternalCreate(ClientContext &context, CreateTableInfo &base, UCExternalCreate &create);
+	//! The delta attachment an EXTERNAL create writes version 0 through: child-catalog mode, no parent commit
+	static AttachInfo ExternalAttachInfo(const UCExternalCreate &create);
+	//! Registers `committed` as EXTERNAL, removing what was written if that fails. False as
+	//! FinishExternalCreateTableAs.
+	bool RegisterExternalCreate(ClientContext &context, const UCExternalCreate &create,
+	                            const UCAPICommittedTable &committed);
+
 	// Ensure tables are loaded exactly once, must be done before entry_lock.
 	void EnsureLoaded(ClientContext &context);
 

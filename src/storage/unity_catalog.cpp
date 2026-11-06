@@ -6,6 +6,7 @@
 #include "duckdb/parser/parsed_data/attach_info.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/planner/operator/logical_create_table.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/storage/database_size.hpp"
@@ -155,7 +156,7 @@ void UnityCatalog::MarkScanPlanUnavailable() {
 
 PhysicalOperator &UnityCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
                                                   LogicalCreateTable &op, PhysicalOperator &plan) {
-	throw NotImplementedException("UnityCatalog PlanCreateTableAs");
+	return op.info->schema.Cast<UCSchemaEntry>().tables.PlanCreateTableAs(context, planner, op, plan);
 }
 
 PhysicalOperator &UnityCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
