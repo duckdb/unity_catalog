@@ -116,9 +116,9 @@ struct UCExternalCreate {
 	string location;
 	//! Whether the location was a local directory that did not exist yet, which a failed create may remove again
 	bool created_directory = false;
-	//! Whether this statement committed the version 0 at the location. False when IF NOT EXISTS found a Delta table
-	//! there and delta skipped the create: that table's files are never removed.
-	bool wrote_version_zero = true;
+	//! Whether this statement committed the version 0 at the location; set once known. False when IF NOT EXISTS found
+	//! a Delta table there and delta skipped the create: that table's files are never removed.
+	bool wrote_version_zero = false;
 	OnCreateConflict on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
 };
 

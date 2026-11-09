@@ -54,6 +54,9 @@ public:
 	static LogicalType TypeFromJson(const string &type_json);
 	static LogicalType TypeToLogicalType(const string &columnDefinition);
 	static string TypeToString(const LogicalType &input);
+	//! Whether `path` lies strictly inside `directory`, both normalized (so `..` cannot climb out); a root such as
+	//! `/` or `s3://bucket` contains everything below it
+	static bool PathIsInside(const string &directory, const string &path);
 };
 
 } // namespace duckdb

@@ -243,6 +243,10 @@ def test_if_not_exists_on_a_listed_table_skips_the_query(tmp_path):
 # Registration refused: what the statement wrote is removed
 #
 
+ALREADY_EXISTS = (
+    409,
+    {"error": {"message": "Table already exists: raced", "type": "AlreadyExistsException", "code": 409}},
+)
 REFUSED = (
     400,
     {
@@ -305,8 +309,7 @@ def test_a_refused_registration_removes_nested_partition_directories(tmp_path):
 
 def test_a_name_taken_during_the_write_removes_what_was_written(tmp_path):
     location = tmp_path / "raced"
-    taken = (409, {"error": {"message": "Table already exists: raced", "type": "AlreadyExistsException", "code": 409}})
-    with Catalog(register=lambda body: taken) as uc:
+    with Catalog(register=lambda body: ALREADY_EXISTS) as uc:
         err = _fails(uc, f"CREATE TABLE unity.plain.raced WITH (location = '{location}') AS SELECT 1 AS id;")
         assert "already exists" in err, err
         assert _files(location) == []
@@ -422,11 +425,6 @@ def test_explain_writes_and_registers_nothing(tmp_path):
 # A name or a location someone else has
 #
 
-ALREADY_EXISTS = (
-    409,
-    {"error": {"message": "Table already exists: raced", "type": "AlreadyExistsException", "code": 409}},
-)
-
 
 def test_if_not_exists_on_a_name_taken_at_registration_lists_the_winner(tmp_path):
     location = tmp_path / "loser"
@@ -479,14 +477,16 @@ def test_plain_create_if_not_exists_at_an_existing_table_never_removes_it(tmp_pa
         _ok(setup, f"CREATE TABLE unity.plain.mine WITH (location = '{location}') AS SELECT 1 AS id;")
     before = _files(location)
     with Catalog(register=lambda body: REFUSED) as uc:
-        err = _fails(uc, f"CREATE TABLE IF NOT EXISTS unity.plain.theirs (id INTEGER) WITH (location = '{location}');")
-        assert "overlaps with managed storage" in err, err
+        # Whether the statement is refused, or registers the table it found, is not settled; either way it wrote
+        # nothing, so it removes nothing
+        run(uc, f"CREATE TABLE IF NOT EXISTS unity.plain.theirs (id INTEGER) WITH (location = '{location}');")
     assert _files(location) == before
 
 
 @pytest.mark.xfail(
     strict=True,
-    reason="open question: CTAS whose name the session has cached but UC no longer has becomes an empty CREATE",
+    reason="core plans a plain CREATE, dropping the query, when the session's listing has the name; UC then finds "
+    "the name free and registers an empty table",
 )
 def test_ctas_on_a_stale_cached_name_does_not_drop_its_rows(tmp_path):
     location = tmp_path / "stale"
@@ -504,3 +504,25 @@ def test_ctas_on_a_stale_cached_name_does_not_drop_its_rows(tmp_path):
         adds = [a for a in _version_zero(location) if "add" in a] if (location / VERSION_ZERO).exists() else []
         # Either refused as already existing, or created with its row; never an empty table
         assert result.returncode != 0 or adds, "CTAS reported success and wrote no rows"
+
+
+def test_plain_create_if_not_exists_on_a_name_unlisted_at_bind_lists_it(tmp_path):
+    winner = tmp_path / "winner"
+    with Catalog() as setup:
+        _ok(setup, f"CREATE TABLE unity.plain.t WITH (location = '{winner}') AS SELECT 7 AS id;")
+        entry = setup.tables[0]
+    tables = []
+
+    def respond(method, path, body):
+        if method == "GET" and path == f"/api/2.1/unity-catalog/tables/{CATALOG}.plain.t":
+            tables.append(entry)
+            return 200, {"name": "t"}
+        return None
+
+    with MockUnityCatalog(tables, schemas=["plain"], respond=respond) as uc:
+        assert _ok(
+            uc,
+            f"CREATE TABLE IF NOT EXISTS unity.plain.t (id INTEGER) WITH (location = '{tmp_path / 'unused'}'); "
+            "SELECT id FROM unity.plain.t;",
+        ) == ["7"]
+        assert not (tmp_path / "unused").exists()

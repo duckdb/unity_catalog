@@ -810,20 +810,14 @@ static vector<string> ReadAddPaths(FileSystem &fs, const string &version_zero) {
 	return result;
 }
 
-//! Removes `directory` if it is empty, and nothing else: a file another writer puts there meanwhile stays, with it
-static void TryRemoveEmptyDirectory(FileSystem &fs, const string &directory) {
-	fs.RemoveDirectoryExtended(directory, {RemoveDirectoryMode::SINGLE});
-}
-
-//! `path` as a string that compares by prefix: scheme, authority and the normalized segments
-static string CanonicalPath(const Path &path) {
-	return path.GetBase() + path.GetPath();
-}
-
-//! Whether `path` lies strictly inside `directory`, after normalization (so `..` cannot climb out)
-static bool IsInside(const Path &directory, const Path &path) {
-	auto prefix = CanonicalPath(directory) + string(1, directory.GetSeparator());
-	return StringUtil::StartsWith(CanonicalPath(path), prefix);
+//! Removes `directory` if it is empty, and nothing else: a file another writer puts there meanwhile stays, with it.
+//! Best effort: a directory that cannot be removed is logged and left, and the caller goes on with the next one.
+static void TryRemoveEmptyDirectory(ClientContext &context, const string &directory) {
+	try {
+		FileSystem::GetFileSystem(context).RemoveDirectoryExtended(directory, {RemoveDirectoryMode::SINGLE});
+	} catch (std::exception &e) {
+		UC_LOG_WARNING(context, "CreateTable could not remove the empty directory %s: %s", directory, e.what());
+	}
 }
 
 //! Removes what a failed external create wrote: its version 0 and, for CREATE TABLE AS, the data files that version
@@ -847,8 +841,7 @@ static void RemoveUnregisteredVersionZero(ClientContext &context, UnityCatalog &
 		auto table_path = Path::FromString(location);
 		log_dir = table_path.Join("_delta_log").ToString();
 		auto version_zero = table_path.Join("_delta_log").Join("00000000000000000000.json").ToString();
-		// This statement committed the version 0 here (the filesystem committer writes it only if absent), and the
-		// files it adds are the ones its write made: all under the table, so anything else is left alone
+		// Only paths inside the table: a write puts its files there
 		vector<string> data_files;
 		if (fs.FileExists(version_zero)) {
 			for (auto &add_path : ReadAddPaths(fs, version_zero)) {
@@ -857,7 +850,7 @@ static void RemoveUnregisteredVersionZero(ClientContext &context, UnityCatalog &
 					continue;
 				}
 				auto data_file = table_path.Join(decoded);
-				if (IsInside(table_path, data_file)) {
+				if (UCUtils::PathIsInside(table_path.ToString(), data_file.ToString())) {
 					data_files.push_back(data_file.ToString());
 				}
 			}
@@ -873,17 +866,17 @@ static void RemoveUnregisteredVersionZero(ClientContext &context, UnityCatalog &
 			// Deepest first, so a partition directory is empty by the time its parent is looked at
 			set<string, std::greater<string>> directories;
 			for (auto &data_file : data_files) {
-				for (auto parent = Path::FromString(data_file).Parent(); IsInside(table_path, parent);
-				     parent = parent.Parent()) {
+				for (auto parent = Path::FromString(data_file).Parent();
+				     UCUtils::PathIsInside(table_path.ToString(), parent.ToString()); parent = parent.Parent()) {
 					directories.insert(parent.ToString());
 				}
 			}
 			for (auto &directory : directories) {
-				TryRemoveEmptyDirectory(fs, directory);
+				TryRemoveEmptyDirectory(context, directory);
 			}
-			TryRemoveEmptyDirectory(fs, log_dir);
+			TryRemoveEmptyDirectory(context, log_dir);
 			if (created_directory) {
-				TryRemoveEmptyDirectory(fs, table_path.ToString());
+				TryRemoveEmptyDirectory(context, table_path.ToString());
 			}
 		}
 		UC_LOG_DEBUG(context, "CreateTable %s.%s.%s removed the unregistered version 0 at %s and %llu data files",
@@ -961,7 +954,7 @@ bool UCTableSet::RegisterExternalCreate(ClientContext &context, const UCExternal
 	} catch (const CatalogException &e) {
 		remove_written();
 		if (IsEntryAlreadyExists(e)) {
-			// Taken between the check and the registration, by a table this session has not listed
+			// Taken between the check and the registration
 			MarkNeedsReload();
 			if (create.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
 				return false;
@@ -1020,7 +1013,6 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 		staging = UCAPI::CreateStagingTable(context, catalog_name, schema_name, table_name, uc_catalog.credentials);
 	} catch (const CatalogException &e) {
 		if (IsEntryAlreadyExists(e)) {
-			// A table this session may not have listed yet; its next lookup should find it
 			MarkNeedsReload();
 			if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
 				return nullptr;
@@ -1145,6 +1137,9 @@ PhysicalOperator &UCTableSet::PlanCreateTableAs(ClientContext &context, Physical
 	}
 	db_manager.DetachDatabase(context, attached_name, OnEntryNotFound::RETURN_NULL);
 
+	// Delta refused a location that holds a Delta table while planning, so a version 0 there once the write is done
+	// is the one this statement committed
+	create.wrote_version_zero = true;
 	auto &result = planner.Make<UCCreateTableAs>(op.types, op.estimated_cardinality, *this, std::move(create_state));
 	result.children.push_back(*write);
 	return result;
