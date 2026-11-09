@@ -202,12 +202,12 @@ _CASES = {
         expect=_Rows(["0|rows"]),
     ),
     "at_version_past_the_end": _Case(
-        why="time travel past the last version is refused, naming the version",
+        why="time travel past the last version is refused (kernel v0.30.1 names the first missing version)",
         fixture=_PAIRS,
         table="pairs",
         reported_schema=[_col("id", _INT), _col("rec", _REC)],
         query="SELECT count(*) FROM unity.{s}.{t} AT (VERSION => 9)",
-        expect=_Fails("end version 9"),
+        expect=_Fails("Table version 2 is missing or unavailable"),
     ),
 }
 
