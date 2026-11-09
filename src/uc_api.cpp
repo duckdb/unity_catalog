@@ -756,13 +756,16 @@ vector<UCAPITable> UCAPI::GetTables(ClientContext &ctx, Catalog &catalog, const 
 			table_result.columns.push_back(column_definition);
 		}
 
+		// Optional: a table without properties may omit the key, and yyjson_obj_foreach on null is undefined.
 		auto *properties = yyjson_obj_get(table, "properties");
-		duckdb_yyjson::yyjson_val *key, *val;
-		size_t prop_idx, prop_max;
-		yyjson_obj_foreach(properties, prop_idx, prop_max, key, val) {
-			auto val_cstr = duckdb_yyjson::yyjson_get_str(val);
-			if (val_cstr) {
-				table_result.properties[duckdb_yyjson::yyjson_get_str(key)] = val_cstr;
+		if (properties && yyjson_is_obj(properties)) {
+			duckdb_yyjson::yyjson_val *key, *val;
+			size_t prop_idx, prop_max;
+			yyjson_obj_foreach(properties, prop_idx, prop_max, key, val) {
+				auto val_cstr = duckdb_yyjson::yyjson_get_str(val);
+				if (val_cstr) {
+					table_result.properties[duckdb_yyjson::yyjson_get_str(key)] = val_cstr;
+				}
 			}
 		}
 
