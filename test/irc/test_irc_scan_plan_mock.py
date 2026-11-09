@@ -604,9 +604,7 @@ def _labelled(result):
 @pytest.mark.parametrize("end", ["COMMIT", "ROLLBACK"])
 def test_vended_secret_lives_for_its_transaction(data_files, end):
     with MockUC(_vending(data_files)) as srv:
-        r = srv.query(
-            f"BEGIN; SELECT 'rows', count(*) FROM {TABLE}; {_secrets('inside')} {end}; {_secrets('after')}"
-        )
+        r = srv.query(f"BEGIN; SELECT 'rows', count(*) FROM {TABLE}; {_secrets('inside')} {end}; {_secrets('after')}")
         assert r.returncode == 0, r.stderr
         rows = _labelled(r)
         assert rows.get("rows") == "50", r.stdout
