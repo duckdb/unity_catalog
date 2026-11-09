@@ -43,6 +43,8 @@ public:
 public:
 	optional_ptr<CatalogEntry> GetVersion(ClientContext &context, const EntryLookupInfo &lookup);
 	optional_ptr<Catalog> GetInternalCatalog();
+	//! Vends the table's storage credentials as a secret for the current transaction only, so it must run in the
+	//! transaction that does the I/O
 	void RefreshCredentials(ClientContext &context);
 	void InternalAttach(ClientContext &context);
 	void InternalDetach(ClientContext &context, const lock_guard<mutex> &_attach_lock);

@@ -545,3 +545,77 @@ def test_non_completed_plan_status_is_an_error_not_a_crash(data_files, sent, rep
         # message names the offending status and is not an assertion failure.
         assert "assertion failure" not in combined.lower(), f"crashed instead of erroring:\n{combined}"
         assert f"status '{reported}'" in combined, f"error did not name the plan status {reported!r}:\n{combined}"
+
+
+# -----------------------------------------------------------------------------
+# The secret a /plan response vends lives for one transaction
+#
+# The planned scan turns each storage-credentials entry into a secret. A TEMPORARY one lives in a
+# transactional catalog set, so two transactions that planned the same table conflicted on its name;
+# a TRANSACTION secret is private to its transaction and gone at its end. The data files stay local:
+# only the secret's lifetime is under test, not its use. One connection, so the conflict itself is
+# not reproduced here.
+#
+
+_VENDED = "__internal_uc_scanplan__"
+
+
+def _vending(data_files):
+    def script(method, path, requests):
+        if path.endswith("/plan"):
+            return {
+                "status": "completed",
+                "plan-id": "p1",
+                "file-scan-tasks": [_file_scan_task(f) for f in data_files],
+                "storage-credentials": [
+                    {
+                        "prefix": "s3://mock-bucket/days/",
+                        "config": {
+                            "s3.access-key-id": "AKIAMOCK",
+                            "s3.secret-access-key": "mock-secret",
+                            "s3.session-token": "mock-token",
+                            "client.region": "us-east-1",
+                        },
+                    }
+                ],
+            }
+        return {}
+
+    return script
+
+
+def _secrets(label):
+    """One `label|<vended secrets>|<of them in transaction storage>` line."""
+    return (
+        f"SELECT '{label}', count(*), count(*) FILTER (WHERE storage = 'transaction') FROM duckdb_secrets() "
+        f"WHERE name LIKE '{_VENDED}%';"
+    )
+
+
+def _labelled(result):
+    rows = {}
+    for line in result.stdout.splitlines():
+        label, _, rest = line.strip().partition("|")
+        if rest:
+            rows[label] = rest
+    return rows
+
+
+@pytest.mark.parametrize("end", ["COMMIT", "ROLLBACK"])
+def test_vended_secret_lives_for_its_transaction(data_files, end):
+    with MockUC(_vending(data_files)) as srv:
+        r = srv.query(f"BEGIN; SELECT 'rows', count(*) FROM {TABLE}; {_secrets('inside')} {end}; {_secrets('after')}")
+        assert r.returncode == 0, r.stderr
+        rows = _labelled(r)
+        assert rows.get("rows") == "50", r.stdout
+        assert rows.get("inside") == "1|1", f"no transaction-scoped vended secret inside BEGIN:\n{r.stdout}"
+        assert rows.get("after") == "0|0", f"the vended secret outlived its transaction ({end}):\n{r.stdout}"
+
+
+def test_vended_secret_of_an_autocommit_scan_is_gone_after_it(data_files):
+    with MockUC(_vending(data_files)) as srv:
+        r = srv.query(f"SELECT 'rows', count(*) FROM {TABLE}; {_secrets('after')}")
+        assert r.returncode == 0, r.stderr
+        rows = _labelled(r)
+        assert rows.get("rows") == "50", r.stdout
+        assert rows.get("after") == "0|0", f"the vended secret outlived its statement:\n{r.stdout}"
