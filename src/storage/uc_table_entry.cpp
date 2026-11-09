@@ -207,16 +207,19 @@ static unique_ptr<GlobalTableFunctionState> UCScanPlanInitGlobal(ClientContext &
 			                      bd.table_name + "__" + to_string(i));
 			sec.provider = "config";
 			sec.scope = {prefix};
-			// The IRC StorageCredential config is cloud-namespaced the same way the delta/v1
-			// credentials response is, so it maps onto the shared vended-credential shape.
+			// Iceberg REST names the GCS token `gcs.oauth2.token`; the delta/v1 API's `gcs.oauth-token`
+			// is read too, in case a server answers /plan with that spelling.
 			UCAPITableCredentials cred;
 			cred.key_id = get_cfg("s3.access-key-id");
 			cred.secret = get_cfg("s3.secret-access-key");
 			cred.session_token = get_cfg("s3.session-token");
-			cred.bearer_token = get_cfg("gcs.oauth-token");
+			cred.bearer_token = get_cfg("gcs.oauth2.token");
+			if (cred.bearer_token.empty()) {
+				cred.bearer_token = get_cfg("gcs.oauth-token");
+			}
 			cred.sas_token = get_cfg("adls.sas-token");
-			// Scope on the credential's own prefix: unlike the other call site there is no single
-			// table storage_location here -- one plan can carry credentials for several prefixes.
+			// Scoped on the credential's own prefix, not a table location: one plan can carry
+			// credentials for several prefixes.
 			ApplyVendedCredentials(context, sec, prefix, cred, get_cfg("client.region"));
 			secret_manager.CreateSecret(context, sec);
 		}
