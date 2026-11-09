@@ -1,7 +1,6 @@
 // Server-free unit coverage of ApplyVendedCredentials (src/uc_utils.cpp): the mapping from a
-// UC-vended credential plus a storage location to the DuckDB secret that gets injected. Isolated
-// here because exercising it through SQL needs a live catalog on each of three clouds, while the
-// decision it makes is pure: scheme in, secret type and options out.
+// UC-vended credential plus a storage location to the DuckDB secret that gets injected, without
+// network access or cloud credentials: the decision is pure, scheme in, secret type and options out.
 //
 // Runner: the standalone `unittest_cpp` Catch executable — see test_uc_irc_expression.cpp
 // (build with `--target unittest_cpp`, filter tag "[uc][credentials]").
@@ -30,12 +29,6 @@ UCAPITableCredentials GcpCreds() {
 	return c;
 }
 
-UCAPITableCredentials AzureCreds() {
-	UCAPITableCredentials c;
-	c.sas_token = "sv=2021-01-01&sig=example";
-	return c;
-}
-
 // ApplyVendedCredentials logs through the extension's logger, so it needs a live context.
 struct TestContext {
 	DuckDB db;
@@ -54,7 +47,7 @@ string OptionOf(const CreateSecretInput &input, const string &key) {
 
 } // namespace
 
-TEST_CASE("AWS storage keeps producing an s3 secret", "[uc][credentials]") {
+TEST_CASE("AWS storage produces an s3 secret", "[uc][credentials]") {
 	TestContext ctx;
 	CreateSecretInput input;
 	ApplyVendedCredentials(ctx.Get(), input, "s3://bucket/table", AwsCreds(), "us-east-1");
@@ -63,7 +56,7 @@ TEST_CASE("AWS storage keeps producing an s3 secret", "[uc][credentials]") {
 	REQUIRE(OptionOf(input, "key_id") == "AKIAEXAMPLE");
 	REQUIRE(OptionOf(input, "secret") == "s3-secret");
 	REQUIRE(OptionOf(input, "session_token") == "s3-session");
-	// UC vends no region of its own, so it has to come from the catalog secret.
+	// The caller's region: the catalog secret's, or the one /plan vends.
 	REQUIRE(OptionOf(input, "region") == "us-east-1");
 }
 
@@ -80,38 +73,36 @@ TEST_CASE("GCS storage produces a gcs secret carrying the bearer token", "[uc][c
 	}
 }
 
-TEST_CASE("A GCS table without a GCP credential keeps the old s3 secret", "[uc][credentials]") {
+TEST_CASE("A GCS table without a GCP credential gets an s3 secret", "[uc][credentials]") {
 	TestContext ctx;
 	CreateSecretInput input;
-	// Same reasoning as the Azure case: an s3 secret is useless for GCS, but it is the wrong type
-	// to match a gs:// lookup, so any gcs secret the user created (HMAC interoperability
-	// keys, say) is still found and still works. Throwing here would break that.
+	// A known limitation: httpfs looks up s3 secrets before gcs ones, so this secret is found ahead
+	// of a gcs secret the user created (HMAC interoperability keys, say), and such a read goes out
+	// unsigned. A follow-up stops creating it.
 	ApplyVendedCredentials(ctx.Get(), input, "gs://bucket/table", AwsCreds(), "us-east-1");
 
 	REQUIRE(input.type == "s3");
 	REQUIRE(OptionOf(input, "bearer_token").empty());
 }
 
-TEST_CASE("Azure storage still produces the s3 secret it always has", "[uc][credentials]") {
+TEST_CASE("Azure storage gets an s3 secret", "[uc][credentials]") {
 	TestContext ctx;
-	// Not an endorsement of the result -- an s3 secret is useless for Azure. It is preserved
-	// because any azure secret the user created is still found in preference to it, and
-	// that is the only way these tables can be read today. Failing here would remove that.
+	// UC's Azure SAS is not read yet. An Azure lookup never matches an s3 secret, so an azure
+	// secret the user created is still found.
 	for (auto &location : {"abfss://c@a.dfs.core.windows.net/t", "abfs://c@a.dfs.core.windows.net/t",
 	                       "azure://container/t", "az://container/t"}) {
 		CreateSecretInput input;
-		ApplyVendedCredentials(ctx.Get(), input, location, AzureCreds(), "us-east-1");
+		ApplyVendedCredentials(ctx.Get(), input, location, AwsCreds(), "us-east-1");
 
 		REQUIRE(input.type == "s3");
-		// The SAS is parsed and carried, but deliberately not used to build the secret yet.
 		REQUIRE(OptionOf(input, "bearer_token").empty());
 	}
 }
 
 TEST_CASE("An unrecognised scheme falls back to s3", "[uc][credentials]") {
 	TestContext ctx;
-	// file:// never reaches this function (RefreshCredentials returns early), but anything else
-	// unknown should behave as it did before rather than throw.
+	// file:// never reaches this function (RefreshCredentials returns early); any other unknown
+	// scheme gets an s3 secret rather than an error.
 	CreateSecretInput input;
 	ApplyVendedCredentials(ctx.Get(), input, "r2://bucket/table", AwsCreds(), "us-east-1");
 	REQUIRE(input.type == "s3");

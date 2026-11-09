@@ -48,8 +48,8 @@ struct UCAPISchema {
 };
 
 //! Unity Catalog vends a different credential shape per cloud: AWS gets key/secret/session
-//! token, GCP a pre-issued OAuth bearer token, Azure a user-delegation SAS. Exactly one group
-//! is populated, matching the scheme of the table's storage_location.
+//! token, GCP a pre-issued OAuth bearer token. At most one group is populated, matching the
+//! scheme of the table's storage_location. Azure's SAS is not read yet.
 struct UCAPITableCredentials {
 	// AWS
 	string key_id;
@@ -57,17 +57,9 @@ struct UCAPITableCredentials {
 	string session_token;
 	// GCP
 	string bearer_token;
-	// Azure
-	string sas_token;
 
-	bool HasAws() const {
-		return !key_id.empty() || !secret.empty();
-	}
 	bool HasGcp() const {
 		return !bearer_token.empty();
-	}
-	bool HasAzure() const {
-		return !sas_token.empty();
 	}
 };
 
@@ -198,7 +190,7 @@ struct UCAPICommittedTable {
 
 class UCAPI {
 public:
-	// Vends temporary S3 credentials:
+	// Vends temporary storage credentials (AWS or GCP):
 	// - CMTs go via protocol v1 endpoint -> (GET /delta/v1/.../credentials); (returns 400/5116 for EXTERNALs)
 	// - EXTERNAL/plain tables -> POST /api/2.1/unity-catalog/temporary-table-credentials endpoint (keyed by table_id)
 	// `catalog_managed` flag selects which to use.

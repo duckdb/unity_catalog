@@ -259,7 +259,8 @@ void TableInformation::RefreshCredentials(ClientContext &context) {
 	input.name = Identifier("__internal_uc_" + table_data->table_id);
 	input.provider = "config";
 	input.scope = {table_data->storage_location};
-	ApplyVendedCredentials(context, input, table_data->storage_location, table_credentials, catalog.credentials.aws_region);
+	ApplyVendedCredentials(context, input, table_data->storage_location, table_credentials,
+	                       catalog.credentials.aws_region);
 
 	secret_manager.CreateSecret(context, input);
 }

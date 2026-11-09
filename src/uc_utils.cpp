@@ -20,26 +20,23 @@ void ApplyVendedCredentials(ClientContext &context, CreateSecretInput &input, co
 			input.options = {{"bearer_token", credentials.bearer_token}};
 			return;
 		}
-		// No GCP credential vended -- an older catalog, or one with vending disabled for this
-		// table. Fall through to the s3 secret this has always created: it is useless for GCS but
-		// harmless, and being the wrong type it never matches a gs:// lookup, so a gcs secret the
-		// user created (HMAC interoperability keys, say) is still found and still works.
-		// Failing here would take that away.
+		// No GCP credential vended (an older catalog, or vending disabled for this table): the s3
+		// secret below is built anyway. It cannot serve gs://, and httpfs, which looks up s3 secrets
+		// before gcs ones, finds it ahead of a gcs secret the user created (HMAC interoperability keys,
+		// say), so such a read goes out unsigned. Not creating it is a follow-up.
 		UC_LOG_WARNING(context,
 		               "credentials.Apply %s: Unity Catalog vended no GCP credential for this table, so no "
-		               "usable secret could be created. Create a gcs secret scoped to this path to read it.",
+		               "usable secret could be created, and reads of it may go out unsigned.",
 		               storage_location);
 	}
 	if (StringUtil::StartsWith(storage_location, "abfss://") || StringUtil::StartsWith(storage_location, "abfs://") ||
 	    StringUtil::StartsWith(storage_location, "azure://") || StringUtil::StartsWith(storage_location, "az://")) {
-		// The SAS is vended and parsed, but building an azure secret from it is untested against a
-		// real Azure-backed catalog. Fall through to the s3 secret this has always created -- it is
-		// useless for Azure, but harmless, and it leaves any azure secret the user created
-		// in place to be found instead. Failing here would take that workaround away.
+		// UC's Azure SAS is not read yet. The s3 secret below is never matched by an Azure lookup, so
+		// an azure secret the user created is still found.
 		UC_LOG_WARNING(context,
-		               "credentials.Apply %s: Azure storage is not supported yet; the vended SAS is being "
-		               "ignored and no usable secret is created for this table. Create an azure secret "
-		               "scoped to this path to read it.",
+		               "credentials.Apply %s: Azure storage credentials from Unity Catalog are not supported "
+		               "yet, so no usable secret is created for this table. Create an azure secret scoped to "
+		               "this path to read it.",
 		               storage_location);
 	}
 	input.type = "s3";
@@ -50,7 +47,6 @@ void ApplyVendedCredentials(ClientContext &context, CreateSecretInput &input, co
 	    {"region", aws_region},
 	};
 }
-
 
 string UCUtils::TypeToString(const LogicalType &input) {
 	switch (input.id()) {

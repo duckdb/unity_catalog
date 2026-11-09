@@ -217,7 +217,6 @@ static unique_ptr<GlobalTableFunctionState> UCScanPlanInitGlobal(ClientContext &
 			if (cred.bearer_token.empty()) {
 				cred.bearer_token = get_cfg("gcs.oauth-token");
 			}
-			cred.sas_token = get_cfg("adls.sas-token");
 			// Scoped on the credential's own prefix, not a table location: one plan can carry
 			// credentials for several prefixes.
 			ApplyVendedCredentials(context, sec, prefix, cred, get_cfg("client.region"));
