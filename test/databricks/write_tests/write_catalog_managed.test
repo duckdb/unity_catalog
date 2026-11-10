@@ -73,6 +73,14 @@ SELECT id, name FROM id_name ORDER BY id
 10	ten
 11	eleven
 
+# The table's vended storage secret lives for one transaction, so each listing of the table path
+# below runs in a transaction that reads the table first: the read vends the secret the GLOB uses.
+statement ok
+BEGIN;
+
+statement ok
+SELECT count(*) FROM id_name;
+
 # Staged commits so far: v1 (seed) + v2 (ten) + v3 (eleven)
 query I
 SELECT parse_filename(file)[0:21] AS f FROM GLOB(getvariable('table_path') || '/_delta_log/_staged_commits/**/*') ORDER BY f;
@@ -80,6 +88,9 @@ SELECT parse_filename(file)[0:21] AS f FROM GLOB(getvariable('table_path') || '/
 00000000000000000001.
 00000000000000000002.
 00000000000000000003.
+
+statement ok
+COMMIT;
 
 # -----------------------------------------------------------------------------
 # Backfill verification (delta.yaml v1).
@@ -101,6 +112,12 @@ query I
 SELECT count(*) FROM id_name;
 ----
 10
+
+statement ok
+BEGIN;
+
+statement ok
+SELECT count(*) FROM id_name;
 
 # All 6 staged commits present (v1 seed, v2-v3 inserts, v4-v6 loop). Staged files are copied
 # (not moved) on backfill, so they remain until VACUUM.
@@ -127,6 +144,9 @@ WHERE f >= '00000000000000000001.' ORDER BY f;
 00000000000000000004.
 00000000000000000005.
 00000000000000000006.
+
+statement ok
+COMMIT;
 
 # -----------------------------------------------------------------------------
 # v1 add-commit protocol -- assert-table-uuid + set-latest-backfilled-version. These ride in
