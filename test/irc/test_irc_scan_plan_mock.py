@@ -349,8 +349,8 @@ def test_gcs_token_key_precedence(data_files, config, token):
 # Which credentials a gs:// read goes out with
 #
 # The data files are served by the mock itself, as `gs://mock-bucket/days/<file>` with the endpoint in
-# the URL (transport only: the secret supplies all the authentication), and the mock records how each
-# request was signed. The user has a gcs HMAC secret for the bucket.
+# the URL (transport only: the secret supplies all the authentication; httpfs takes URL parameters only
+# with `s3_enable_deprecated_url_parameters`), and the mock records how each request was signed. The user has a gcs HMAC secret for the bucket.
 #
 # `no-token` is a REGRESSION case: while an empty s3 secret was created for the prefix, httpfs found it
 # ahead of the user's gcs secret (it looks up s3 secrets first) and the reads went out unsigned.
@@ -384,7 +384,9 @@ def test_gs_read_signs_with_the_vended_token_else_the_users_secret(data_files, c
     with MockUC(None) as srv:
         srv.serve_blobs({f"days/{Path(f).name}": Path(f).read_bytes() for f in data_files})
         srv.set_plan_script(_serving_gcs(data_files, config, *srv.address))
+        # httpfs reads the endpoint from the URL only when asked to (duckdb v2.0.1's httpfs)
         r = srv.query(
+            "SET s3_enable_deprecated_url_parameters = true; "
             "CREATE SECRET user_hmac (TYPE gcs, KEY_ID 'HMACKEY', SECRET 'hmac-secret', SCOPE 'gs://mock-bucket/'); "
             f"SELECT 'rows', count(*) FROM {TABLE};"
         )
