@@ -27,6 +27,7 @@ Runs the BUILT duckdb CLI (its ABI matches the locally-built extension; pip `duc
 
 import http.server
 import json
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -52,9 +53,9 @@ def _duckdb_bin():
     return str(binary)
 
 
-def _run_sql(sql, timeout=60):
+def _run_sql(sql, timeout=60, cli_args=()):
     return subprocess.run(
-        [_duckdb_bin(), "-unsigned", "-noheader", "-list", "-c", sql],
+        [_duckdb_bin(), "-unsigned", *cli_args, "-noheader", "-list", "-c", sql],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -190,11 +191,97 @@ class MockUC:
             f"{opt} API_IRC_ENDPOINT_OVERRIDE '{self.endpoint}');"
         )
 
-    def query(self, sql, alias="unity", scan_plan="true"):
-        return _run_sql(f"{load_statements(build_dir())} {self.attach_sql(alias, scan_plan)} USE {alias}; {sql}")
+    def query(self, sql, alias="unity", scan_plan="true", cli_args=()):
+        return _run_sql(
+            f"{load_statements(build_dir())} {self.attach_sql(alias, scan_plan)} USE {alias}; {sql}", cli_args=cli_args
+        )
 
     def plan_requests(self):
         return [x for x in self.requests if x["path"].endswith("/plan")]
+
+
+# -----------------------------------------------------------------------------
+# A GCS credential vended by /plan becomes a gcs secret
+#
+# Iceberg REST vends a GCS token as `gcs.oauth2.token`; the delta/v1 spelling `gcs.oauth-token` is
+# accepted too. The data files stay local: only the secret the plan's storage credential becomes is
+# under test. Read inside BEGIN so the secret is still there whatever its lifetime.
+#
+# `iceberg-key` is a REGRESSION case (red while the plan path read only `gcs.oauth-token`);
+# `delta-key` and `no-token` are CHARACTERIZATION. With no token the fallback s3 secret is created, a
+# known limitation: httpfs finds it before a gcs HMAC secret the user created, so such a read goes
+# out unsigned.
+#
+
+
+def _vending_gcs(data_files, config):
+    def script(method, path, requests):
+        if path.endswith("/plan"):
+            return {
+                "status": "completed",
+                "plan-id": "p1",
+                "file-scan-tasks": [_file_scan_task(f) for f in data_files],
+                "storage-credentials": [{"prefix": "gs://mock-bucket/days/", "config": config}],
+            }
+        return {}
+
+    return script
+
+
+@pytest.mark.parametrize(
+    "config,secret_type",
+    [
+        ({"gcs.oauth2.token": "ya29.mock"}, "gcs"),
+        ({"gcs.oauth-token": "ya29.mock"}, "gcs"),
+        ({"gcs.oauth2.token-expires-at": "0"}, "s3"),  # no token: the fallback s3 secret
+    ],
+    ids=["iceberg-key", "delta-key", "no-token"],
+)
+def test_gcs_credential_from_the_plan(data_files, config, secret_type):
+    with MockUC(_vending_gcs(data_files, config)) as srv:
+        r = srv.query(
+            f"BEGIN; SELECT 'rows', count(*) FROM {TABLE}; "
+            f"SELECT 'secret', type, scope[1] FROM duckdb_secrets() WHERE name LIKE '__internal_uc_scanplan__%'; COMMIT;"
+        )
+        assert r.returncode == 0, r.stderr
+        rows = {}
+        # The CLI prints the fallback's warning to stdout, in colour
+        for line in re.sub(r"\x1b\[[0-9;]*m", "", r.stdout).splitlines():
+            label, _, rest = line.strip().partition("|")
+            if rest:
+                rows[label] = rest
+        assert rows.get("rows") == "50", r.stdout
+        assert rows.get("secret") == f"{secret_type}|gs://mock-bucket/days/", r.stdout
+
+
+# Which key wins, read from the secret itself (`-unredacted`): the Iceberg key when both are set, the
+# delta/v1 key when the Iceberg one is empty, and with neither the warning and the fallback s3 secret.
+@pytest.mark.parametrize(
+    "config,secret_type,token",
+    [
+        ({"gcs.oauth2.token": "ya29.iceberg", "gcs.oauth-token": "ya29.delta"}, "gcs", "ya29.iceberg"),
+        ({"gcs.oauth2.token": "", "gcs.oauth-token": "ya29.delta"}, "gcs", "ya29.delta"),
+        ({}, "s3", None),
+    ],
+    ids=["both-keys", "empty-iceberg-key", "neither"],
+)
+def test_gcs_token_key_precedence(data_files, config, secret_type, token):
+    with MockUC(_vending_gcs(data_files, config)) as srv:
+        r = srv.query(
+            f"BEGIN; SELECT count(*) FROM {TABLE}; "
+            "SELECT 'secret', secret_string FROM duckdb_secrets(redact=false) "
+            "WHERE name LIKE '__internal_uc_scanplan__%'; COMMIT;",
+            cli_args=("-unredacted",),
+        )
+        assert r.returncode == 0, r.stderr
+        out = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout)
+        secret = [ln.strip().partition("|")[2] for ln in out.splitlines() if ln.strip().startswith("secret|")]
+        assert len(secret) == 1 and f"type={secret_type};" in secret[0], out
+        if token:
+            assert f"bearer_token={token}" in secret[0], out
+        else:
+            assert "bearer_token" not in secret[0], out
+            assert "Unity Catalog vended no GCP credential" in out, out
 
 
 # -----------------------------------------------------------------------------

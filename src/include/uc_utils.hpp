@@ -10,6 +10,7 @@
 
 #include "duckdb.hpp"
 #include "uc_api.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
 
 namespace duckdb {
 class UCSchemaEntry;
@@ -22,6 +23,13 @@ struct UCType {
 	UCTypeAnnotation info = UCTypeAnnotation::STANDARD;
 	vector<UCType> children;
 };
+
+//! Fill in a secret's type and options from UC-vended credentials, dispatching on the scheme of
+//! `storage_location`: a gcs secret with the bearer token for gs:// and gcs://, else an s3 secret.
+//! `aws_region` is the s3 secret's region: the catalog secret's for UC's credential endpoints, the
+//! `client.region` /plan vends for a planned scan. A gcs secret takes none.
+void ApplyVendedCredentials(ClientContext &context, CreateSecretInput &input, const string &storage_location,
+                            const UCAPITableCredentials &credentials, const string &aws_region);
 
 class UCUtils {
 public:

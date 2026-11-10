@@ -1,4 +1,5 @@
 #include "uc_utils.hpp"
+#include "uc_logging.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "yyjson.hpp"
 #include "storage/uc_schema_entry.hpp"
@@ -7,6 +8,45 @@
 #include <iostream>
 
 namespace duckdb {
+
+void ApplyVendedCredentials(ClientContext &context, CreateSecretInput &input, const string &storage_location,
+                            const UCAPITableCredentials &credentials, const string &aws_region) {
+	// Dispatch on the storage scheme rather than on which credential arrived: a mismatch between
+	// the two means the catalog and the table disagree, and silently building a secret of the
+	// wrong type would surface much later as an opaque auth failure.
+	if (StringUtil::StartsWith(storage_location, "gs://") || StringUtil::StartsWith(storage_location, "gcs://")) {
+		if (credentials.HasGcp()) {
+			input.type = "gcs";
+			input.options = {{"bearer_token", credentials.bearer_token}};
+			return;
+		}
+		// No GCP credential vended (an older catalog, or vending disabled for this table): the s3
+		// secret below is built anyway. It cannot serve gs://, and httpfs, which looks up s3 secrets
+		// before gcs ones, finds it ahead of a gcs secret the user created (HMAC interoperability keys,
+		// say), so such a read goes out unsigned. Not creating it is a follow-up.
+		UC_LOG_WARNING(context,
+		               "credentials.Apply %s: Unity Catalog vended no GCP credential for this table, so no "
+		               "usable secret could be created, and reads of it may go out unsigned.",
+		               storage_location);
+	}
+	if (StringUtil::StartsWith(storage_location, "abfss://") || StringUtil::StartsWith(storage_location, "abfs://") ||
+	    StringUtil::StartsWith(storage_location, "azure://") || StringUtil::StartsWith(storage_location, "az://")) {
+		// UC's Azure SAS is not read yet. The s3 secret below is never matched by an Azure lookup, so
+		// an azure secret the user created is still found.
+		UC_LOG_WARNING(context,
+		               "credentials.Apply %s: Azure storage credentials from Unity Catalog are not supported "
+		               "yet, so no usable secret is created for this table. Create an azure secret scoped to "
+		               "this path to read it.",
+		               storage_location);
+	}
+	input.type = "s3";
+	input.options = {
+	    {"key_id", credentials.key_id},
+	    {"secret", credentials.secret},
+	    {"session_token", credentials.session_token},
+	    {"region", aws_region},
+	};
+}
 
 string UCUtils::TypeToString(const LogicalType &input) {
 	switch (input.id()) {
