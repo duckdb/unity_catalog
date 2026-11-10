@@ -755,20 +755,6 @@ static void RegisterTable(ClientContext &context, UnityCatalog &uc_catalog, cons
 	}
 }
 
-//! A location as a path that can be compared: no `file://` prefix, one leading slash, no trailing one.
-static string ComparableLocation(string location) {
-	if (StringUtil::StartsWith(location, "file:")) {
-		location = location.substr(5);
-		auto first = location.find_first_not_of('/');
-		location = "/" + (first == string::npos ? string() : location.substr(first));
-	}
-	while (location.size() > 1 && location.back() == '/') {
-		location.pop_back();
-	}
-	return location;
-}
-
-//! The `location` option, evaluated as delta evaluates its options. It must be absolute: UC resolves a
 //! relative path against the server's own working directory, which no client can see.
 static string ExternalLocation(ClientContext &context, const ParsedExpression &option) {
 	auto binder = Binder::CreateBinder(context);
@@ -783,7 +769,8 @@ static string ExternalLocation(ClientContext &context, const ParsedExpression &o
 	if (!StringUtil::StartsWith(location, "/") && !StringUtil::Contains(location, "://")) {
 		throw BinderException("CREATE TABLE location must be an absolute path or a URI, found '%s'", location);
 	}
-	return location;
+	// Written, registered and compared in this one spelling from here on
+	return UCUtils::NormalizeLocation(location);
 }
 
 //! The `path` of every `add` action in a version 0, as the log spells it: relative to the table, URI-encoded
@@ -820,23 +807,55 @@ static void TryRemoveEmptyDirectory(ClientContext &context, const string &direct
 	}
 }
 
+//! Whether no table UC lists, in any schema of the catalog, is registered at `location`. False when that cannot be
+//! established: a listing that fails is doubt, and doubt keeps the files.
+static bool NoTableIsRegisteredAt(ClientContext &context, UnityCatalog &uc_catalog, const string &location,
+                                  string &owner) {
+	try {
+		for (auto &schema : UCAPI::GetSchemas(context, uc_catalog, uc_catalog.credentials)) {
+			for (auto &table : UCAPI::GetTables(context, uc_catalog, schema.schema_name, uc_catalog.credentials)) {
+				if (!table.storage_location.empty() && UCUtils::NormalizeLocation(table.storage_location) == location) {
+					owner = schema.schema_name + "." + table.name;
+					return false;
+				}
+			}
+		}
+	} catch (std::exception &e) {
+		owner = string("unknown: the catalog could not be listed: ") + e.what();
+		return false;
+	}
+	return true;
+}
+
+//! Leaves what a failed external create committed at `location`, and says so: a table that may own it is not this
+//! statement's to break
+static void KeepUnregisteredVersionZero(ClientContext &context, const string &catalog_name, const string &schema_name,
+                                        const string &table_name, const string &location, const string &why) {
+	UC_LOG_WARNING(
+	    context,
+	    "CreateTable %s.%s.%s kept the Delta table it committed at %s (%s); remove the location, or register "
+	    "it as an EXTERNAL table, before creating there again",
+	    catalog_name, schema_name, table_name, location, why);
+}
+
 //! Removes what a failed external create wrote: its version 0 and, for CREATE TABLE AS, the data files that version
 //! adds. Kernel refuses to create where `_delta_log` holds any file, so the log would block every later create at
-//! `location`, and SQL has no way to remove it. Only for a version 0 this statement committed (the caller's
-//! precondition). Kept when UC lists the table at `location` after all, or cannot say, since a registered table owns
-//! that log. On local storage the directories left empty go too, and the table's own directory when
-//! `created_directory` says this statement made it. Best effort: a failure is a warning.
+//! `location`, and SQL has no way to remove it. Only for a version 0 this statement committed, and only once UC has
+//! refused the registration outright (the caller's precondition). Kept when any table in the catalog is registered
+//! at `location`, or the catalog cannot say: a registered table owns that log. On local storage the directories left
+//! empty go too, and the table's own directory when `created_directory` says this statement made it. Best effort: a
+//! failure is a warning.
 static void RemoveUnregisteredVersionZero(ClientContext &context, UnityCatalog &uc_catalog, const string &catalog_name,
                                           const string &schema_name, const string &table_name, const string &location,
                                           bool created_directory) {
+	string owner;
+	if (!NoTableIsRegisteredAt(context, uc_catalog, location, owner)) {
+		KeepUnregisteredVersionZero(context, catalog_name, schema_name, table_name, location,
+		                            "a table is registered there: " + owner);
+		return;
+	}
 	auto log_dir = location;
 	try {
-		if (UCAPI::TableExists(context, catalog_name, schema_name, table_name, uc_catalog.credentials)) {
-			auto loaded = UCAPI::LoadTable(context, catalog_name, schema_name, table_name, uc_catalog.credentials);
-			if (ComparableLocation(loaded.location) == ComparableLocation(location)) {
-				return;
-			}
-		}
 		auto &fs = FileSystem::GetFileSystem(context);
 		auto table_path = Path::FromString(location);
 		log_dir = table_path.Join("_delta_log").ToString();
@@ -955,18 +974,23 @@ AttachInfo UCTableSet::ExternalAttachInfo(const UCExternalCreate &create) {
 bool UCTableSet::RegisterExternalCreate(ClientContext &context, const UCExternalCreate &create,
                                         const UCAPICommittedTable &committed) {
 	auto &uc_catalog = catalog.Cast<UnityCatalog>();
-	auto written = ComparableLocation(create.location);
-	auto remove_written = [&]() {
-		if (create.wrote_version_zero) {
-			RemoveUnregisteredVersionZero(context, uc_catalog, create.catalog_name, create.schema_name,
-			                              create.table_name, create.location, create.created_directory);
-		}
-	};
 	try {
 		RegisterTable(context, uc_catalog, create.catalog_name, create.schema_name, committed, "EXTERNAL",
-		              [&](const UCAPICommitsResult &loaded) { return ComparableLocation(loaded.location) == written; });
+		              [&](const UCAPICommitsResult &loaded) {
+			              return UCUtils::NormalizeLocation(loaded.location) == create.location;
+		              });
 	} catch (const CatalogException &e) {
-		remove_written();
+		if (create.wrote_version_zero) {
+			if (IsEntryAlreadyExists(e)) {
+				// UC refused the name, so this registration did not land; the files go unless another table has
+				// the location
+				RemoveUnregisteredVersionZero(context, uc_catalog, create.catalog_name, create.schema_name,
+				                              create.table_name, create.location, create.created_directory);
+			} else {
+				KeepUnregisteredVersionZero(context, create.catalog_name, create.schema_name, create.table_name,
+				                            create.location, e.what());
+			}
+		}
 		if (IsEntryAlreadyExists(e)) {
 			// Taken between the check and the registration
 			MarkNeedsReload();
@@ -975,8 +999,13 @@ bool UCTableSet::RegisterExternalCreate(ClientContext &context, const UCExternal
 			}
 		}
 		throw;
-	} catch (std::exception &) {
-		remove_written();
+	} catch (std::exception &e) {
+		// A refusal of the location (it overlaps managed storage), a lost or unclear reply: UC may own the location,
+		// or soon will
+		if (create.wrote_version_zero) {
+			KeepUnregisteredVersionZero(context, create.catalog_name, create.schema_name, create.table_name,
+			                            create.location, e.what());
+		}
 		throw;
 	}
 	// The catalog now owns a table this set has never seen; its next lookup loads it from UC.

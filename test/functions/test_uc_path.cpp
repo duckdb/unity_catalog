@@ -31,3 +31,17 @@ TEST_CASE("uc path: the table itself, a sibling, and a climb out are not inside"
 	CHECK_FALSE(UCUtils::PathIsInside("s3://bucket", "s3://bucket"));
 	CHECK_FALSE(UCUtils::PathIsInside("s3://bucket/table", "s3://other/table/part-0.parquet"));
 }
+
+TEST_CASE("uc path: one spelling per location", "[uc][path]") {
+	CHECK(UCUtils::NormalizeLocation("/tmp/root/table") == "/tmp/root/table");
+	CHECK(UCUtils::NormalizeLocation("/tmp/root/table/") == "/tmp/root/table");
+	CHECK(UCUtils::NormalizeLocation("/tmp/root/./table") == "/tmp/root/table");
+	CHECK(UCUtils::NormalizeLocation("/tmp/root/x/../table") == "/tmp/root/table");
+	CHECK(UCUtils::NormalizeLocation("/tmp//root///table") == "/tmp/root/table");
+	CHECK(UCUtils::NormalizeLocation("file:///tmp/root/table") == "/tmp/root/table");
+	CHECK(UCUtils::NormalizeLocation("file:/tmp/root/table/") == "/tmp/root/table");
+	CHECK(UCUtils::NormalizeLocation("s3://bucket/table/") == "s3://bucket/table");
+	CHECK(UCUtils::NormalizeLocation("s3://bucket/a/./table") == "s3://bucket/a/table");
+	CHECK(UCUtils::NormalizeLocation("/") == "/");
+	CHECK(UCUtils::NormalizeLocation("s3://bucket") == UCUtils::NormalizeLocation("s3://bucket/"));
+}

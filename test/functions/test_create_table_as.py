@@ -11,6 +11,7 @@ fresh session, reads it through the catalog.
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -240,7 +241,11 @@ def test_if_not_exists_on_a_listed_table_skips_the_query(tmp_path):
 
 
 # -----------------------------------------------------------------------------
-# Registration refused: what the statement wrote is removed
+# Registration refused
+#
+# What the statement committed is removed only when UC refused the name outright (taken meanwhile) and no table in
+# the catalog is registered at the location. Whenever that cannot be established -- a refusal of the location, a
+# lost or unclear reply, another table at the location -- the files stay.
 #
 
 ALREADY_EXISTS = (
@@ -257,47 +262,51 @@ REFUSED = (
         }
     },
 )
+FAILED = (500, {"error": {"message": "registration blew up", "type": "InternalError", "code": 500}})
 
 
 @pytest.mark.parametrize("existing_directory", [False, True], ids=["new-directory", "existing-directory"])
-def test_a_refused_registration_removes_what_was_written(tmp_path, existing_directory):
-    location = tmp_path / "refused"
+def test_a_name_taken_at_registration_removes_what_was_written(tmp_path, existing_directory):
+    location = tmp_path / "raced"
     if existing_directory:
         location.mkdir()
         (location / "keep.txt").write_text("not ours")
-    with Catalog(register=lambda body: REFUSED) as uc:
+    with Catalog(register=lambda body: ALREADY_EXISTS) as uc:
         err = _fails(
             uc,
-            f"CREATE TABLE unity.plain.refused PARTITIONED BY (p) WITH (location = '{location}') AS "
+            f"CREATE TABLE unity.plain.raced PARTITIONED BY (p) WITH (location = '{location}') AS "
             "SELECT range AS id, ['a b', 'x%y', 'q/r', NULL][range % 4 + 1] AS p FROM range(10);",
         )
-        assert "overlaps with managed storage" in err, err
+        assert "already exists" in err, err
         assert len(uc.registered) == 1
         # The log, the data files, the partition directories (whose names the log escapes once more than the
         # filesystem); the directory itself only if the statement made it
         assert _files(location) == (["keep.txt"] if existing_directory else [])
         assert location.exists() == existing_directory
+        # IF NOT EXISTS: someone else's table has the name, so this statement created nothing
+        _ok(uc, f"CREATE TABLE IF NOT EXISTS unity.plain.raced WITH (location = '{location}') AS SELECT 1 AS id;")
+        assert _files(location) == (["keep.txt"] if existing_directory else [])
     # So the location takes a create again
     with Catalog() as uc:
-        _ok(uc, f"CREATE TABLE unity.plain.refused WITH (location = '{location}') AS SELECT 1 AS id;")
+        _ok(uc, f"CREATE TABLE unity.plain.raced WITH (location = '{location}') AS SELECT 1 AS id;")
 
 
-def test_a_refused_registration_keeps_a_file_another_writer_put_in_the_log(tmp_path):
+def test_a_cleanup_keeps_a_file_another_writer_put_in_the_log(tmp_path):
     # Directories go only if empty, and only them: never with what is in them
     location = tmp_path / "shared_log"
 
-    def another_writer_then_refuse(body):
+    def another_writer_then_taken(body):
         (location / "_delta_log" / "other_writer.txt").write_text("not ours")
-        return REFUSED
+        return ALREADY_EXISTS
 
-    with Catalog(register=another_writer_then_refuse) as uc:
+    with Catalog(register=another_writer_then_taken) as uc:
         _fails(uc, f"CREATE TABLE unity.plain.shared_log WITH (location = '{location}') AS SELECT 1 AS id;")
     assert _files(location) == ["_delta_log", "_delta_log/other_writer.txt"]
 
 
-def test_a_refused_registration_removes_nested_partition_directories(tmp_path):
+def test_a_cleanup_removes_nested_partition_directories(tmp_path):
     location = tmp_path / "nested"
-    with Catalog(register=lambda body: REFUSED) as uc:
+    with Catalog(register=lambda body: ALREADY_EXISTS) as uc:
         _fails(
             uc,
             f"CREATE TABLE unity.plain.nested PARTITIONED BY (p, q) WITH (location = '{location}') AS "
@@ -307,15 +316,49 @@ def test_a_refused_registration_removes_nested_partition_directories(tmp_path):
         assert not location.exists()
 
 
-def test_a_name_taken_during_the_write_removes_what_was_written(tmp_path):
-    location = tmp_path / "raced"
-    with Catalog(register=lambda body: ALREADY_EXISTS) as uc:
-        err = _fails(uc, f"CREATE TABLE unity.plain.raced WITH (location = '{location}') AS SELECT 1 AS id;")
-        assert "already exists" in err, err
-        assert _files(location) == []
-        # IF NOT EXISTS: someone else's table has the name, so this statement created nothing
-        _ok(uc, f"CREATE TABLE IF NOT EXISTS unity.plain.raced WITH (location = '{location}') AS SELECT 1 AS id;")
-        assert _files(location) == []
+@pytest.mark.parametrize(
+    "answer, message",
+    [(REFUSED, "overlaps with managed storage"), (FAILED, "HTTP 500"), (DROP, "")],
+    ids=["location-refused", "server-error", "reply-lost"],
+)
+@pytest.mark.parametrize("ctas", [True, False], ids=["ctas", "create"])
+def test_an_unclear_or_location_refusal_keeps_the_files(tmp_path, answer, message, ctas):
+    location = tmp_path / "kept"
+    with Catalog(register=lambda body: answer) as uc:
+        sql = (
+            f"CREATE TABLE unity.plain.kept WITH (location = '{location}') AS SELECT 7 AS id;"
+            if ctas
+            else f"CREATE TABLE unity.plain.kept (id INTEGER) WITH (location = '{location}');"
+        )
+        err = _fails(uc, "CALL enable_logging(level = 'WARNING'); " + sql)
+        assert message in err, err
+        assert (location / VERSION_ZERO).exists()
+        if ctas:
+            adds = [a["add"]["path"] for a in _version_zero(location) if "add" in a]
+            assert adds and all((location / a).exists() for a in adds)
+
+
+def test_a_cleanup_keeps_files_another_table_is_registered_at(tmp_path):
+    # Another client registers the just-committed location under its own name; then UC refuses ours
+    location = tmp_path / "adopted"
+
+    def adopt_then_taken(body):
+        entry = delta_table("adopted", location, _reported_columns(location))
+        uc.tables.append({**entry, "properties": {}})
+        return ALREADY_EXISTS
+
+    for ctas in [True, False]:
+        if location.exists():
+            shutil.rmtree(location)
+        with Catalog(register=adopt_then_taken) as uc:
+            sql = (
+                f"CREATE TABLE unity.plain.original WITH (location = '{location}') AS SELECT 42 AS id;"
+                if ctas
+                else f"CREATE TABLE unity.plain.original (id INTEGER) WITH (location = '{location}');"
+            )
+            _fails(uc, sql)
+            assert (location / VERSION_ZERO).exists()
+            assert _ok(uc, "SELECT count(*) FROM unity.plain.adopted;") == (["1"] if ctas else ["0"])
 
 
 def test_a_registration_that_went_through_counts_as_created(tmp_path):
@@ -328,13 +371,23 @@ def test_a_registration_that_went_through_counts_as_created(tmp_path):
         assert _ok(uc, "SELECT id FROM unity.plain.landed;") == ["7"]
 
 
-def test_a_registration_that_did_not_go_through_is_reported(tmp_path):
-    location = tmp_path / "lost"
-    failed = (500, {"error": {"message": "registration blew up", "type": "InternalError", "code": 500}})
-    with Catalog(register=lambda body: failed) as uc:
-        err = _fails(uc, f"CREATE TABLE unity.plain.lost WITH (location = '{location}') AS SELECT 7 AS id;")
-        assert f"HTTP 500 for HTTP POST to '{uc.endpoint}/api/2.1/unity-catalog{REGISTER}'" in err, err
-        assert _files(location) == []
+def test_a_registration_that_went_through_is_recognized_in_another_spelling(tmp_path):
+    # The reply is lost, and UC spells the location its own way: the same place, so the same table, and the files
+    # stay
+    root = tmp_path / "root"
+    root.mkdir()
+    canonical = root / "landed"
+
+    def lands_then_lost(body):
+        assert body["location"] == str(canonical)
+        entry = delta_table("landed", f"{root}/./landed/", _reported_columns(canonical))
+        uc.tables.append({**entry, "properties": {}})
+        return DROP
+
+    with Catalog(register=lands_then_lost) as uc:
+        _ok(uc, f"CREATE TABLE unity.plain.landed WITH (location = 'file://{root}//x/../landed/') AS SELECT 7 AS id;")
+        assert (canonical / VERSION_ZERO).exists()
+        assert _ok(uc, "SELECT id FROM unity.plain.landed;") == ["7"]
 
 
 # -----------------------------------------------------------------------------

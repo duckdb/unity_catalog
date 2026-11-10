@@ -107,7 +107,8 @@ SELECT count(*) FROM glob('{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_again/**');
 # Refused after the write
 #
 # UC refuses a location under managed storage only at registration, once version 0 and its data files are
-# written. Both are removed again: kernel would refuse any later create at the location while the log is there.
+# written. A refusal of the location leaves open whether UC owns it, so both stay, with a warning that says how
+# to clear them.
 #
 
 statement error
@@ -119,10 +120,10 @@ __unitystorage
 
 query II
 SELECT
-    (SELECT count(*) FROM duckdb_logs() WHERE message LIKE 'CreateTable %_refused removed the unregistered version 0 % data files'),
-    (SELECT count(*) FROM glob('{UC_TEST_LOCATION}/__unitystorage/{UC_TEST_NEW_TABLE}_refused/**'));
+    (SELECT count(*) FROM duckdb_logs() WHERE message LIKE 'CreateTable %_refused kept the Delta table it committed at %'),
+    (SELECT count(*) FROM glob('{UC_TEST_LOCATION}/__unitystorage/{UC_TEST_NEW_TABLE}_refused/_delta_log/*.json'));
 ----
-1	0
+1	1
 
 # -----------------------------------------------------------------------------
 # Refused before the write

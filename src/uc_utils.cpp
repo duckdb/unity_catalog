@@ -181,6 +181,22 @@ void ApplyVendedCredentials(ClientContext &context, const string &name, const st
 	secret_manager.CreateSecret(context, input);
 }
 
+string UCUtils::NormalizeLocation(const string &location) {
+	auto spelled = location;
+	if (StringUtil::StartsWith(StringUtil::Lower(spelled), "file:")) {
+		spelled = spelled.substr(5);
+		auto first = spelled.find_first_not_of('/');
+		spelled = "/" + (first == string::npos ? string() : spelled.substr(first));
+	}
+	auto path = Path::FromString(spelled);
+	auto result = path.GetBase() + (path.HasPathSegments() ? path.GetPath() : string());
+	// A root (`/`, `s3://bucket/`) is all base, and keeps its separator
+	while (result.size() > path.GetBase().size() && result.back() == path.GetSeparator()) {
+		result.pop_back();
+	}
+	return result;
+}
+
 bool UCUtils::PathIsInside(const string &directory, const string &path) {
 	auto canonical = [](const Path &p) {
 		return p.GetBase() + p.GetPath();
