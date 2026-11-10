@@ -6,46 +6,178 @@
 #include "storage/uc_transaction.hpp"
 
 #include <iostream>
+#include <algorithm>
+#include <map>
 
 namespace duckdb {
 
-void ApplyVendedCredentials(ClientContext &context, CreateSecretInput &input, const string &storage_location,
-                            const UCAPITableCredentials &credentials, const string &aws_region) {
-	// Dispatch on the storage scheme rather than on which credential arrived: a mismatch between
-	// the two means the catalog and the table disagree, and silently building a secret of the
-	// wrong type would surface much later as an opaque auth failure.
-	if (StringUtil::StartsWith(storage_location, "gs://") || StringUtil::StartsWith(storage_location, "gcs://")) {
-		if (credentials.HasGcp()) {
-			input.type = "gcs";
-			input.options = {{"bearer_token", credentials.bearer_token}};
-			return;
-		}
-		// No GCP credential vended (an older catalog, or vending disabled for this table): the s3
-		// secret below is built anyway. It cannot serve gs://, and httpfs, which looks up s3 secrets
-		// before gcs ones, finds it ahead of a gcs secret the user created (HMAC interoperability keys,
-		// say), so such a read goes out unsigned. Not creating it is a follow-up.
-		UC_LOG_WARNING(context,
-		               "credentials.Apply %s: Unity Catalog vended no GCP credential for this table, so no "
-		               "usable secret could be created, and reads of it may go out unsigned.",
-		               storage_location);
+static bool IsGcsLocation(const string &location) {
+	return StringUtil::StartsWith(location, "gs://") || StringUtil::StartsWith(location, "gcs://");
+}
+
+static bool IsAzureLocation(const string &location) {
+	return StringUtil::StartsWith(location, "abfss://") || StringUtil::StartsWith(location, "abfs://") ||
+	       StringUtil::StartsWith(location, "az://") || StringUtil::StartsWith(location, "azure://");
+}
+
+//! The storage host of an Azure location: <host> in <scheme>://<container>@<host>/... and in
+//! <scheme>://<host>/<container>/... (a host has a dot), else empty: az://<container>/... names no account.
+static string AzureHostOf(const string &location) {
+	auto scheme_end = location.find("://");
+	if (scheme_end == string::npos) {
+		return string();
 	}
-	if (StringUtil::StartsWith(storage_location, "abfss://") || StringUtil::StartsWith(storage_location, "abfs://") ||
-	    StringUtil::StartsWith(storage_location, "azure://") || StringUtil::StartsWith(storage_location, "az://")) {
-		// UC's Azure SAS is not read yet. The s3 secret below is never matched by an Azure lookup, so
-		// an azure secret the user created is still found.
+	auto authority_start = scheme_end + 3;
+	auto authority_end = location.find('/', authority_start);
+	auto authority = location.substr(authority_start,
+	                                 authority_end == string::npos ? string::npos : authority_end - authority_start);
+	auto at = authority.find('@');
+	if (at != string::npos) {
+		return authority.substr(at + 1);
+	}
+	return authority.find('.') != string::npos ? authority : string();
+}
+
+string PlanCredentialScope(const string &prefix, const string &table_location) {
+	if (prefix == "/" && !table_location.empty()) {
+		return table_location;
+	}
+	// A scheme is a letter, then letters, digits, '+', '-' or '.' (RFC 3986).
+	bool is_scheme = !prefix.empty() && StringUtil::CharacterIsAlpha(prefix[0]) &&
+	                 std::all_of(prefix.begin(), prefix.end(), [](char c) {
+		                 return StringUtil::CharacterIsAlphaNumeric(c) || c == '+' || c == '-' || c == '.';
+	                 });
+	return is_scheme ? prefix + "://" : prefix;
+}
+
+UCAPITableCredentials CredentialsFromConfig(const unordered_map<string, string> &config, const string &prefix) {
+	auto get = [&config](const string &key) {
+		auto it = config.find(key);
+		return it != config.end() ? it->second : string();
+	};
+	UCAPITableCredentials result;
+	result.key_id = get("s3.access-key-id");
+	result.secret = get("s3.secret-access-key");
+	result.session_token = get("s3.session-token");
+	result.region = get("client.region");
+	result.bearer_token = get("gcs.oauth2.token");
+	if (result.bearer_token.empty()) {
+		result.bearer_token = get("gcs.oauth-token");
+	}
+	// Iceberg REST names the host in the key, adls.sas-token.<account>.dfs.core.windows.net; take the host of the
+	// prefix if it is there, else the first in key order, so the choice does not depend on the map's.
+	static const string ADLS_SAS_TOKEN = "adls.sas-token.";
+	std::map<string, string> sas_by_host;
+	for (auto &entry : config) {
+		if (StringUtil::StartsWith(entry.first, ADLS_SAS_TOKEN) && entry.first.size() > ADLS_SAS_TOKEN.size() &&
+		    !entry.second.empty()) {
+			sas_by_host.emplace(StringUtil::Lower(entry.first.substr(ADLS_SAS_TOKEN.size())), entry.second);
+		}
+	}
+	if (!sas_by_host.empty()) {
+		auto it = sas_by_host.find(StringUtil::Lower(AzureHostOf(prefix)));
+		if (it == sas_by_host.end()) {
+			it = sas_by_host.begin();
+		}
+		result.azure_host = it->first;
+		result.azure_sas_token = it->second;
+	} else {
+		// delta/v1 spells it without a host; the location supplies it
+		result.azure_sas_token = get("azure.sas-token");
+	}
+	return result;
+}
+
+static bool BuildAzureSecret(ClientContext &context, const string &location, const UCAPITableCredentials &credentials,
+                             CreateSecretInput &input) {
+	if (!credentials.HasAzure()) {
 		UC_LOG_WARNING(context,
-		               "credentials.Apply %s: Azure storage credentials from Unity Catalog are not supported "
-		               "yet, so no usable secret is created for this table. Create an azure secret scoped to "
-		               "this path to read it.",
-		               storage_location);
+		               "credentials.Apply %s: Unity Catalog vended no Azure SAS token for this table, so no secret "
+		               "is created for it; an azure secret of your own for this path is used instead.",
+		               location);
+		return false;
+	}
+	auto host = credentials.azure_host.empty() ? AzureHostOf(location) : credentials.azure_host;
+	auto dot = host.find('.');
+	auto account = host.substr(0, dot);
+	if (account.empty()) {
+		UC_LOG_WARNING(context,
+		               "credentials.Apply %s: Unity Catalog vended an Azure SAS token, but the location names no "
+		               "storage account, so no secret is created for it.",
+		               location);
+		return false;
+	}
+	// As duckdb-iceberg builds it. The host is <account>.<service>.<endpoint suffix>, and the suffix is not always
+	// core.windows.net, the SDK's default.
+	auto connection_string =
+	    StringUtil::Format("AccountName=%s;SharedAccessSignature=%s", account, credentials.azure_sas_token);
+	if (dot != string::npos) {
+		auto suffix = host.find('.', dot + 1);
+		if (suffix != string::npos && suffix + 1 < host.size()) {
+			connection_string += ";EndpointSuffix=" + host.substr(suffix + 1);
+		}
+	}
+	input.type = "azure";
+	input.options = {{"account_name", account}, {"connection_string", connection_string}};
+	return true;
+}
+
+bool BuildVendedSecret(ClientContext &context, const string &location, const UCAPITableCredentials &credentials,
+                       const string &aws_region, CreateSecretInput &input) {
+	// Dispatch on the storage scheme rather than on which credential arrived: a credential for another cloud
+	// cannot serve this location, and a secret built from it would surface much later as an opaque auth failure.
+	if (IsGcsLocation(location)) {
+		if (!credentials.HasGcp()) {
+			// No secret at all: an empty s3 one would serve gs:// too (httpfs looks up s3 secrets before gcs
+			// ones), so a read would go out unsigned instead of with the user's gcs secret.
+			UC_LOG_WARNING(context,
+			               "credentials.Apply %s: Unity Catalog vended no GCP credential for this table, so no secret "
+			               "is created for it; a gcs secret of your own for this path is used instead.",
+			               location);
+			return false;
+		}
+		input.type = "gcs";
+		input.options = {{"bearer_token", credentials.bearer_token}};
+		return true;
+	}
+	if (IsAzureLocation(location)) {
+		return BuildAzureSecret(context, location, credentials, input);
+	}
+	if (!credentials.HasAws()) {
+		UC_LOG_WARNING(context,
+		               "credentials.Apply %s: Unity Catalog vended no AWS credential for this table, so no secret is "
+		               "created for it; an s3 secret of your own for this path is used instead.",
+		               location);
+		return false;
 	}
 	input.type = "s3";
 	input.options = {
 	    {"key_id", credentials.key_id},
 	    {"secret", credentials.secret},
 	    {"session_token", credentials.session_token},
-	    {"region", aws_region},
+	    {"region", credentials.region.empty() ? aws_region : credentials.region},
 	};
+	return true;
+}
+
+void ApplyVendedCredentials(ClientContext &context, const string &name, const string &location,
+                            const UCAPITableCredentials &credentials, const string &aws_region) {
+	auto &secret_manager = SecretManager::Get(context);
+	CreateSecretInput input;
+	if (!BuildVendedSecret(context, location, credentials, aws_region, input)) {
+		// Credentials applied earlier in this transaction may have left one; it would still be found first.
+		secret_manager.DropSecretByName(context, Identifier(name), OnEntryNotFound::RETURN_NULL,
+		                                SecretPersistType::TRANSACTION);
+		return;
+	}
+	input.name = Identifier(name);
+	input.scope = {location};
+	input.provider = "config";
+	// For this transaction only: a TEMPORARY secret lives in a transactional catalog set, so two open transactions
+	// replacing the same name conflict (a write-write conflict on "__internal_uc_<table_id>").
+	input.persist_type = SecretPersistType::TRANSACTION;
+	input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
+	secret_manager.CreateSecret(context, input);
 }
 
 string UCUtils::TypeToString(const LogicalType &input) {
