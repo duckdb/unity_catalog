@@ -889,6 +889,12 @@ static void RemoveUnregisteredVersionZero(ClientContext &context, UnityCatalog &
 	}
 }
 
+//! Whether `location`'s `_delta_log` holds any file, its `_commits` included
+static bool LogHoldsFiles(ClientContext &context, const string &location) {
+	auto &fs = FileSystem::GetFileSystem(context);
+	return !fs.Glob(Path::FromString(location).Join("_delta_log").Join("**").ToString()).empty();
+}
+
 //! Whether `location` is a local directory that does not exist yet, so that a create writing there makes it
 static bool WouldCreateDirectory(ClientContext &context, const string &location) {
 	if (!Path::FromString(location).IsLocal()) {
@@ -922,6 +928,14 @@ bool UCTableSet::PrepareExternalCreate(ClientContext &context, CreateTableInfo &
 			return false;
 		}
 		throw CatalogException::EntryAlreadyExists(CatalogType::TABLE_ENTRY, Identifier(create.table_name));
+	}
+	// A table already there is not this statement's to register or to clean up after, IF NOT EXISTS or not: the
+	// name is free, so it would be some other table's log. Judged by content, as kernel judges an existing table, so
+	// an empty `_delta_log` does not count.
+	if (LogHoldsFiles(context, create.location)) {
+		throw CatalogException("CREATE TABLE %s.%s.%s: '%s' already holds a Delta table (its _delta_log has files); "
+		                       "choose another location",
+		                       create.catalog_name, create.schema_name, create.table_name, create.location);
 	}
 	create.created_directory = WouldCreateDirectory(context, create.location);
 	return true;
@@ -1000,8 +1014,19 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 			return nullptr;
 		}
 		auto attach_info = ExternalAttachInfo(create);
-		auto committed =
-		    WriteVersionZero(context, info, attach_info, table_name, create.location, create.wrote_version_zero);
+		// The name and the location are settled here, so delta creates rather than applying IF NOT EXISTS again: it
+		// would skip a location whose `_delta_log` is an empty directory, which UC creates in
+		auto on_conflict = base.on_conflict;
+		base.on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
+		UCAPICommittedTable committed;
+		try {
+			committed =
+			    WriteVersionZero(context, info, attach_info, table_name, create.location, create.wrote_version_zero);
+		} catch (...) {
+			base.on_conflict = on_conflict;
+			throw;
+		}
+		base.on_conflict = on_conflict;
 		RegisterExternalCreate(context, create, committed);
 		return nullptr;
 	}

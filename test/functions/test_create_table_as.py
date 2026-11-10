@@ -469,18 +469,67 @@ def test_if_not_exists_on_a_name_unlisted_at_bind_lists_it(tmp_path):
         assert not (tmp_path / "unused").exists()
 
 
-def test_plain_create_if_not_exists_at_an_existing_table_never_removes_it(tmp_path):
-    # Delta skips a CREATE IF NOT EXISTS at a location that holds a Delta table, so the statement wrote nothing;
-    # a refused registration must leave that table as it was
-    location = tmp_path / "theirs"
+def _existing_table(tmp_path, name="theirs"):
+    """A Delta table at a location UC does not have under any name."""
+    location = tmp_path / name
     with Catalog() as setup:
         _ok(setup, f"CREATE TABLE unity.plain.mine WITH (location = '{location}') AS SELECT 1 AS id;")
+    return location
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE TABLE unity.plain.t (id INTEGER) WITH (location = '{loc}')",
+        "CREATE TABLE IF NOT EXISTS unity.plain.t (id INTEGER) WITH (location = '{loc}')",
+        "CREATE TABLE unity.plain.t WITH (location = '{loc}') AS SELECT 2 AS id",
+        "CREATE TABLE IF NOT EXISTS unity.plain.t WITH (location = '{loc}') AS SELECT 2 AS id",
+    ],
+    ids=["create", "create-if-not-exists", "ctas", "ctas-if-not-exists"],
+)
+def test_a_location_that_holds_a_delta_table_is_refused(tmp_path, sql):
+    location = _existing_table(tmp_path)
     before = _files(location)
-    with Catalog(register=lambda body: REFUSED) as uc:
-        # Whether the statement is refused, or registers the table it found, is not settled; either way it wrote
-        # nothing, so it removes nothing
-        run(uc, f"CREATE TABLE IF NOT EXISTS unity.plain.theirs (id INTEGER) WITH (location = '{location}');")
+    with Catalog() as uc:
+        err = _fails(uc, sql.format(loc=location) + ";")
+        assert f"'{location}' already holds a Delta table (its _delta_log has files); choose another location" in err
+        # Refused before anything is written or registered: the table there is left as it was
+        assert uc.registered == []
     assert _files(location) == before
+
+
+def test_a_log_holding_only_staged_commits_counts_as_a_table(tmp_path):
+    location = tmp_path / "staged"
+    (location / "_delta_log" / "_commits").mkdir(parents=True)
+    (location / "_delta_log" / "_commits" / "00000000000000000001.uuid.json").write_text("{}")
+    with Catalog() as uc:
+        err = _fails(uc, f"CREATE TABLE unity.plain.t (id INTEGER) WITH (location = '{location}');")
+        assert "already holds a Delta table" in err, err
+
+
+@pytest.mark.parametrize("if_not_exists", [False, True], ids=["create", "create-if-not-exists"])
+def test_an_empty_delta_log_directory_takes_a_create(tmp_path, if_not_exists):
+    location = tmp_path / "empty_log"
+    (location / "_delta_log").mkdir(parents=True)
+    with Catalog() as uc:
+        _ok(
+            uc,
+            f"CREATE TABLE {'IF NOT EXISTS ' if if_not_exists else ''}unity.plain.t (id INTEGER) "
+            f"WITH (location = '{location}'); INSERT INTO unity.plain.t VALUES (1);",
+        )
+        assert [r["name"] for r in uc.registered] == ["t"]
+        assert _ok(uc, "SELECT id FROM unity.plain.t;") == ["1"]
+
+
+def test_an_empty_delta_log_directory_is_refused_by_delta_for_ctas(tmp_path):
+    # Delta's CTAS judges a local location by the directory, not its content, so it refuses where plain CREATE
+    # creates: delta's to align
+    location = tmp_path / "empty_log"
+    (location / "_delta_log").mkdir(parents=True)
+    with Catalog() as uc:
+        err = _fails(uc, f"CREATE TABLE unity.plain.t WITH (location = '{location}') AS SELECT 1 AS id;")
+        assert "already holds one: choose another path" in err, err
+        assert uc.registered == []
 
 
 @pytest.mark.xfail(
