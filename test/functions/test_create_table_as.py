@@ -532,27 +532,55 @@ def test_an_empty_delta_log_directory_is_refused_by_delta_for_ctas(tmp_path):
         assert uc.registered == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="core plans a plain CREATE, dropping the query, when the session's listing has the name; UC then finds "
-    "the name free and registers an empty table",
-)
-def test_ctas_on_a_stale_cached_name_does_not_drop_its_rows(tmp_path):
-    location = tmp_path / "stale"
+def _stale_listing_catalog(tmp_path):
+    """A catalog whose listing has `stale`, which its by-name lookup no longer finds (dropped elsewhere)."""
     listed = delta_table("stale", tmp_path / "gone", [])
+    registered = []
 
     def respond(method, path, body):
         if method == "GET" and path == f"/api/2.1/unity-catalog/tables/{CATALOG}.plain.stale":
             return 404, {"error_code": "TABLE_DOES_NOT_EXIST", "message": "Table not found: stale"}
         if method == "POST" and path.endswith(REGISTER):
+            registered.append(json.loads(body))
             return 200, {"metadata": {"etag": "e", "table-uuid": "u", "location": json.loads(body)["location"]}}
         return None
 
-    with MockUnityCatalog([{**listed, "properties": {}}], schemas=["plain"], respond=respond) as uc:
-        result, _ = run(uc, f"CREATE TABLE unity.plain.stale WITH (location = '{location}') AS SELECT 42 AS id;")
-        adds = [a for a in _version_zero(location) if "add" in a] if (location / VERSION_ZERO).exists() else []
-        # Either refused as already existing, or created with its row; never an empty table
-        assert result.returncode != 0 or adds, "CTAS reported success and wrote no rows"
+    uc = MockUnityCatalog([{**listed, "properties": {}}], schemas=["plain"], respond=respond)
+    uc.registered = registered
+    return uc
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE TABLE unity.plain.stale WITH (location = '{loc}') AS SELECT 42 AS id",
+        "CREATE TABLE unity.plain.stale (id INTEGER) WITH (location = '{loc}')",
+    ],
+    ids=["ctas", "create"],
+)
+def test_a_name_the_session_listed_is_taken_even_when_uc_no_longer_has_it(tmp_path, sql):
+    # Core plans a plain CREATE, dropping a CTAS's query, for a name the session lists; registering then would make
+    # an empty table, so the listed name is the conflict
+    location = tmp_path / "stale"
+    with _stale_listing_catalog(tmp_path) as uc:
+        err = _fails(uc, sql.format(loc=location) + ";")
+        assert (
+            'Table with name "stale" already exists! If it was dropped outside this session, DETACH and ATTACH the catalog again'
+            in err
+        ), err
+        assert uc.registered == []
+        assert not location.exists()
+
+
+def test_if_not_exists_on_a_name_the_session_listed_skips(tmp_path):
+    location = tmp_path / "stale"
+    with _stale_listing_catalog(tmp_path) as uc:
+        _ok(
+            uc,
+            f"CREATE TABLE IF NOT EXISTS unity.plain.stale WITH (location = '{location}') AS SELECT error('ran') AS id;",
+        )
+        assert uc.registered == []
+        assert not location.exists()
 
 
 def test_plain_create_if_not_exists_on_a_name_unlisted_at_bind_lists_it(tmp_path):

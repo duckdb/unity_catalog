@@ -166,6 +166,9 @@ private:
 	bool RegisterExternalCreate(ClientContext &context, const UCExternalCreate &create,
 	                            const UCAPICommittedTable &committed);
 
+	//! Whether this session's listing of the schema has `name`, loading it if it is not loaded yet
+	bool HasListedEntry(ClientContext &context, const string &name);
+
 	// Ensure tables are loaded exactly once, must be done before entry_lock.
 	void EnsureLoaded(ClientContext &context);
 

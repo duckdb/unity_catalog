@@ -1006,6 +1006,19 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	auto catalog_name = catalog.GetDBPath();
 	auto schema_name = schema.name.GetIdentifierName();
 
+	// Core plans a plain CREATE, and drops a CREATE TABLE AS's query, when this session's listing has the name. So a
+	// listed name is the conflict core saw, whatever the server says now: otherwise a CTAS would make an empty table
+	if (HasListedEntry(context, table_name)) {
+		if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+			return nullptr;
+		}
+		ErrorData error(CatalogException::EntryAlreadyExists(CatalogType::TABLE_ENTRY, Identifier(table_name)));
+		throw CatalogException(error.ExtraInfo(),
+		                       error.RawMessage() +
+		                           " If it was dropped outside this session, DETACH and ATTACH the catalog "
+		                           "again, then create it.");
+	}
+
 	if (base.options.find("location") != base.options.end()) {
 		// The caller chose where the table lives, which in UC makes it EXTERNAL: no staging, no catalog committer,
 		// nothing UC requires of the log
@@ -1200,6 +1213,12 @@ optional_ptr<CatalogEntry> UCTableSet::GetEntry(ClientContext &context, const En
 	}
 	auto &table_info = entry->second;
 	return table_info.GetVersion(context, lookup);
+}
+
+bool UCTableSet::HasListedEntry(ClientContext &context, const string &name) {
+	EnsureLoaded(context);
+	lock_guard<mutex> l(entry_lock);
+	return tables.find(name) != tables.end();
 }
 
 void UCTableSet::MarkNeedsReload() {
