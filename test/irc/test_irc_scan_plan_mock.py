@@ -231,6 +231,10 @@ class MockUC:
     def set_plan_script(self, plan_script):
         self._httpd.plan_script = plan_script
 
+    def set_storage_location(self, location):
+        """The table's storage_location in the /tables response (before the first query)."""
+        self._httpd.table_info["storage_location"] = location
+
     def serve_delta_table(self, location, columns):
         """Point the served table at a real Delta table (before the first query)."""
         self._httpd.table_info["storage_location"] = f"file://{location}"
@@ -459,6 +463,24 @@ def test_plan_credential_of_each_cloud(data_files, prefix, config, secret_type, 
             assert part in secret_string, r.stdout
         # The secret is the one found for a file under the prefix
         assert rows.get("which") == f"{_VENDED}unity__{CATALOG}__{SCHEMA}__{TABLE}__0", r.stdout
+
+
+def test_a_lone_slash_prefix_is_scoped_to_the_table(data_files):
+    """REGRESSION: a lone "/" prefix became the scope "/://", which matches no path, and dispatched as s3 with a
+    misleading "no AWS credential" warning. It stands for the table's location now, as in duckdb-iceberg."""
+    with MockUC(_vending_one(data_files, "/", {"gcs.oauth2.token": "ya29.mock"})) as srv:
+        # The table's own credentials (temporary-table-credentials) come back empty from the mock.
+        srv.set_storage_location("gs://mock-bucket/days")
+        r = srv.query(
+            f"BEGIN; SELECT 'rows', count(*) FROM {TABLE}; "
+            f"SELECT 'secret', type, scope[1] FROM duckdb_secrets() WHERE name LIKE '{_VENDED}%'; COMMIT;"
+        )
+        assert r.returncode == 0, r.stderr
+        out = _strip_colour(r.stdout)
+        rows = _labelled(out)
+        assert rows.get("rows") == "50", out
+        assert rows.get("secret") == "gcs|gs://mock-bucket/days", out
+        assert "vended no AWS credential" not in out, out
 
 
 def test_azure_plan_credential_without_a_sas_makes_no_secret(data_files):

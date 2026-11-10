@@ -198,12 +198,7 @@ static unique_ptr<GlobalTableFunctionState> UCScanPlanInitGlobal(ClientContext &
 	                       "__" + bd.table_name + "__";
 	idx_t credential_count = plan.storage_credentials.size();
 	for (idx_t i = 0; i < credential_count; i++) {
-		auto prefix = plan.storage_credentials[i].first;
-		// A bare scheme ("gs") would neither pick the secret type nor match a path's scope: widen it to "gs://",
-		// the least specific scope for that scheme, as duckdb-iceberg does.
-		if (!prefix.empty() && !StringUtil::Contains(prefix, "://")) {
-			prefix += "://";
-		}
+		auto prefix = PlanCredentialScope(plan.storage_credentials[i].first, bd.storage_location);
 		auto credentials = CredentialsFromConfig(plan.storage_credentials[i].second, prefix);
 		// The region is the one the credential carries (`client.region`), if any.
 		ApplyVendedCredentials(context, secret_prefix + to_string(i), prefix, credentials, string());

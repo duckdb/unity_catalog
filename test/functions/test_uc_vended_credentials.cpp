@@ -246,6 +246,19 @@ TEST_CASE("Iceberg REST /plan credentials: each cloud's shape", "[uc][credential
 	}
 }
 
+TEST_CASE("Iceberg REST /plan prefixes: the scope each becomes", "[uc][credentials]") {
+	auto table = "gs://bucket/schema/table";
+	REQUIRE(PlanCredentialScope("gs://bucket/", table) == "gs://bucket/");
+	// A bare scheme widens to the least specific scope for it.
+	REQUIRE(PlanCredentialScope("gs", table) == "gs://");
+	REQUIRE(PlanCredentialScope("s3a", table) == "s3a://");
+	// A lone "/" matches no path: the table's location stands in, as in duckdb-iceberg.
+	REQUIRE(PlanCredentialScope("/", table) == table);
+	// Anything else is not a scheme and stays as it is.
+	REQUIRE(PlanCredentialScope("/data", table) == "/data");
+	REQUIRE(PlanCredentialScope("", table).empty());
+}
+
 TEST_CASE("Config keys: which spelling wins", "[uc][credentials]") {
 	// GCS: Iceberg REST's gcs.oauth2.token first, then delta/v1's gcs.oauth-token if it is absent or empty.
 	REQUIRE(CredentialsFromConfig({{"gcs.oauth2.token", "ya29.iceberg"}, {"gcs.oauth-token", "ya29.delta"}}, "")

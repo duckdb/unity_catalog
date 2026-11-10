@@ -29,6 +29,11 @@ struct UCType {
 //! `azure.sas-token` (delta/v1), and `client.region`. Of several Azure hosts, the one in `prefix` is taken.
 UCAPITableCredentials CredentialsFromConfig(const unordered_map<string, string> &config, const string &prefix);
 
+//! The scope for an Iceberg REST storage credential's `prefix`: a bare scheme ("gs") widened to "gs://", the least
+//! specific scope for it; a lone "/" (which matches no path) the table's location, as duckdb-iceberg does; else the
+//! prefix itself.
+string PlanCredentialScope(const string &prefix, const string &table_location);
+
 //! The secret UC-vended credentials make for `location`, chosen by its scheme: gcs (bearer token) for gs:// and
 //! gcs://, azure (a SAS connection string) for abfss://, abfs://, az:// and azure://, else s3. Sets `input.type`
 //! and `input.options` only. False, with a warning, when nothing usable for that cloud was vended: then no secret

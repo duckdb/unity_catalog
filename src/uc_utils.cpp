@@ -6,6 +6,7 @@
 #include "storage/uc_transaction.hpp"
 
 #include <iostream>
+#include <algorithm>
 #include <map>
 
 namespace duckdb {
@@ -35,6 +36,18 @@ static string AzureHostOf(const string &location) {
 		return authority.substr(at + 1);
 	}
 	return authority.find('.') != string::npos ? authority : string();
+}
+
+string PlanCredentialScope(const string &prefix, const string &table_location) {
+	if (prefix == "/" && !table_location.empty()) {
+		return table_location;
+	}
+	// A scheme is a letter, then letters, digits, '+', '-' or '.' (RFC 3986).
+	bool is_scheme = !prefix.empty() && StringUtil::CharacterIsAlpha(prefix[0]) &&
+	                 std::all_of(prefix.begin(), prefix.end(), [](char c) {
+		                 return StringUtil::CharacterIsAlphaNumeric(c) || c == '+' || c == '-' || c == '.';
+	                 });
+	return is_scheme ? prefix + "://" : prefix;
 }
 
 UCAPITableCredentials CredentialsFromConfig(const unordered_map<string, string> &config, const string &prefix) {
