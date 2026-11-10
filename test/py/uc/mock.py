@@ -40,6 +40,9 @@ def delta_table(name, location, columns, *, schema="plain"):
 
 DROP = "drop"
 
+# For `run`: attach without a DEFAULT_SCHEMA, so UC asks the settings endpoint for one.
+NO_DEFAULT_SCHEMA = ""
+
 
 class MockUnityCatalog:
     """Serves `tables`, each listed under its own schema. `schemas` defaults to the tables' schemas, in
@@ -126,14 +129,18 @@ def duckdb_bin():
     return str(binary)
 
 
-def run(mock, sql, attach_options=""):
+def run(mock, sql, attach_options="", default_schema=None):
     """Attach the mock catalog as `unity`, run `sql` in list mode, and return (result, stdout with colour
     stripped). stdout holds only what `sql` prints: the attach's own output is discarded, its errors are
-    not."""
+    not. The attach names `default_schema` as DEFAULT_SCHEMA (None: the mock's first schema), or none
+    at all for NO_DEFAULT_SCHEMA."""
+    if default_schema is None:
+        default_schema = mock.schemas[0]
+    default_option = "" if default_schema == NO_DEFAULT_SCHEMA else f", DEFAULT_SCHEMA '{default_schema}'"
     prelude = (
         f"{load_statements(build_dir())}"
         f"CREATE SECRET (TYPE UNITY_CATALOG, TOKEN 'x', ENDPOINT '{mock.endpoint}', AWS_REGION 'us-east-2');"
-        f"ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, DEFAULT_SCHEMA '{mock.schemas[0]}'{attach_options});"
+        f"ATTACH '{CATALOG}' AS unity (TYPE unity_catalog{default_option}{attach_options});"
     )
     quiet_prelude = ["-cmd", ".output /dev/null", "-cmd", prelude, "-cmd", ".output"]
     result = subprocess.run(
