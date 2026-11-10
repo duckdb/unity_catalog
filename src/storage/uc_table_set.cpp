@@ -245,24 +245,11 @@ void TableInformation::RefreshCredentials(ClientContext &context) {
 	if (table_data->storage_location.find("file://") == 0) {
 		return;
 	}
-	auto &secret_manager = SecretManager::Get(context);
-	// Get Credentials from UCAPI
 	auto table_credentials = UCAPI::GetTableCredentials(
 	    context, table_data->catalog_name, table_data->schema_name, table_data->name, table_data->table_id,
 	    IsCatalogManaged(), !(catalog.access_mode == AccessMode::READ_ONLY), catalog.credentials);
-
-	// A TEMPORARY secret lives in a transactional catalog set, so two open transactions replacing the same
-	// name conflict (write-write conflict on "__internal_uc_<table_id>").
-	CreateSecretInput input;
-	input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
-	input.persist_type = SecretPersistType::TRANSACTION;
-	input.name = Identifier("__internal_uc_" + table_data->table_id);
-	input.provider = "config";
-	input.scope = {table_data->storage_location};
-	ApplyVendedCredentials(context, input, table_data->storage_location, table_credentials,
-	                       catalog.credentials.aws_region);
-
-	secret_manager.CreateSecret(context, input);
+	ApplyVendedCredentials(context, "__internal_uc_" + table_data->table_id, table_data->storage_location,
+	                       table_credentials, catalog.credentials.aws_region);
 }
 
 string TableInformation::AttachedCatalogName() const {
@@ -629,16 +616,9 @@ static void StageCredentials(ClientContext &context, UnityCatalog &uc_catalog, c
 		return;
 	}
 	auto credentials = UCAPI::GetStagingTableCredentials(context, staging.table_id, uc_catalog.credentials);
-	CreateSecretInput input;
-	input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
 	// For this transaction only, as in RefreshCredentials: version 0 is written in the same statement
-	input.persist_type = SecretPersistType::TRANSACTION;
-	input.name = Identifier("__internal_uc_" + staging.table_id);
-	input.provider = "config";
-	input.scope = {staging.location};
-	ApplyVendedCredentials(context, input, staging.location, credentials, uc_catalog.credentials.aws_region);
-	auto &secret_manager = SecretManager::Get(context);
-	secret_manager.CreateSecret(context, input);
+	ApplyVendedCredentials(context, "__internal_uc_" + staging.table_id, staging.location, credentials,
+	                       uc_catalog.credentials.aws_region);
 }
 
 //! What the table's own version 0 says it is: the schema, partition columns, protocol and configuration.

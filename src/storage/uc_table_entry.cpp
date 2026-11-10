@@ -189,39 +189,44 @@ static unique_ptr<GlobalTableFunctionState> UCScanPlanInitGlobal(ClientContext &
 		bd.uc_catalog->MarkScanPlanAvailable();
 	}
 
-	// httpfs authenticates off secrets, so these must exist before parquet binds.
-	if (!plan.storage_credentials.empty()) {
-		auto &secret_manager = SecretManager::Get(context);
-		for (idx_t i = 0; i < plan.storage_credentials.size(); i++) {
-			const string &prefix = plan.storage_credentials[i].first;
-			const unordered_map<string, string> &cfg = plan.storage_credentials[i].second;
-			auto get_cfg = [&cfg](const string &k) {
-				auto it = cfg.find(k);
-				return it != cfg.end() ? it->second : string();
-			};
-			CreateSecretInput sec;
-			sec.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
-			// Transaction-scoped for the same reason as the secret in RefreshCredentials.
-			sec.persist_type = SecretPersistType::TRANSACTION;
-			sec.name = Identifier("__internal_uc_scanplan__" + bd.catalog_name + "__" + bd.schema_name + "__" +
-			                      bd.table_name + "__" + to_string(i));
-			sec.provider = "config";
-			sec.scope = {prefix};
-			// Iceberg REST names the GCS token `gcs.oauth2.token`; the delta/v1 API's `gcs.oauth-token`
-			// is read too, in case a server answers /plan with that spelling.
-			UCAPITableCredentials cred;
-			cred.key_id = get_cfg("s3.access-key-id");
-			cred.secret = get_cfg("s3.secret-access-key");
-			cred.session_token = get_cfg("s3.session-token");
-			cred.bearer_token = get_cfg("gcs.oauth2.token");
-			if (cred.bearer_token.empty()) {
-				cred.bearer_token = get_cfg("gcs.oauth-token");
-			}
-			// Scoped on the credential's own prefix, not a table location: one plan can carry
-			// credentials for several prefixes.
-			ApplyVendedCredentials(context, sec, prefix, cred, get_cfg("client.region"));
-			secret_manager.CreateSecret(context, sec);
+	// httpfs authenticates off secrets, so these must exist before parquet binds. One per credential, named by its
+	// index and scoped on its own prefix, not a table location: one plan can carry credentials for several prefixes.
+	string secret_prefix =
+	    "__internal_uc_scanplan__" + bd.catalog_name + "__" + bd.schema_name + "__" + bd.table_name + "__";
+	idx_t credential_count = plan.storage_credentials.size();
+	for (idx_t i = 0; i < credential_count; i++) {
+		auto prefix = plan.storage_credentials[i].first;
+		// A bare scheme ("gs") would neither pick the secret type nor match a path's scope: widen it to "gs://",
+		// the least specific scope for that scheme, as duckdb-iceberg does.
+		if (!prefix.empty() && !StringUtil::Contains(prefix, "://")) {
+			prefix += "://";
 		}
+		auto credentials = CredentialsFromConfig(plan.storage_credentials[i].second, prefix);
+		// The region is the one the credential carries (`client.region`), if any.
+		ApplyVendedCredentials(context, secret_prefix + to_string(i), prefix, credentials, string());
+	}
+	// An earlier plan in this transaction may have vended more credentials; drop the secrets beyond this plan's.
+	auto &secret_manager = SecretManager::Get(context);
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	vector<string> stale;
+	for (auto &entry : secret_manager.AllSecrets(transaction)) {
+		if (entry.storage_mode != SecretManager::TRANSACTION_STORAGE_NAME || !entry.secret) {
+			continue;
+		}
+		auto name = entry.secret->GetName().GetIdentifierName();
+		if (!StringUtil::StartsWith(name, secret_prefix)) {
+			continue;
+		}
+		// Another table's name can extend this one's, but then the rest is not a bare index.
+		auto index = name.substr(secret_prefix.size());
+		if (!index.empty() && index.find_first_not_of("0123456789") == string::npos &&
+		    std::stoull(index) >= credential_count) {
+			stale.push_back(name);
+		}
+	}
+	for (auto &name : stale) {
+		secret_manager.DropSecretByName(context, Identifier(name), OnEntryNotFound::RETURN_NULL,
+		                                SecretPersistType::TRANSACTION);
 	}
 
 	tl_uc_file_list = make_shared_ptr<UCMultiFileList>(context, plan, bd.credentials, bd.catalog_name, bd.schema_name,

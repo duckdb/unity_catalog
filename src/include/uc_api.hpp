@@ -48,18 +48,31 @@ struct UCAPISchema {
 };
 
 //! Unity Catalog vends a different credential shape per cloud: AWS gets key/secret/session
-//! token, GCP a pre-issued OAuth bearer token. At most one group is populated, matching the
-//! scheme of the table's storage_location. Azure's SAS is not read yet.
+//! token, GCP a pre-issued OAuth bearer token, Azure a SAS token. Usually one group is populated,
+//! matching the scheme of the table's storage location. BuildVendedSecret turns this into a secret.
 struct UCAPITableCredentials {
 	// AWS
 	string key_id;
 	string secret;
 	string session_token;
+	//! The region a credential came with (Iceberg REST's `client.region`); UC's own endpoints send none
+	string region;
 	// GCP
 	string bearer_token;
+	// Azure
+	string azure_sas_token;
+	//! The storage host the SAS is for, when the response names it (Iceberg REST's
+	//! `adls.sas-token.<host>`); else it comes from the storage location
+	string azure_host;
 
+	bool HasAws() const {
+		return !key_id.empty() && !secret.empty();
+	}
 	bool HasGcp() const {
 		return !bearer_token.empty();
+	}
+	bool HasAzure() const {
+		return !azure_sas_token.empty();
 	}
 };
 
@@ -190,7 +203,7 @@ struct UCAPICommittedTable {
 
 class UCAPI {
 public:
-	// Vends temporary storage credentials (AWS or GCP):
+	// Vends temporary storage credentials (AWS, GCP or Azure):
 	// - CMTs go via protocol v1 endpoint -> (GET /delta/v1/.../credentials); (returns 400/5116 for EXTERNALs)
 	// - EXTERNAL/plain tables -> POST /api/2.1/unity-catalog/temporary-table-credentials endpoint (keyed by table_id)
 	// `catalog_managed` flag selects which to use.
@@ -221,6 +234,10 @@ public:
 	// Always READ_WRITE: the caller writes the table's version 0.
 	static UCAPITableCredentials GetStagingTableCredentials(ClientContext &ctx, const string &table_id,
 	                                                        const UCCredentials &credentials);
+	//! The credentials of a temporary-table-credentials response (all.yaml `TemporaryCredentials`)
+	static UCAPITableCredentials ParseTemporaryCredentials(const string &response_json);
+	//! The credentials of a delta/v1 `DeltaCredentialsResponse` (its first storage credential)
+	static UCAPITableCredentials ParseDeltaCredentials(const string &response_json);
 	static string GetDefaultSchema(ClientContext &ctx, const UCCredentials &credentials);
 	static vector<string> GetCatalogs(ClientContext &ctx, Catalog &catalog, const UCCredentials &credentials);
 	static vector<UCAPITable> GetTables(ClientContext &ctx, Catalog &catalog, const string &schema,

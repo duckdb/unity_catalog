@@ -27,6 +27,7 @@ Runs the BUILT duckdb CLI (its ABI matches the locally-built extension; pip `duc
 
 import http.server
 import json
+import os
 import re
 import subprocess
 import threading
@@ -104,6 +105,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.server.requests.append({"method": method, "path": self.path, "body": body})
 
         path = self.path
+        if path.startswith("/mock-bucket/"):
+            return self._blob(method)
         if "/api/2.1/unity-catalog/catalogs" in path:
             payload = {"catalogs": [{"name": CATALOG}]}
         elif "/api/2.1/unity-catalog/schemas" in path:
@@ -120,6 +123,44 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def _blob(self, method):
+        """Object storage at `/mock-bucket/<key>` (path style), for reads through a secret's credentials: serves
+        `server.blobs[key]` with Range support and records how each request was signed."""
+        key = self.path.split("?", 1)[0][len("/mock-bucket/") :]
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("AWS4-HMAC-SHA256 "):
+            signed = "hmac"
+        elif auth.startswith("Bearer "):
+            signed = "bearer"
+        else:
+            signed = "unsigned" if not auth else "other"
+        self.server.blob_requests.append((method, key, signed))
+        data = self.server.blobs.get(key)
+        if data is None:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        status, body = 200, data
+        rng = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", ""))
+        if rng:
+            lo = int(rng.group(1))
+            hi = int(rng.group(2)) if rng.group(2) else len(data) - 1
+            status, body = 206, data[lo : hi + 1]
+            self.send_response(status)
+            self.send_header("Content-Range", f"bytes {lo}-{lo + len(body) - 1}/{len(data)}")
+        else:
+            self.send_response(status)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Last-Modified", "Mon, 09 Nov 2026 00:00:00 GMT")
+        self.send_header("ETag", '"mock"')
+        self.end_headers()
+        if method != "HEAD":
+            self.wfile.write(body)
+
+    def do_HEAD(self):
+        self._dispatch("HEAD")
 
     def do_GET(self):
         self._dispatch("GET")
@@ -138,6 +179,8 @@ class MockUC:
         self._httpd = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
         self._httpd.requests = []
         self._httpd.plan_script = plan_script
+        self._httpd.blobs = {}
+        self._httpd.blob_requests = []
         self._httpd.table_info = {
             "name": TABLE,
             "catalog_name": CATALOG,
@@ -173,6 +216,21 @@ class MockUC:
     def plan_bodies(self):
         return [json.loads(r["body"]) for r in self.requests if r["path"].endswith("/plan") and r["body"]]
 
+    @property
+    def address(self):
+        return self._httpd.server_address
+
+    @property
+    def blob_requests(self):
+        return self._httpd.blob_requests
+
+    def serve_blobs(self, blobs):
+        """Serve `blobs` ({key: bytes}) as objects under /mock-bucket/."""
+        self._httpd.blobs.update(blobs)
+
+    def set_plan_script(self, plan_script):
+        self._httpd.plan_script = plan_script
+
     def serve_delta_table(self, location, columns):
         """Point the served table at a real Delta table (before the first query)."""
         self._httpd.table_info["storage_location"] = f"file://{location}"
@@ -207,10 +265,8 @@ class MockUC:
 # accepted too. The data files stay local: only the secret the plan's storage credential becomes is
 # under test. Read inside BEGIN so the secret is still there whatever its lifetime.
 #
-# `iceberg-key` is a REGRESSION case (red while the plan path read only `gcs.oauth-token`);
-# `delta-key` and `no-token` are CHARACTERIZATION. With no token the fallback s3 secret is created, a
-# known limitation: httpfs finds it before a gcs HMAC secret the user created, so such a read goes
-# out unsigned.
+# `iceberg-key` is a REGRESSION case (red while the plan path read only `gcs.oauth-token`), and so is
+# `no-token` (red while an empty s3 secret was created in its place); `delta-key` is CHARACTERIZATION.
 #
 
 
@@ -228,12 +284,17 @@ def _vending_gcs(data_files, config):
     return script
 
 
+def _strip_colour(text):
+    # The CLI prints warnings to stdout, in colour
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
 @pytest.mark.parametrize(
     "config,secret_type",
     [
         ({"gcs.oauth2.token": "ya29.mock"}, "gcs"),
         ({"gcs.oauth-token": "ya29.mock"}, "gcs"),
-        ({"gcs.oauth2.token-expires-at": "0"}, "s3"),  # no token: the fallback s3 secret
+        ({"gcs.oauth2.token-expires-at": "0"}, None),  # no token: no secret
     ],
     ids=["iceberg-key", "delta-key", "no-token"],
 )
@@ -244,28 +305,24 @@ def test_gcs_credential_from_the_plan(data_files, config, secret_type):
             f"SELECT 'secret', type, scope[1] FROM duckdb_secrets() WHERE name LIKE '__internal_uc_scanplan__%'; COMMIT;"
         )
         assert r.returncode == 0, r.stderr
-        rows = {}
-        # The CLI prints the fallback's warning to stdout, in colour
-        for line in re.sub(r"\x1b\[[0-9;]*m", "", r.stdout).splitlines():
-            label, _, rest = line.strip().partition("|")
-            if rest:
-                rows[label] = rest
+        rows = _labelled(_strip_colour(r.stdout))
         assert rows.get("rows") == "50", r.stdout
-        assert rows.get("secret") == f"{secret_type}|gs://mock-bucket/days/", r.stdout
+        expected = f"{secret_type}|gs://mock-bucket/days/" if secret_type else None
+        assert rows.get("secret") == expected, r.stdout
 
 
 # Which key wins, read from the secret itself (`-unredacted`): the Iceberg key when both are set, the
-# delta/v1 key when the Iceberg one is empty, and with neither the warning and the fallback s3 secret.
+# delta/v1 key when the Iceberg one is empty, and with neither the warning and no secret.
 @pytest.mark.parametrize(
-    "config,secret_type,token",
+    "config,token",
     [
-        ({"gcs.oauth2.token": "ya29.iceberg", "gcs.oauth-token": "ya29.delta"}, "gcs", "ya29.iceberg"),
-        ({"gcs.oauth2.token": "", "gcs.oauth-token": "ya29.delta"}, "gcs", "ya29.delta"),
-        ({}, "s3", None),
+        ({"gcs.oauth2.token": "ya29.iceberg", "gcs.oauth-token": "ya29.delta"}, "ya29.iceberg"),
+        ({"gcs.oauth2.token": "", "gcs.oauth-token": "ya29.delta"}, "ya29.delta"),
+        ({}, None),
     ],
     ids=["both-keys", "empty-iceberg-key", "neither"],
 )
-def test_gcs_token_key_precedence(data_files, config, secret_type, token):
+def test_gcs_token_key_precedence(data_files, config, token):
     with MockUC(_vending_gcs(data_files, config)) as srv:
         r = srv.query(
             f"BEGIN; SELECT count(*) FROM {TABLE}; "
@@ -274,14 +331,173 @@ def test_gcs_token_key_precedence(data_files, config, secret_type, token):
             cli_args=("-unredacted",),
         )
         assert r.returncode == 0, r.stderr
-        out = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout)
+        out = _strip_colour(r.stdout)
         secret = [ln.strip().partition("|")[2] for ln in out.splitlines() if ln.strip().startswith("secret|")]
-        assert len(secret) == 1 and f"type={secret_type};" in secret[0], out
         if token:
+            assert len(secret) == 1 and "type=gcs;" in secret[0], out
             assert f"bearer_token={token}" in secret[0], out
         else:
-            assert "bearer_token" not in secret[0], out
+            assert secret == [], out
             assert "Unity Catalog vended no GCP credential" in out, out
+
+
+# -----------------------------------------------------------------------------
+# Which credentials a gs:// read goes out with
+#
+# The data files are served by the mock itself, as `gs://mock-bucket/days/<file>` with the endpoint in
+# the URL (transport only: the secret supplies all the authentication), and the mock records how each
+# request was signed. The user has a gcs HMAC secret for the bucket.
+#
+# `no-token` is a REGRESSION case: while an empty s3 secret was created for the prefix, httpfs found it
+# ahead of the user's gcs secret (it looks up s3 secrets first) and the reads went out unsigned.
+# `vended-token` is CHARACTERIZATION: the vended secret's longer scope beats the user's.
+#
+
+
+def _serving_gcs(data_files, config, host, port):
+    def script(method, path, requests):
+        if path.endswith("/plan"):
+            transport = f"?s3_endpoint={host}:{port}&s3_use_ssl=false&s3_url_style=path"
+            return {
+                "status": "completed",
+                "plan-id": "p1",
+                "file-scan-tasks": [
+                    _file_scan_task(f"gs://mock-bucket/days/{Path(f).name}{transport}") for f in data_files
+                ],
+                "storage-credentials": [{"prefix": "gs://mock-bucket/days/", "config": config}],
+            }
+        return {}
+
+    return script
+
+
+@pytest.mark.parametrize(
+    "config,signed",
+    [({"gcs.oauth2.token-expires-at": "0"}, "hmac"), ({"gcs.oauth2.token": "ya29.mock"}, "bearer")],
+    ids=["no-token", "vended-token"],
+)
+def test_gs_read_signs_with_the_vended_token_else_the_users_secret(data_files, config, signed):
+    with MockUC(None) as srv:
+        srv.serve_blobs({f"days/{Path(f).name}": Path(f).read_bytes() for f in data_files})
+        srv.set_plan_script(_serving_gcs(data_files, config, *srv.address))
+        r = srv.query(
+            "CREATE SECRET user_hmac (TYPE gcs, KEY_ID 'HMACKEY', SECRET 'hmac-secret', SCOPE 'gs://mock-bucket/'); "
+            f"SELECT 'rows', count(*) FROM {TABLE};"
+        )
+        assert r.returncode == 0, r.stderr
+        assert _labelled(_strip_colour(r.stdout)).get("rows") == "50", r.stdout
+        modes = {mode for _, _, mode in srv.blob_requests}
+        assert srv.blob_requests and modes == {signed}, srv.blob_requests
+
+
+# -----------------------------------------------------------------------------
+# Each cloud's /plan credential, and credentials applied again in one transaction
+#
+# The data files stay local, so these check the secrets only. Azure needs the azure extension, which
+# this repo does not build: it is loaded from $UC_TEST_AZURE_EXTENSION, else the case is skipped.
+#
+
+_ABFSS = "abfss://container@account.dfs.core.windows.net/days/"
+
+
+def _azure_load():
+    path = os.environ.get("UC_TEST_AZURE_EXTENSION")
+    if not path or not Path(path).exists():
+        pytest.skip("azure extension not available (set UC_TEST_AZURE_EXTENSION to its .duckdb_extension)")
+    return f"LOAD '{path}';"
+
+
+def _vending_one(data_files, prefix, config):
+    def script(method, path, requests):
+        if path.endswith("/plan"):
+            return {
+                "status": "completed",
+                "plan-id": "p1",
+                "file-scan-tasks": [_file_scan_task(f) for f in data_files],
+                "storage-credentials": [{"prefix": prefix, "config": config}],
+            }
+        return {}
+
+    return script
+
+
+@pytest.mark.parametrize(
+    "prefix,config,secret_type,expected",
+    [
+        (
+            "s3://mock-bucket/days/",
+            {"s3.access-key-id": "AKIAMOCK", "s3.secret-access-key": "mock-secret", "client.region": "eu-west-1"},
+            "s3",
+            ["key_id=AKIAMOCK", "region=eu-west-1"],
+        ),
+        ("gs://mock-bucket/days/", {"gcs.oauth2.token": "ya29.mock"}, "gcs", ["bearer_token=ya29.mock"]),
+        (
+            _ABFSS,
+            {"adls.sas-token.account.dfs.core.windows.net": "sv=2026&sig=mock"},
+            "azure",
+            ["account_name=account", "AccountName=account;SharedAccessSignature=sv=2026&sig=mock"],
+        ),
+    ],
+    ids=["aws", "gcs", "azure"],
+)
+def test_plan_credential_of_each_cloud(data_files, prefix, config, secret_type, expected):
+    load = _azure_load() if secret_type == "azure" else ""
+    with MockUC(_vending_one(data_files, prefix, config)) as srv:
+        r = srv.query(
+            f"{load} BEGIN; SELECT 'rows', count(*) FROM {TABLE}; "
+            "SELECT 'secret', type, scope[1], secret_string FROM duckdb_secrets(redact=false) "
+            f"WHERE name LIKE '{_VENDED}%'; "
+            f"SELECT 'which', name FROM which_secret('{prefix}part-0.parquet', '{secret_type}'); COMMIT;",
+            cli_args=("-unredacted",),
+        )
+        assert r.returncode == 0, r.stderr
+        rows = _labelled(_strip_colour(r.stdout))
+        assert rows.get("rows") == "50", r.stdout
+        kind, scope, secret_string = rows["secret"].split("|", 2)
+        assert (kind, scope) == (secret_type, prefix), r.stdout
+        for part in expected:
+            assert part in secret_string, r.stdout
+        # The secret is the one found for a file under the prefix
+        assert rows.get("which") == f"{_VENDED}{CATALOG}__{SCHEMA}__{TABLE}__0", r.stdout
+
+
+def test_azure_plan_credential_without_a_sas_makes_no_secret(data_files):
+    with MockUC(_vending_one(data_files, _ABFSS, {"adls.sas-token-expires-at-ms.account": "0"})) as srv:
+        r = srv.query(f"BEGIN; SELECT 'rows', count(*) FROM {TABLE}; {_secrets('inside')} COMMIT;")
+        assert r.returncode == 0, r.stderr
+        rows = _labelled(_strip_colour(r.stdout))
+        assert rows.get("rows") == "50", r.stdout
+        assert rows.get("inside") == "0|0", r.stdout
+        assert "Unity Catalog vended no Azure SAS token" in _strip_colour(r.stdout), r.stdout
+
+
+def test_reapplied_credentials_leave_no_stale_secret(data_files):
+    """REGRESSION: without the drop, a secret from an earlier scan in the transaction outlives a later plan that
+    vends nothing for it (or fewer credentials), and is still found first."""
+    token = {"gcs.oauth2.token": "ya29.mock"}
+    plans = [
+        [("gs://mock-bucket/days/", token), ("gs://mock-bucket/other/", token)],  # two secrets
+        [("gs://mock-bucket/days/", token)],  # one: the second goes
+        [("gs://mock-bucket/days/", {})],  # nothing vended: the first goes too
+    ]
+
+    def script(method, path, requests):
+        if path.endswith("/plan"):
+            creds = plans[min(len([x for x in requests if x["path"].endswith("/plan")]), len(plans)) - 1]
+            return {
+                "status": "completed",
+                "plan-id": "p1",
+                "file-scan-tasks": [_file_scan_task(f) for f in data_files],
+                "storage-credentials": [{"prefix": p, "config": c} for p, c in creds],
+            }
+        return {}
+
+    with MockUC(script) as srv:
+        scans = " ".join(f"SELECT count(*) FROM {TABLE}; {_secrets(f'after{i}')}" for i in range(len(plans)))
+        r = srv.query(f"BEGIN; {scans} COMMIT;")
+        assert r.returncode == 0, r.stderr
+        rows = _labelled(_strip_colour(r.stdout))
+        assert [rows.get(f"after{i}") for i in range(len(plans))] == ["2|2", "1|1", "0|0"], r.stdout
 
 
 # -----------------------------------------------------------------------------
@@ -680,8 +896,9 @@ def _secrets(label):
 
 
 def _labelled(result):
+    """`label|rest` lines of a CLI result (or of its stdout) as {label: rest}."""
     rows = {}
-    for line in result.stdout.splitlines():
+    for line in (result if isinstance(result, str) else result.stdout).splitlines():
         label, _, rest = line.strip().partition("|")
         if rest:
             rows[label] = rest

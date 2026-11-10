@@ -11,6 +11,7 @@
 #include "duckdb/main/extension_helper.hpp"
 
 #include "uc_api.hpp"
+#include "uc_utils.hpp"
 
 #include "duckdb/common/exception/catalog_exception.hpp"
 #include "uc_logging.hpp"
@@ -351,23 +352,63 @@ static string JsonStringMap(const vector<pair<string, string>> &values) {
 	return "{" + StringUtil::Join(encoded, ", ") + "}";
 }
 
-//! The S3 and GCS keys of a delta.yaml `DeltaCredentialsResponse`. First entry only; matching the longest
-//! prefix is a TODO shared with the table-credentials path.
+//! The credentials of a delta.yaml `DeltaCredentialsResponse`. First entry only; matching the longest prefix is a
+//! TODO shared with the table-credentials path.
 static void ReadStorageCredentials(duckdb_yyjson::yyjson_val *root, UCAPITableCredentials &result) {
 	auto *creds_arr = yyjson_obj_get(root, "storage-credentials");
 	if (!creds_arr || !yyjson_is_arr(creds_arr) || yyjson_arr_size(creds_arr) == 0) {
 		return;
 	}
-	auto *cfg = yyjson_obj_get(yyjson_arr_get_first(creds_arr), "config");
+	auto *first = yyjson_arr_get_first(creds_arr);
+	auto *cfg = yyjson_obj_get(first, "config");
 	if (!cfg || !yyjson_is_obj(cfg)) {
 		return;
 	}
-	result.key_id = TryGetStrFromObject(cfg, "s3.access-key-id", false);
-	result.secret = TryGetStrFromObject(cfg, "s3.secret-access-key", false);
-	result.session_token = TryGetStrFromObject(cfg, "s3.session-token", false);
-	// The delta/v1 endpoints prefix each key with its cloud, where temporary-table-credentials
-	// nests one object per cloud.
-	result.bearer_token = TryGetStrFromObject(cfg, "gcs.oauth-token", false);
+	// The same cloud-prefixed keys as an Iceberg REST storage credential, though not all spelled the same:
+	// one reader takes both. The keys of the other clouds arrive as null.
+	unordered_map<string, string> config;
+	size_t idx, max;
+	duckdb_yyjson::yyjson_val *key, *val;
+	yyjson_obj_foreach(cfg, idx, max, key, val) {
+		const char *k = duckdb_yyjson::yyjson_get_str(key);
+		const char *v = duckdb_yyjson::yyjson_get_str(val);
+		if (k && v) {
+			config.emplace(k, v);
+		}
+	}
+	result = CredentialsFromConfig(config, TryGetStrFromObject(first, "prefix", false));
+}
+
+//! The credentials of a temporary-table-credentials response: one object per cloud, at most one of them present.
+static void ReadTemporaryCredentials(duckdb_yyjson::yyjson_val *root, UCAPITableCredentials &result) {
+	auto *aws = yyjson_obj_get(root, "aws_temp_credentials");
+	if (aws && yyjson_is_obj(aws)) {
+		result.key_id = TryGetStrFromObject(aws, "access_key_id", false);
+		result.secret = TryGetStrFromObject(aws, "secret_access_key", false);
+		result.session_token = TryGetStrFromObject(aws, "session_token", false);
+	}
+	auto *gcp = yyjson_obj_get(root, "gcp_oauth_token");
+	if (gcp && yyjson_is_obj(gcp)) {
+		result.bearer_token = TryGetStrFromObject(gcp, "oauth_token", false);
+	}
+	auto *azure = yyjson_obj_get(root, "azure_user_delegation_sas");
+	if (azure && yyjson_is_obj(azure)) {
+		result.azure_sas_token = TryGetStrFromObject(azure, "sas_token", false);
+	}
+}
+
+UCAPITableCredentials UCAPI::ParseTemporaryCredentials(const string &response_json) {
+	YYJsonDoc doc(response_json);
+	UCAPITableCredentials result;
+	ReadTemporaryCredentials(doc.Root(), result);
+	return result;
+}
+
+UCAPITableCredentials UCAPI::ParseDeltaCredentials(const string &response_json) {
+	YYJsonDoc doc(response_json);
+	UCAPITableCredentials result;
+	ReadStorageCredentials(doc.Root(), result);
+	return result;
 }
 
 //! The wire name for a Delta schema key. UC's API spells multi-word keys with dashes, and a schema's
@@ -652,17 +693,7 @@ UCAPITableCredentials UCAPI::GetTableCredentials(ClientContext &ctx, const strin
 			error.ThrowError(StringUtil::Format("Failed to get table credentials for %s.%s.%s", catalog_name,
 			                                    schema_name, table_name));
 		}
-		// At most one of these is present, matching the cloud the table's storage lives in.
-		auto *aws = yyjson_obj_get(root, "aws_temp_credentials");
-		if (aws && yyjson_is_obj(aws)) {
-			result.key_id = TryGetStrFromObject(aws, "access_key_id", false);
-			result.secret = TryGetStrFromObject(aws, "secret_access_key", false);
-			result.session_token = TryGetStrFromObject(aws, "session_token", false);
-		}
-		auto *gcp = yyjson_obj_get(root, "gcp_oauth_token");
-		if (gcp && yyjson_is_obj(gcp)) {
-			result.bearer_token = TryGetStrFromObject(gcp, "oauth_token", false);
-		}
+		ReadTemporaryCredentials(root, result);
 		return result;
 	}
 
