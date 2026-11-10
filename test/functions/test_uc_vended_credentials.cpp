@@ -116,7 +116,12 @@ TEST_CASE("An Azure SAS makes an azure secret for the location's account", "[uc]
 	auto onelake = Build(ctx, "abfss://ws@onelake.dfs.fabric.microsoft.com/lh/table", c);
 	REQUIRE(OptionOf(onelake, "connection_string") ==
 	        "AccountName=onelake;SharedAccessSignature=sv=2026&sig=abc;EndpointSuffix=fabric.microsoft.com");
-	// az:// and azure:// name only the container: the account must come with the SAS (Iceberg REST's key) ...
+	// The host can also come first, before the container.
+	auto host_first = Build(ctx, "abfss://account.dfs.core.windows.net/container/table", c);
+	REQUIRE(host_first.type == "azure");
+	REQUIRE(OptionOf(host_first, "connection_string") ==
+	        "AccountName=account;SharedAccessSignature=sv=2026&sig=abc;EndpointSuffix=core.windows.net");
+	// az://<container>/ and azure://<container>/ name no account: it must come with the SAS (Iceberg REST's key) ...
 	REQUIRE(Build(ctx, "az://container/table", c).type == "none");
 	REQUIRE(Build(ctx, "azure://container/table", c).type == "none");
 	c.azure_host = "account.blob.core.windows.net";
@@ -153,7 +158,7 @@ TEST_CASE("Nothing vended for the location's cloud makes no secret", "[uc][crede
 	REQUIRE(Build(ctx, "s3://bucket/table", key_only).type == "none");
 }
 
-TEST_CASE("An unrecognised scheme takes AWS credentials as before", "[uc][credentials]") {
+TEST_CASE("An unrecognised scheme takes AWS credentials", "[uc][credentials]") {
 	TestContext ctx;
 	// file:// never reaches the builder (RefreshCredentials returns early); any other scheme is treated as s3.
 	UCAPITableCredentials c;
@@ -300,7 +305,7 @@ TEST_CASE("Re-applied credentials replace the secret, or drop it when nothing is
 	aws.secret = "s3-secret";
 	ApplyVendedCredentials(context, "__internal_uc_t1", "s3://bucket/table", aws, "us-east-1");
 	REQUIRE(lookup_type("s3://bucket/table/part-0.parquet", "s3") == "__internal_uc_t1");
-	// Transaction-scoped (uc#134), not temporary.
+	// Transaction-scoped (#134), not temporary.
 	REQUIRE(in_transaction_storage("__internal_uc_t1"));
 
 	// Applied again in the same transaction, with nothing vended: the earlier secret must not linger.

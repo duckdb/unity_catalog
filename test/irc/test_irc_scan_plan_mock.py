@@ -458,7 +458,7 @@ def test_plan_credential_of_each_cloud(data_files, prefix, config, secret_type, 
         for part in expected:
             assert part in secret_string, r.stdout
         # The secret is the one found for a file under the prefix
-        assert rows.get("which") == f"{_VENDED}{CATALOG}__{SCHEMA}__{TABLE}__0", r.stdout
+        assert rows.get("which") == f"{_VENDED}unity__{CATALOG}__{SCHEMA}__{TABLE}__0", r.stdout
 
 
 def test_azure_plan_credential_without_a_sas_makes_no_secret(data_files):
@@ -469,6 +469,29 @@ def test_azure_plan_credential_without_a_sas_makes_no_secret(data_files):
         assert rows.get("rows") == "50", r.stdout
         assert rows.get("inside") == "0|0", r.stdout
         assert "Unity Catalog vended no Azure SAS token" in _strip_colour(r.stdout), r.stdout
+
+
+def test_a_plan_vending_nothing_keeps_another_attachments_secret(data_files):
+    """REGRESSION: two attachments exposing the same catalog.schema.table named their /plan secrets alike, so a plan
+    of the second that vends nothing dropped the first one's secret."""
+    first_plan = _vending_one(data_files, "gs://first-bucket/", {"gcs.oauth2.token": "first-token"})
+    with MockUC(first_plan) as first, MockUC(_vending_one(data_files, "gs://first-bucket/", {})) as second:
+
+        def attach(srv, alias):
+            return (
+                f"CREATE SECRET {alias}_auth (TYPE unity_catalog, TOKEN 'tok', ENDPOINT '{srv.endpoint}'); "
+                f"ATTACH '{CATALOG}' AS {alias} (TYPE unity_catalog, SECRET '{alias}_auth', READ_ONLY, "
+                f"DEFAULT_SCHEMA '{SCHEMA}', use_irc_scan_plan true, API_IRC_ENDPOINT_OVERRIDE '{srv.endpoint}');"
+            )
+
+        r = _run_sql(
+            f"{load_statements(build_dir())} {attach(first, 'first')} {attach(second, 'second')} BEGIN; "
+            f"SELECT count(*) FROM first.{SCHEMA}.{TABLE}; SELECT count(*) FROM second.{SCHEMA}.{TABLE}; "
+            f"SELECT 'secrets', string_agg(name, ',') FROM duckdb_secrets() WHERE name LIKE '{_VENDED}%'; COMMIT;"
+        )
+        assert r.returncode == 0, r.stderr
+        rows = _labelled(_strip_colour(r.stdout))
+        assert rows.get("secrets") == f"{_VENDED}first__{CATALOG}__{SCHEMA}__{TABLE}__0", r.stdout
 
 
 def test_reapplied_credentials_leave_no_stale_secret(data_files):

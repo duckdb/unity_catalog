@@ -191,8 +191,11 @@ static unique_ptr<GlobalTableFunctionState> UCScanPlanInitGlobal(ClientContext &
 
 	// httpfs authenticates off secrets, so these must exist before parquet binds. One per credential, named by its
 	// index and scoped on its own prefix, not a table location: one plan can carry credentials for several prefixes.
-	string secret_prefix =
-	    "__internal_uc_scanplan__" + bd.catalog_name + "__" + bd.schema_name + "__" + bd.table_name + "__";
+	// The name carries the attachment too: two attachments can expose the same catalog.schema.table, and the drops
+	// below must not remove the other one's secrets.
+	string attachment = bd.uc_catalog ? bd.uc_catalog->GetName().GetIdentifierName() : string();
+	string secret_prefix = "__internal_uc_scanplan__" + attachment + "__" + bd.catalog_name + "__" + bd.schema_name +
+	                       "__" + bd.table_name + "__";
 	idx_t credential_count = plan.storage_credentials.size();
 	for (idx_t i = 0; i < credential_count; i++) {
 		auto prefix = plan.storage_credentials[i].first;
@@ -219,7 +222,8 @@ static unique_ptr<GlobalTableFunctionState> UCScanPlanInitGlobal(ClientContext &
 		}
 		// Another table's name can extend this one's, but then the rest is not a bare index.
 		auto index = name.substr(secret_prefix.size());
-		if (!index.empty() && index.find_first_not_of("0123456789") == string::npos &&
+		// At most 19 digits, so the index fits stoull; a longer one is no secret of ours.
+		if (!index.empty() && index.size() <= 19 && index.find_first_not_of("0123456789") == string::npos &&
 		    std::stoull(index) >= credential_count) {
 			stale.push_back(name);
 		}

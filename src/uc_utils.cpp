@@ -19,8 +19,8 @@ static bool IsAzureLocation(const string &location) {
 	       StringUtil::StartsWith(location, "az://") || StringUtil::StartsWith(location, "azure://");
 }
 
-//! The storage host of an abfss://<container>@<host>/... location, or empty: az:// and azure:// name only the
-//! container.
+//! The storage host of an Azure location: <host> in <scheme>://<container>@<host>/... and in
+//! <scheme>://<host>/<container>/... (a host has a dot), else empty: az://<container>/... names no account.
 static string AzureHostOf(const string &location) {
 	auto scheme_end = location.find("://");
 	if (scheme_end == string::npos) {
@@ -31,7 +31,10 @@ static string AzureHostOf(const string &location) {
 	auto authority = location.substr(authority_start,
 	                                 authority_end == string::npos ? string::npos : authority_end - authority_start);
 	auto at = authority.find('@');
-	return at == string::npos ? string() : authority.substr(at + 1);
+	if (at != string::npos) {
+		return authority.substr(at + 1);
+	}
+	return authority.find('.') != string::npos ? authority : string();
 }
 
 UCAPITableCredentials CredentialsFromConfig(const unordered_map<string, string> &config, const string &prefix) {
