@@ -33,6 +33,10 @@
 #include "duckdb/planner/expression_binder/table_function_binder.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/execution/operator/scan/physical_empty_result.hpp"
+#include "duckdb/execution/physical_plan_generator.hpp"
+#include "duckdb/planner/operator/logical_create_table.hpp"
+#include "storage/uc_create_table_as.hpp"
 
 namespace duckdb {
 
@@ -690,10 +694,12 @@ static bool IsEntryAlreadyExists(const CatalogException &e) {
 	return subtype != extra.end() && subtype->second == "ENTRY_ALREADY_EXISTS";
 }
 
-//! Attaches a Delta catalog at `location`, writes the table's version 0 through it, and returns what that
-//! version committed. The attachment is gone again when this returns, whichever way it returns.
+//! Attaches a Delta catalog at `location`, writes the table's version 0 through it, and returns what the version 0
+//! there says. The attachment is gone again when this returns, whichever way it returns. `wrote` is false when delta
+//! skipped the create, as IF NOT EXISTS does for a location that already holds a Delta table: the version 0 read
+//! back is then that table's, not one this statement wrote.
 static UCAPICommittedTable WriteVersionZero(ClientContext &context, BoundCreateTableInfo &info, AttachInfo &attach_info,
-                                            const string &table_name, const string &location) {
+                                            const string &table_name, const string &location, bool &wrote) {
 	AttachOptions attach_options(attach_info.options, AccessMode::READ_WRITE);
 	attach_options.access_mode = AccessMode::READ_WRITE;
 	attach_options.db_type = "delta";
@@ -705,7 +711,7 @@ static UCAPICommittedTable WriteVersionZero(ClientContext &context, BoundCreateT
 	try {
 		auto &delta_catalog = delta_db->GetCatalog();
 		auto &delta_schema = delta_catalog.GetSchema(context, Identifier::DefaultSchema());
-		delta_schema.CreateTable(delta_schema.GetCatalogTransaction(context), info);
+		wrote = delta_schema.CreateTable(delta_schema.GetCatalogTransaction(context), info) != nullptr;
 		committed = ReadCommittedTable(context, table_name, location);
 	} catch (...) {
 		try {
@@ -749,20 +755,6 @@ static void RegisterTable(ClientContext &context, UnityCatalog &uc_catalog, cons
 	}
 }
 
-//! A location as a path that can be compared: no `file://` prefix, one leading slash, no trailing one.
-static string ComparableLocation(string location) {
-	if (StringUtil::StartsWith(location, "file:")) {
-		location = location.substr(5);
-		auto first = location.find_first_not_of('/');
-		location = "/" + (first == string::npos ? string() : location.substr(first));
-	}
-	while (location.size() > 1 && location.back() == '/') {
-		location.pop_back();
-	}
-	return location;
-}
-
-//! The `location` option, evaluated as delta evaluates its options. It must be absolute: UC resolves a
 //! relative path against the server's own working directory, which no client can see.
 static string ExternalLocation(ClientContext &context, const ParsedExpression &option) {
 	auto binder = Binder::CreateBinder(context);
@@ -777,36 +769,260 @@ static string ExternalLocation(ClientContext &context, const ParsedExpression &o
 	if (!StringUtil::StartsWith(location, "/") && !StringUtil::Contains(location, "://")) {
 		throw BinderException("CREATE TABLE location must be an absolute path or a URI, found '%s'", location);
 	}
-	return location;
+	// Written, registered and compared in this one spelling from here on
+	return UCUtils::NormalizeLocation(location);
 }
 
-//! Removes the version 0 a failed external create wrote: kernel refuses to create where `_delta_log` holds
-//! any file, so it would block every later create at `location`, and SQL has no way to remove it. Kept when
-//! UC lists the table at `location` after all, or cannot say, since a registered table owns that log.
-static void RemoveUnregisteredVersionZero(ClientContext &context, UnityCatalog &uc_catalog, const string &catalog_name,
-                                          const string &schema_name, const string &table_name, const string &location) {
-	auto log_dir = location;
+//! The `path` of every `add` action in a version 0, as the log spells it: relative to the table, URI-encoded
+static vector<string> ReadAddPaths(FileSystem &fs, const string &version_zero) {
+	vector<string> result;
+	auto file = fs.OpenFile(version_zero, FileOpenFlags::FILE_FLAGS_READ);
+	string contents(NumericCast<idx_t>(file->GetFileSize()), '\0');
+	file->Read((void *)contents.data(), contents.size());
+	for (auto &line : StringUtil::Split(contents, '\n')) {
+		if (line.find_first_not_of(" \t\r") == string::npos) {
+			continue;
+		}
+		auto doc = duckdb_yyjson::yyjson_read(line.c_str(), line.size(), duckdb_yyjson::YYJSON_READ_NOFLAG);
+		if (!doc) {
+			throw IOException("Could not read the committed Delta log at %s", version_zero);
+		}
+		auto *add = duckdb_yyjson::yyjson_obj_get(duckdb_yyjson::yyjson_doc_get_root(doc), "add");
+		auto *path = add ? duckdb_yyjson::yyjson_obj_get(add, "path") : nullptr;
+		if (path && duckdb_yyjson::yyjson_is_str(path)) {
+			result.emplace_back(duckdb_yyjson::yyjson_get_str(path));
+		}
+		duckdb_yyjson::yyjson_doc_free(doc);
+	}
+	return result;
+}
+
+//! Removes `directory` if it is empty, and nothing else: a file another writer puts there meanwhile stays, with it.
+//! Best effort: a directory that cannot be removed is logged and left, and the caller goes on with the next one.
+static void TryRemoveEmptyDirectory(ClientContext &context, const string &directory) {
 	try {
-		if (UCAPI::TableExists(context, catalog_name, schema_name, table_name, uc_catalog.credentials)) {
-			auto loaded = UCAPI::LoadTable(context, catalog_name, schema_name, table_name, uc_catalog.credentials);
-			if (ComparableLocation(loaded.location) == ComparableLocation(location)) {
-				return;
+		FileSystem::GetFileSystem(context).RemoveDirectoryExtended(directory, {RemoveDirectoryMode::SINGLE});
+	} catch (std::exception &e) {
+		UC_LOG_WARNING(context, "CreateTable could not remove the empty directory %s: %s", directory, e.what());
+	}
+}
+
+//! Whether no table UC lists, in any schema of the catalog, is registered at `location`. False when that cannot be
+//! established: a listing that fails is doubt, and doubt keeps the files.
+static bool NoTableIsRegisteredAt(ClientContext &context, UnityCatalog &uc_catalog, const string &location,
+                                  string &owner) {
+	try {
+		for (auto &schema : UCAPI::GetSchemas(context, uc_catalog, uc_catalog.credentials)) {
+			for (auto &table : UCAPI::GetTables(context, uc_catalog, schema.schema_name, uc_catalog.credentials)) {
+				if (!table.storage_location.empty() && UCUtils::NormalizeLocation(table.storage_location) == location) {
+					owner = schema.schema_name + "." + table.name;
+					return false;
+				}
 			}
 		}
+	} catch (std::exception &e) {
+		owner = string("unknown: the catalog could not be listed: ") + e.what();
+		return false;
+	}
+	return true;
+}
+
+//! Leaves what a failed external create committed at `location`, and says so: a table that may own it is not this
+//! statement's to break
+static void KeepUnregisteredVersionZero(ClientContext &context, const string &catalog_name, const string &schema_name,
+                                        const string &table_name, const string &location, const string &why) {
+	UC_LOG_WARNING(
+	    context,
+	    "CreateTable %s.%s.%s kept the Delta table it committed at %s (%s); remove the location, or register "
+	    "it as an EXTERNAL table, before creating there again",
+	    catalog_name, schema_name, table_name, location, why);
+}
+
+//! Removes what a failed external create wrote: its version 0 and, for CREATE TABLE AS, the data files that version
+//! adds. Kernel refuses to create where `_delta_log` holds any file, so the log would block every later create at
+//! `location`, and SQL has no way to remove it. Only for a version 0 this statement committed, and only once UC has
+//! refused the registration outright (the caller's precondition). Kept when any table in the catalog is registered
+//! at `location`, or the catalog cannot say: a registered table owns that log. On local storage the directories left
+//! empty go too, and the table's own directory when `created_directory` says this statement made it. Best effort: a
+//! failure is a warning.
+static void RemoveUnregisteredVersionZero(ClientContext &context, UnityCatalog &uc_catalog, const string &catalog_name,
+                                          const string &schema_name, const string &table_name, const string &location,
+                                          bool created_directory) {
+	string owner;
+	if (!NoTableIsRegisteredAt(context, uc_catalog, location, owner)) {
+		KeepUnregisteredVersionZero(context, catalog_name, schema_name, table_name, location,
+		                            "a table is registered there: " + owner);
+		return;
+	}
+	auto log_dir = location;
+	try {
 		auto &fs = FileSystem::GetFileSystem(context);
-		log_dir = fs.JoinPath(location, "_delta_log");
-		// The filesystem committer writes version 0 only if absent, so every version 0 file here is ours
+		auto table_path = Path::FromString(location);
+		log_dir = table_path.Join("_delta_log").ToString();
+		auto version_zero = table_path.Join("_delta_log").Join("00000000000000000000.json").ToString();
+		// Only paths inside the table: a write puts its files there
+		vector<string> data_files;
+		if (fs.FileExists(version_zero)) {
+			for (auto &add_path : ReadAddPaths(fs, version_zero)) {
+				auto decoded = StringUtil::URLDecode(add_path);
+				if (Path::FromString(decoded).IsAbsolute()) {
+					continue;
+				}
+				auto data_file = table_path.Join(decoded);
+				if (UCUtils::PathIsInside(table_path.ToString(), data_file.ToString())) {
+					data_files.push_back(data_file.ToString());
+				}
+			}
+		}
+		idx_t removed = 0;
+		for (auto &data_file : data_files) {
+			removed += fs.TryRemoveFile(data_file);
+		}
 		for (auto &file : fs.Glob(fs.JoinPath(log_dir, "00000000000000000000.*"))) {
 			fs.RemoveFile(file.path);
 		}
-		UC_LOG_DEBUG(context, "CreateTable %s.%s.%s removed the unregistered version 0 at %s", catalog_name,
-		             schema_name, table_name, log_dir);
+		if (table_path.IsLocal()) {
+			// Deepest first, so a partition directory is empty by the time its parent is looked at
+			set<string, std::greater<string>> directories;
+			for (auto &data_file : data_files) {
+				for (auto parent = Path::FromString(data_file).Parent();
+				     UCUtils::PathIsInside(table_path.ToString(), parent.ToString()); parent = parent.Parent()) {
+					directories.insert(parent.ToString());
+				}
+			}
+			for (auto &directory : directories) {
+				TryRemoveEmptyDirectory(context, directory);
+			}
+			TryRemoveEmptyDirectory(context, log_dir);
+			if (created_directory) {
+				TryRemoveEmptyDirectory(context, table_path.ToString());
+			}
+		}
+		UC_LOG_DEBUG(context, "CreateTable %s.%s.%s removed the unregistered version 0 at %s and %llu data files",
+		             catalog_name, schema_name, table_name, log_dir, removed);
 	} catch (std::exception &e) {
 		UC_LOG_WARNING(context,
 		               "CreateTable %s.%s.%s could not remove the version 0 it wrote at %s, which blocks any later "
 		               "create there: %s",
 		               catalog_name, schema_name, table_name, log_dir, e.what());
 	}
+}
+
+//! Whether `location`'s `_delta_log` holds any file, its `_commits` included
+static bool LogHoldsFiles(ClientContext &context, const string &location) {
+	auto &fs = FileSystem::GetFileSystem(context);
+	return !fs.Glob(Path::FromString(location).Join("_delta_log").Join("**").ToString()).empty();
+}
+
+//! Whether `location` is a local directory that does not exist yet, so that a create writing there makes it
+static bool WouldCreateDirectory(ClientContext &context, const string &location) {
+	if (!Path::FromString(location).IsLocal()) {
+		return false;
+	}
+	try {
+		return !FileSystem::GetFileSystem(context).DirectoryExists(location);
+	} catch (std::exception &) {
+		return false;
+	}
+}
+
+bool UCTableSet::PrepareExternalCreate(ClientContext &context, CreateTableInfo &base, UCExternalCreate &create) {
+	auto &uc_catalog = catalog.Cast<UnityCatalog>();
+	create.catalog_name = catalog.GetDBPath();
+	create.schema_name = schema.name.GetIdentifierName();
+	create.table_name = base.GetTableName().GetIdentifierName();
+	create.on_conflict = base.on_conflict;
+	auto location_option = base.options.find("location");
+	D_ASSERT(location_option != base.options.end());
+	create.location = ExternalLocation(context, *location_option->second);
+	// Delta evaluates the option again, and must see the same path even when the expression is volatile
+	location_option->second = ConstantExpression::String(create.location);
+	// Version 0 is written before UC hears of the table, so a taken name is checked first rather than found at
+	// registration, after a write
+	if (UCAPI::TableExists(context, create.catalog_name, create.schema_name, create.table_name,
+	                       uc_catalog.credentials)) {
+		// This session may not have listed it yet; its next lookup should find it
+		MarkNeedsReload();
+		if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+			return false;
+		}
+		throw CatalogException::EntryAlreadyExists(CatalogType::TABLE_ENTRY, Identifier(create.table_name));
+	}
+	// A table already there is not this statement's to register or to clean up after, IF NOT EXISTS or not: the
+	// name is free, so it would be some other table's log. Judged by content, as kernel judges an existing table, so
+	// an empty `_delta_log` does not count.
+	if (LogHoldsFiles(context, create.location)) {
+		throw CatalogException("CREATE TABLE %s.%s.%s: '%s' already holds a Delta table (its _delta_log has files); "
+		                       "choose another location",
+		                       create.catalog_name, create.schema_name, create.table_name, create.location);
+	}
+	create.created_directory = WouldCreateDirectory(context, create.location);
+	return true;
+}
+
+AttachInfo UCTableSet::ExternalAttachInfo(const UCExternalCreate &create) {
+	AttachInfo attach_info;
+	// Unique, as the staging id makes the managed one: concurrent creates of a name must not collide here
+	attach_info.name = Identifier("__unity_catalog_internal_create_" + UUID::ToString(UUID::GenerateRandomUUID()));
+	attach_info.path = create.location;
+	attach_info.options = {{"type", Value("Delta")},
+	                       {"child_catalog_mode", Value(true)},
+	                       {"internal_table_name", Value(create.table_name)}};
+	return attach_info;
+}
+
+bool UCTableSet::RegisterExternalCreate(ClientContext &context, const UCExternalCreate &create,
+                                        const UCAPICommittedTable &committed) {
+	auto &uc_catalog = catalog.Cast<UnityCatalog>();
+	try {
+		RegisterTable(context, uc_catalog, create.catalog_name, create.schema_name, committed, "EXTERNAL",
+		              [&](const UCAPICommitsResult &loaded) {
+			              return UCUtils::NormalizeLocation(loaded.location) == create.location;
+		              });
+	} catch (const CatalogException &e) {
+		if (create.wrote_version_zero) {
+			if (IsEntryAlreadyExists(e)) {
+				// UC refused the name, so this registration did not land; the files go unless another table has
+				// the location
+				RemoveUnregisteredVersionZero(context, uc_catalog, create.catalog_name, create.schema_name,
+				                              create.table_name, create.location, create.created_directory);
+			} else {
+				KeepUnregisteredVersionZero(context, create.catalog_name, create.schema_name, create.table_name,
+				                            create.location, e.what());
+			}
+		}
+		if (IsEntryAlreadyExists(e)) {
+			// Taken between the check and the registration
+			MarkNeedsReload();
+			if (create.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+				return false;
+			}
+		}
+		throw;
+	} catch (std::exception &e) {
+		// A refusal of the location (it overlaps managed storage), a lost or unclear reply: UC may own the location,
+		// or soon will
+		if (create.wrote_version_zero) {
+			KeepUnregisteredVersionZero(context, create.catalog_name, create.schema_name, create.table_name,
+			                            create.location, e.what());
+		}
+		throw;
+	}
+	// The catalog now owns a table this set has never seen; its next lookup loads it from UC.
+	MarkNeedsReload();
+	return true;
+}
+
+bool UCTableSet::FinishExternalCreateTableAs(ClientContext &context, const UCExternalCreate &create) {
+	UCAPICommittedTable committed;
+	try {
+		committed = ReadCommittedTable(context, create.table_name, create.location);
+	} catch (std::exception &) {
+		RemoveUnregisteredVersionZero(context, catalog.Cast<UnityCatalog>(), create.catalog_name, create.schema_name,
+		                              create.table_name, create.location, create.created_directory);
+		throw;
+	}
+	return RegisterExternalCreate(context, create, committed);
 }
 
 optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, BoundCreateTableInfo &info) {
@@ -819,44 +1035,41 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	auto catalog_name = catalog.GetDBPath();
 	auto schema_name = schema.name.GetIdentifierName();
 
-	auto location_option = base.options.find("location");
-	if (location_option != base.options.end()) {
+	// Core plans a plain CREATE, and drops a CREATE TABLE AS's query, when this session's listing has the name. So a
+	// listed name is the conflict core saw, whatever the server says now: otherwise a CTAS would make an empty table
+	if (HasListedEntry(context, table_name)) {
+		if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+			return nullptr;
+		}
+		ErrorData error(CatalogException::EntryAlreadyExists(CatalogType::TABLE_ENTRY, Identifier(table_name)));
+		throw CatalogException(error.ExtraInfo(),
+		                       error.RawMessage() +
+		                           " If it was dropped outside this session, DETACH and ATTACH the catalog "
+		                           "again, then create it.");
+	}
+
+	if (base.options.find("location") != base.options.end()) {
 		// The caller chose where the table lives, which in UC makes it EXTERNAL: no staging, no catalog committer,
-		// nothing UC requires of the log. Version 0 is written before UC hears of the table, so a taken name is
-		// checked first rather than found at registration, after a write.
-		auto location = ExternalLocation(context, *location_option->second);
-		// Delta evaluates the option again, and must see the same path even when the expression is volatile
-		location_option->second = ConstantExpression::String(location);
-		if (UCAPI::TableExists(context, catalog_name, schema_name, table_name, uc_catalog.credentials)) {
-			if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
-				return nullptr;
-			}
-			throw CatalogException::EntryAlreadyExists(CatalogType::TABLE_ENTRY, Identifier(table_name));
+		// nothing UC requires of the log
+		UCExternalCreate create;
+		if (!PrepareExternalCreate(context, base, create)) {
+			return nullptr;
 		}
-		AttachInfo attach_info;
-		// Unique, as the staging id makes the managed one: concurrent creates of a name must not collide here
-		attach_info.name = Identifier("__unity_catalog_internal_create_" + UUID::ToString(UUID::GenerateRandomUUID()));
-		attach_info.path = location;
-		attach_info.options = {
-		    {"type", Value("Delta")}, {"child_catalog_mode", Value(true)}, {"internal_table_name", Value(table_name)}};
-		auto committed = WriteVersionZero(context, info, attach_info, table_name, location);
-		auto written = ComparableLocation(location);
+		auto attach_info = ExternalAttachInfo(create);
+		// The name and the location are settled here, so delta creates rather than applying IF NOT EXISTS again: it
+		// would skip a location whose `_delta_log` is an empty directory, which UC creates in
+		auto on_conflict = base.on_conflict;
+		base.on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
+		UCAPICommittedTable committed;
 		try {
-			RegisterTable(
-			    context, uc_catalog, catalog_name, schema_name, committed, "EXTERNAL",
-			    [&](const UCAPICommitsResult &loaded) { return ComparableLocation(loaded.location) == written; });
-		} catch (const CatalogException &e) {
-			RemoveUnregisteredVersionZero(context, uc_catalog, catalog_name, schema_name, table_name, location);
-			// Taken between the check and the registration
-			if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT && IsEntryAlreadyExists(e)) {
-				return nullptr;
-			}
-			throw;
-		} catch (std::exception &) {
-			RemoveUnregisteredVersionZero(context, uc_catalog, catalog_name, schema_name, table_name, location);
+			committed =
+			    WriteVersionZero(context, info, attach_info, table_name, create.location, create.wrote_version_zero);
+		} catch (...) {
+			base.on_conflict = on_conflict;
 			throw;
 		}
-		MarkNeedsReload();
+		base.on_conflict = on_conflict;
+		RegisterExternalCreate(context, create, committed);
 		return nullptr;
 	}
 
@@ -866,8 +1079,11 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	try {
 		staging = UCAPI::CreateStagingTable(context, catalog_name, schema_name, table_name, uc_catalog.credentials);
 	} catch (const CatalogException &e) {
-		if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT && IsEntryAlreadyExists(e)) {
-			return nullptr;
+		if (IsEntryAlreadyExists(e)) {
+			MarkNeedsReload();
+			if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+				return nullptr;
+			}
 		}
 		throw;
 	}
@@ -909,14 +1125,19 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	                       {"parent_catalog", Value(catalog.GetName())},
 	                       {"parent_catalog_schema", Value(schema_name)},
 	                       {"parent_commit", Value(true)}};
-	auto committed = WriteVersionZero(context, info, attach_info, table_name, staging.location);
+	// Through the catalog committer delta serves no entry, so its return says nothing about whether it wrote
+	bool wrote = false;
+	auto committed = WriteVersionZero(context, info, attach_info, table_name, staging.location, wrote);
 	try {
 		RegisterTable(context, uc_catalog, catalog_name, schema_name, committed, "MANAGED",
 		              [&](const UCAPICommitsResult &loaded) { return loaded.table_uuid == staging.table_id; });
 	} catch (const CatalogException &e) {
 		// Taken between staging and registration
-		if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT && IsEntryAlreadyExists(e)) {
-			return nullptr;
+		if (IsEntryAlreadyExists(e)) {
+			MarkNeedsReload();
+			if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+				return nullptr;
+			}
 		}
 		throw;
 	}
@@ -924,6 +1145,71 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	// The catalog now owns a table this set has never seen; its next lookup loads it from UC.
 	MarkNeedsReload();
 	return nullptr;
+}
+
+PhysicalOperator &UCTableSet::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
+                                                LogicalCreateTable &op, PhysicalOperator &plan) {
+	auto &uc_catalog = catalog.Cast<UnityCatalog>();
+	if (uc_catalog.access_mode == AccessMode::READ_ONLY) {
+		throw InvalidInputException("Can not create a table in a read only Unity Catalog");
+	}
+	// Catalog::CreateTable asks this for a plain CREATE; nothing asks it for a CREATE TABLE AS
+	auto supported = uc_catalog.SupportsCreateTable(*op.info);
+	if (supported.HasError()) {
+		supported.Throw();
+	}
+	auto &base = op.info->Base().Cast<CreateTableInfo>();
+	if (base.on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
+		throw NotImplementedException("CREATE OR REPLACE TABLE ... AS is not supported for tables in a Unity Catalog "
+		                              "catalog");
+	}
+	if (base.options.find("location") == base.options.end()) {
+		// A managed table is staged by UC and committed through its committer, and version 0 with rows
+		// there waits on what UC promises about a failed one (cleanup of the staged files)
+		throw NotImplementedException(
+		    "CREATE TABLE AS for a managed Unity Catalog table is not supported yet: give the table a location, "
+		    "CREATE TABLE %s ... WITH (location = '...') AS SELECT ..., which makes it EXTERNAL; or create the managed "
+		    "table, then INSERT into it",
+		    base.GetTableName().GetIdentifierName());
+	}
+	auto create_state = make_shared_ptr<UCCreateTableAsState>();
+	auto &create = create_state->create;
+	if (!PrepareExternalCreate(context, base, create)) {
+		// IF NOT EXISTS, and UC has the name though this session had not listed it yet: the query is not run
+		return planner.Make<PhysicalEmptyResult>(op.types, op.estimated_cardinality);
+	}
+
+	// Delta writes version 0 with the rows, committed through the filesystem committer as the query ends, at the
+	// location attached as CREATE attaches it; this catalog registers the table afterwards
+	auto attach_info = ExternalAttachInfo(create);
+	AttachOptions attach_options(attach_info.options, AccessMode::READ_WRITE);
+	attach_options.access_mode = AccessMode::READ_WRITE;
+	attach_options.db_type = "delta";
+	auto &db_manager = DatabaseManager::Get(context);
+	auto attached_name = attach_info.name;
+	auto delta_db = db_manager.AttachDatabase(context, attach_info, attach_options);
+	optional_ptr<PhysicalOperator> write;
+	try {
+		// What the plan runs holds no reference to the attached catalog, only to delta's create transaction, so the
+		// attachment goes again once the plan is made
+		write = delta_db->GetCatalog().PlanCreateTableAs(context, planner, op, plan);
+	} catch (...) {
+		try {
+			db_manager.DetachDatabase(context, attached_name, OnEntryNotFound::RETURN_NULL);
+		} catch (std::exception &detach_error) {
+			UC_LOG_WARNING(context, "CreateTable %s could not detach the database it planned through: %s",
+			               create.table_name, detach_error.what());
+		}
+		throw;
+	}
+	db_manager.DetachDatabase(context, attached_name, OnEntryNotFound::RETURN_NULL);
+
+	// Delta refused a location that holds a Delta table while planning, so a version 0 there once the write is done
+	// is the one this statement committed
+	create.wrote_version_zero = true;
+	auto &result = planner.Make<UCCreateTableAs>(op.types, op.estimated_cardinality, *this, std::move(create_state));
+	result.children.push_back(*write);
+	return result;
 }
 
 void UCTableSet::AlterTable(ClientContext &context, RenameTableInfo &info) {
@@ -956,6 +1242,12 @@ optional_ptr<CatalogEntry> UCTableSet::GetEntry(ClientContext &context, const En
 	}
 	auto &table_info = entry->second;
 	return table_info.GetVersion(context, lookup);
+}
+
+bool UCTableSet::HasListedEntry(ClientContext &context, const string &name) {
+	EnsureLoaded(context);
+	lock_guard<mutex> l(entry_lock);
+	return tables.find(name) != tables.end();
 }
 
 void UCTableSet::MarkNeedsReload() {

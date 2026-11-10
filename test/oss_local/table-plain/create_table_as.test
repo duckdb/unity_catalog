@@ -1,0 +1,222 @@
+# name: test/oss_local/table-plain/create_table_as.test
+# description: CREATE TABLE AS with a location makes an EXTERNAL table: DuckDB writes version 0 with the query's rows at that location, in one commit, and registers it with UC, without staging it. A refused registration removes what the statement wrote. Paired create_table_as.py picks the names and the location root, checks over REST what UC registered, and deletes the tables afterwards.
+# group: [table-plain]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require json
+
+require-env UC_TEST_CATALOG
+
+require-env UC_ENDPOINT
+
+require-env UC_TEST_NEW_TABLE
+
+require-env UC_TEST_LOCATION
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT '{UC_ENDPOINT}',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'plain');
+
+statement ok
+CALL enable_logging(level='DEBUG');
+
+# -----------------------------------------------------------------------------
+# Creating it
+#
+
+statement ok
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}
+WITH (location = '{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}')
+AS SELECT range::INTEGER AS id, 'v' || range AS name FROM range(3);
+
+# Registered after the write, and never staged: staging is how UC hands out a location of its own
+query II
+SELECT
+    count(*) FILTER (WHERE message LIKE 'api.CreateStagingTable %'),
+    count(*) FILTER (WHERE message = 'api.CreateTable {UC_TEST_CATALOG}.plain.{UC_TEST_NEW_TABLE} EXTERNAL')
+FROM duckdb_logs();
+----
+0	1
+
+# One commit, which adds the rows
+query II
+SELECT count(*), sum(json_extract_string(json_extract_string(json, '$.add.stats'), '$.numRecords')::INTEGER)
+FROM read_json_objects('{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}/_delta_log/*.json', format = 'newline_delimited')
+WHERE json_extract(json, '$.add') IS NOT NULL;
+----
+1	3
+
+query I
+SELECT count(*) FROM glob('{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}/_delta_log/*.json');
+----
+1
+
+query II
+SELECT column_name, data_type FROM duckdb_columns()
+WHERE database_name = 'duck' AND table_name = '{UC_TEST_NEW_TABLE}' ORDER BY column_index;
+----
+id	INTEGER
+name	VARCHAR
+
+query II
+SELECT id, name FROM duck.plain.{UC_TEST_NEW_TABLE} ORDER BY id;
+----
+0	v0
+1	v1
+2	v2
+
+# -----------------------------------------------------------------------------
+# Creating it again
+#
+# The name is checked before anything is written: IF NOT EXISTS does not run the query, and neither statement
+# leaves anything at its location.
+#
+
+statement ok
+CREATE TABLE IF NOT EXISTS duck.plain.{UC_TEST_NEW_TABLE}
+WITH (location = '{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_again')
+AS SELECT error('the query ran') AS id;
+
+statement error
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}
+WITH (location = '{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_again')
+AS SELECT 1 AS id;
+----
+already exists
+
+query I
+SELECT count(*) FROM glob('{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_again/**');
+----
+0
+
+# -----------------------------------------------------------------------------
+# Refused after the write
+#
+# UC refuses a location under managed storage only at registration, once version 0 and its data files are
+# written. A refusal of the location leaves open whether UC owns it, so both stay, with a warning that says how
+# to clear them.
+#
+
+statement error
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}_refused PARTITIONED BY (p)
+WITH (location = '{UC_TEST_LOCATION}/__unitystorage/{UC_TEST_NEW_TABLE}_refused')
+AS SELECT range AS id, ['a b', 'x%y', NULL][range % 3 + 1] AS p FROM range(10);
+----
+__unitystorage
+
+query II
+SELECT
+    (SELECT count(*) FROM duckdb_logs() WHERE message LIKE 'CreateTable %_refused kept the Delta table it committed at %'),
+    (SELECT count(*) FROM glob('{UC_TEST_LOCATION}/__unitystorage/{UC_TEST_NEW_TABLE}_refused/_delta_log/*.json'));
+----
+1	1
+
+# -----------------------------------------------------------------------------
+# Refused before the write
+#
+
+# Without a location the table would be managed, which CREATE TABLE AS does not make yet
+statement error
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}_managed AS SELECT 1 AS id;
+----
+CREATE TABLE AS for a managed Unity Catalog table is not supported yet
+
+statement error
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}_type
+WITH (location = '{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_type')
+AS SELECT 1::UHUGEINT AS id;
+----
+does not support column 'id' of type UHUGEINT
+
+query II
+SELECT
+    (SELECT count(*) FROM duckdb_logs() WHERE message LIKE 'api.CreateStagingTable %'),
+    (SELECT count(*) FROM glob('{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_type/**'));
+----
+0	0
+
+# -----------------------------------------------------------------------------
+# Using it
+#
+# An external table is not catalog-managed, so its commits go straight to its log.
+#
+
+statement ok
+INSERT INTO duck.plain.{UC_TEST_NEW_TABLE} VALUES (3, 'v3');
+
+query I
+SELECT count(*) FROM duck.plain.{UC_TEST_NEW_TABLE};
+----
+4
+
+# -----------------------------------------------------------------------------
+# Partitioned, at a computed location
+#
+
+statement ok
+CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}_part PARTITIONED BY (p)
+WITH (location = concat('{UC_TEST_LOCATION}/', '{UC_TEST_NEW_TABLE}_part'))
+AS SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'a')) v(id, p);
+
+query II
+SELECT p, count(*) FROM duck.plain.{UC_TEST_NEW_TABLE}_part GROUP BY p ORDER BY p;
+----
+a	2
+b	1
+
+# -----------------------------------------------------------------------------
+# In a schema with managed storage
+#
+# The location decides, not the schema: a table with one is EXTERNAL wherever it is created.
+#
+
+statement ok
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_ext
+WITH (location = '{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_ext')
+AS SELECT 7 AS id;
+
+# -----------------------------------------------------------------------------
+# A session that did not create them
+#
+
+statement ok
+CALL disable_logging();
+
+statement ok
+DETACH duck;
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS fresh (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'plain');
+
+query II
+SELECT id, name FROM fresh.plain.{UC_TEST_NEW_TABLE} ORDER BY id;
+----
+0	v0
+1	v1
+2	v2
+3	v3
+
+query II
+SELECT p, count(*) FROM fresh.plain.{UC_TEST_NEW_TABLE}_part GROUP BY p ORDER BY p;
+----
+a	2
+b	1
+
+query I
+SELECT id FROM fresh.cmt.{UC_TEST_NEW_TABLE}_ext;
+----
+7

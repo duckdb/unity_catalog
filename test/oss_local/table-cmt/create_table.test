@@ -77,7 +77,7 @@ name	VARCHAR
 statement ok
 CREATE TABLE IF NOT EXISTS duck.cmt.{UC_TEST_NEW_TABLE} (id INTEGER, name VARCHAR);
 
-# The catalog refused the second staging attempt, and the table it refused for is untouched
+# A no-op, and the table is untouched
 query II
 SELECT column_name, data_type FROM duckdb_columns()
 WHERE database_name = 'duck' AND table_name = '{UC_TEST_NEW_TABLE}' ORDER BY column_index;
@@ -85,15 +85,16 @@ WHERE database_name = 'duck' AND table_name = '{UC_TEST_NEW_TABLE}' ORDER BY col
 id	INTEGER
 name	VARCHAR
 
-# It was the catalog that refused: the name was staged a second time, and nothing was registered.
-# A check against the tables already loaded would have skipped the staging call altogether.
+# The session lists the name, so it is taken without asking the catalog: no second staging call, and nothing
+# registered. (DuckDB plans a CREATE TABLE AS on a listed name as a plain CREATE without its query, so a listed
+# name must count as taken, or the server's answer could turn that CTAS into an empty table.)
 query II
 SELECT
     count(*) FILTER (WHERE message LIKE 'api.CreateStagingTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE}%'),
     count(*) FILTER (WHERE message LIKE 'api.CreateTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE}%')
 FROM duckdb_logs();
 ----
-2	1
+1	1
 
 statement error
 CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE} (id INTEGER, name VARCHAR);
@@ -208,10 +209,12 @@ CREATE OR REPLACE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_replace (id INTEGER);
 ----
 REPLACE ON CONFLICT in CreateTable
 
+# Without a location CREATE TABLE AS would make a managed table, which it does not do yet; WITH (location = ...)
+# makes an EXTERNAL one (table-plain/create_table_as.test)
 statement error
 CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_as AS SELECT 1 AS id;
 ----
-PlanCreateTableAs
+CREATE TABLE AS for a managed Unity Catalog table is not supported yet
 
 statement error
 CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_notnull (id INTEGER NOT NULL);

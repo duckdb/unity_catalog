@@ -2,6 +2,7 @@
 #include "uc_logging.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "yyjson.hpp"
+#include "duckdb/common/path.hpp"
 #include "storage/uc_schema_entry.hpp"
 #include "storage/uc_transaction.hpp"
 
@@ -178,6 +179,36 @@ void ApplyVendedCredentials(ClientContext &context, const string &name, const st
 	input.persist_type = SecretPersistType::TRANSACTION;
 	input.on_conflict = OnCreateConflict::REPLACE_ON_CONFLICT;
 	secret_manager.CreateSecret(context, input);
+}
+
+string UCUtils::NormalizeLocation(const string &location) {
+	auto spelled = location;
+	if (StringUtil::StartsWith(StringUtil::Lower(spelled), "file:")) {
+		spelled = spelled.substr(5);
+		auto first = spelled.find_first_not_of('/');
+		spelled = "/" + (first == string::npos ? string() : spelled.substr(first));
+	}
+	auto path = Path::FromString(spelled);
+	auto result = path.GetBase() + (path.HasPathSegments() ? path.GetPath() : string());
+	// A root (`/`, `s3://bucket/`) is all base, and keeps its separator
+	while (result.size() > path.GetBase().size() && result.back() == path.GetSeparator()) {
+		result.pop_back();
+	}
+	return result;
+}
+
+bool UCUtils::PathIsInside(const string &directory, const string &path) {
+	auto canonical = [](const Path &p) {
+		return p.GetBase() + p.GetPath();
+	};
+	auto dir = Path::FromString(directory);
+	auto prefix = canonical(dir);
+	// A root's canonical form already ends with its separator
+	if (prefix.empty() || prefix.back() != dir.GetSeparator()) {
+		prefix += dir.GetSeparator();
+	}
+	auto inner = canonical(Path::FromString(path));
+	return inner.size() > prefix.size() && StringUtil::StartsWith(inner, prefix);
 }
 
 string UCUtils::TypeToString(const LogicalType &input) {
