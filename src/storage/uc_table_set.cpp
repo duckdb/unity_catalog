@@ -1073,7 +1073,7 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	}
 
 	UCManagedCreate create;
-	if (!PrepareManagedCreate(context, base, nullptr, create)) {
+	if (!PrepareManagedCreate(context, base, create)) {
 		return nullptr;
 	}
 	// Written right here: no later plan may reuse this staging
@@ -1089,8 +1089,8 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 namespace {
 
 //! The managed tables this connection staged and no statement has run with yet, so that a CREATE TABLE AS planned
-//! twice -- prepared, then planned again when it runs (API clients rebind every prepared statement) -- stages once.
-//! Only GetOrStageManagedCreate reads or writes it.
+//! twice -- prepared, then planned again when it is executed (as API clients' prepared statements may be) -- stages
+//! once. Only GetOrStageManagedCreate reads or writes it.
 class UCManagedStagingMemo : public ClientContextState {
 public:
 	static constexpr const char *KEY = "unity_catalog_managed_staging";
@@ -1098,10 +1098,10 @@ public:
 	struct Entry {
 		UCAPIStagingTable staging;
 		shared_ptr<atomic<bool>> used;
-		//! Transactions ended since it was staged
+		//! Transactions ended since it was staged or last reused
 		idx_t transactions_ended = 0;
 	};
-	//! By the table's fully qualified name, the attachment and the statement (see GetOrStageManagedCreate)
+	//! By the catalog's identity and the table's fully qualified name (see GetOrStageManagedCreate)
 	unordered_map<string, Entry> entries;
 	mutex lock;
 
@@ -1114,8 +1114,9 @@ public:
 	}
 
 private:
-	//! A staging lives into the transaction after the one that made it (where a prepared statement runs), and no
-	//! further; one a statement ran with goes at once
+	//! A staging lives into the transaction after the one that made or last reused it (where a prepared statement is
+	//! executed right after its prepare), and no further; committed or rolled back alike. One a statement ran with goes
+	//! at once.
 	void TransactionEnded() {
 		lock_guard<mutex> guard(lock);
 		for (auto it = entries.begin(); it != entries.end();) {
@@ -1131,16 +1132,15 @@ private:
 } // namespace
 
 //! The one place a managed table is staged: UC's staging of `create`'s table, made here or reused from an earlier
-//! plan of the same statement on this connection that has not run. Keyed by the attachment, the fully qualified name
-//! and the statement (`base` as written, and the planned `query` of a CREATE TABLE AS), so another statement for the
-//! same name stages afresh. Credentials for the staging location are vended for this transaction every time, never
-//! carried over from another. Throws what staging throws (a 409 as EntryAlreadyExists).
-static void GetOrStageManagedCreate(ClientContext &context, UnityCatalog &uc_catalog, const string &attachment,
-                                    const CreateTableInfo &base, optional_ptr<PhysicalOperator> query,
-                                    UCManagedCreate &create) {
+//! plan on this connection that no statement has run with. Keyed by the catalog's identity (an attachment of another
+//! catalog under the same name does not match) and the table's fully qualified name: a staging is bound to the name
+//! only, so it serves any statement that creates that table. Credentials for the staging location are vended for this
+//! transaction every time, never carried over from another. Throws what staging throws (a 409 as
+//! EntryAlreadyExists).
+static void GetOrStageManagedCreate(ClientContext &context, UnityCatalog &uc_catalog, UCManagedCreate &create) {
 	auto memo = context.registered_state->GetOrCreate<UCManagedStagingMemo>(UCManagedStagingMemo::KEY);
-	auto key = attachment + "\n" + create.catalog_name + "." + create.schema_name + "." + create.table_name + "\n" +
-	           base.ToString() + "\n" + (query ? query->ToString() : string());
+	auto key = to_string(uc_catalog.GetOid()) + "\n" + create.catalog_name + "." + create.schema_name + "." +
+	           create.table_name;
 	bool reused = false;
 	{
 		lock_guard<mutex> guard(memo->lock);
@@ -1148,6 +1148,7 @@ static void GetOrStageManagedCreate(ClientContext &context, UnityCatalog &uc_cat
 		if (entry != memo->entries.end() && !*entry->second.used) {
 			create.staging = entry->second.staging;
 			create.staging_used = entry->second.used;
+			entry->second.transactions_ended = 0;
 			reused = true;
 		}
 	}
@@ -1165,8 +1166,7 @@ static void GetOrStageManagedCreate(ClientContext &context, UnityCatalog &uc_cat
 	StageCredentials(context, uc_catalog, create.staging);
 }
 
-bool UCTableSet::PrepareManagedCreate(ClientContext &context, CreateTableInfo &base,
-                                      optional_ptr<PhysicalOperator> query, UCManagedCreate &create) {
+bool UCTableSet::PrepareManagedCreate(ClientContext &context, CreateTableInfo &base, UCManagedCreate &create) {
 	auto &uc_catalog = catalog.Cast<UnityCatalog>();
 	create.catalog_name = catalog.GetDBPath();
 	create.schema_name = schema.name.GetIdentifierName();
@@ -1177,7 +1177,7 @@ bool UCTableSet::PrepareManagedCreate(ClientContext &context, CreateTableInfo &b
 	auto &table_name = create.table_name;
 
 	try {
-		GetOrStageManagedCreate(context, uc_catalog, catalog.GetName().GetIdentifierName(), base, query, create);
+		GetOrStageManagedCreate(context, uc_catalog, create);
 	} catch (const CatalogException &e) {
 		if (IsEntryAlreadyExists(e)) {
 			MarkNeedsReload();
@@ -1303,7 +1303,7 @@ PhysicalOperator &UCTableSet::PlanCreateTableAs(ClientContext &context, Physical
 		// location while planning. Delta writes version 0 with the rows through this catalog's committer, which
 		// writes it at the published path, as the query ends; this catalog registers the table afterwards.
 		create_state->managed = true;
-		if (!PrepareManagedCreate(context, base, plan, create_state->managed_create)) {
+		if (!PrepareManagedCreate(context, base, create_state->managed_create)) {
 			// IF NOT EXISTS, and UC has the name though this session had not listed it yet: the query is not run
 			return planner.Make<PhysicalEmptyResult>(op.types, op.estimated_cardinality);
 		}

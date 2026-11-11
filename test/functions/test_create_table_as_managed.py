@@ -458,18 +458,69 @@ def test_a_prepared_ctas_that_never_runs_stages_once_and_registers_nothing(tmp_p
         assert uc.registered == []
 
 
-def test_another_statement_for_the_name_stages_afresh(tmp_path):
-    # A staging is reused only by the statement that made it
+def test_another_statement_for_the_name_reuses_an_unrun_staging(tmp_path):
+    # A staging is bound to the name only: a statement that never ran leaves it to the next CTAS of that table
     with ManagedCatalog(tmp_path) as uc:
         other = f"CREATE TABLE unity.{SCHEMA}.m AS SELECT 42::INTEGER AS id"
         results = run_capi(
             uc, [("prepare", CTAS_M), ("prepare", other), ("execute",), ("query", f"SELECT id FROM unity.{SCHEMA}.m")]
         )
         assert results[3] == [["42"]], results
+        assert uc.stagings == ["m"], uc.calls
+        assert len(uc.registered) == 1
+
+
+def test_a_reuse_keeps_the_staging_for_the_next_transaction(tmp_path):
+    # Each reuse starts its lifetime again: prepare twice, then execute, still stages once
+    with ManagedCatalog(tmp_path) as uc:
+        results = run_capi(uc, [("prepare", CTAS_M), ("prepare", CTAS_M), ("execute",)])
+        assert not isinstance(results[2], dict), results
+        assert uc.stagings == ["m"], uc.calls
+
+
+def test_a_rolled_back_transaction_ages_a_staging_like_a_commit(tmp_path):
+    with ManagedCatalog(tmp_path) as uc:
+        results = run_capi(uc, [("query", "BEGIN"), ("prepare", CTAS_M), ("query", "ROLLBACK"), ("execute",)])
+        assert not isinstance(results[3], dict), results
+        assert uc.stagings == ["m"], uc.calls
+        assert len(uc.registered) == 1
+
+
+def test_an_execute_after_other_statements_stages_again(tmp_path):
+    # A staging lives into the transaction after its prepare, no further (a documented limit)
+    with ManagedCatalog(tmp_path) as uc:
+        results = run_capi(uc, [("prepare", CTAS_M), ("query", "SELECT 1"), ("execute",)])
+        assert not isinstance(results[2], dict), results
         assert uc.stagings == ["m", "m"], uc.calls
         [registered] = uc.registered
         assert registered["location"].removeprefix("file://") == str(uc.location("m"))
-        assert uc.location("m").name.endswith("2"), uc.location("m")
+
+
+def test_a_catalog_attached_again_under_the_same_name_stages_afresh(tmp_path):
+    # Another connection re-attaches `unity` to another endpoint between the prepare and the execute: the staging
+    # made in the first catalog is not that catalog's to use
+    with ManagedCatalog(tmp_path / "a") as first, ManagedCatalog(tmp_path / "b") as second:
+        results = run_capi(
+            first,
+            [
+                (
+                    "query",
+                    f"CREATE SECRET second (TYPE UNITY_CATALOG, TOKEN 'x', ENDPOINT '{second.endpoint}', "
+                    "AWS_REGION 'us-east-2')",
+                ),
+                ("prepare", CTAS_M),
+                ("connection", 1),
+                ("query", "DETACH unity"),
+                ("query", "ATTACH 'duck' AS unity (TYPE unity_catalog, SECRET second, DEFAULT_SCHEMA 'cmt')"),
+                ("connection", 0),
+                ("execute",),
+            ],
+        )
+        assert not isinstance(results[6], dict), results
+        assert first.stagings == ["m"] and first.registered == [], first.calls
+        assert second.stagings == ["m"], second.calls
+        [registered] = second.registered
+        assert registered["location"].removeprefix("file://") == str(second.location("m"))
 
 
 def test_executing_a_prepared_ctas_again_finds_the_table(tmp_path):

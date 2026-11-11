@@ -40,6 +40,10 @@ SinkResultType UCCreateTableAs::Sink(ExecutionContext &context, DataChunk &chunk
 SinkFinalizeType UCCreateTableAs::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                            OperatorSinkFinalizeInput &input) const {
 	auto &gstate = input.global_state.Cast<UCCreateTableAsGlobalState>();
+	if (state->managed && state->managed_create.staging_used) {
+		// Set in GetGlobalSinkState too, which the scheduler need not run before the child writes; at the latest here
+		*state->managed_create.staging_used = true;
+	}
 	// The child's commit is done: its pipeline finished before this one started
 	gstate.created = state->managed ? tables.FinishManagedCreateTableAs(context, state->managed_create)
 	                                : tables.FinishExternalCreateTableAs(context, state->create);

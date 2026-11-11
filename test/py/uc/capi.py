@@ -7,9 +7,11 @@ attached as `unity`, and returns one result per step:
     ("query", sql)    -> rows, or {"error": message}
     ("prepare", sql)  -> "prepared", or {"error": message}; becomes the current prepared statement
     ("execute",)      -> rows of the current prepared statement, or {"error": message}
+    ("connection", n) -> "connection n"; later steps run on connection n of the same database (0 is the first;
+                         each connection has its own current prepared statement)
 
 The process is separate because the library is loaded into it: a sanitizer build needs its runtime preloaded.
-Skips when the build has no libduckdb.
+Skips when the build has no libduckdb, and fails instead when CI is set.
 """
 
 import ctypes as C
@@ -30,13 +32,20 @@ def _library():
 
 def _sanitizer_runtime(library):
     """The ASan runtime a sanitizer build of `library` needs preloaded into a plain Python, or None"""
-    symbols = subprocess.run(["nm", "-D", "--undefined-only", str(library)], capture_output=True, text=True)
+    try:
+        symbols = subprocess.run(["nm", "-D", "--undefined-only", str(library)], capture_output=True, text=True)
+    except OSError:
+        # No binutils: assume a build without sanitizers
+        return None
     if "__asan_init" not in symbols.stdout:
         return None
     for compiler in ("clang", "cc"):
-        found = subprocess.run(
-            [compiler, "-print-file-name=libclang_rt.asan-x86_64.so"], capture_output=True, text=True
-        ).stdout.strip()
+        try:
+            found = subprocess.run(
+                [compiler, "-print-file-name=libclang_rt.asan-x86_64.so"], capture_output=True, text=True
+            ).stdout.strip()
+        except OSError:
+            continue
         if found and Path(found).is_file():
             return found
     return None
@@ -45,7 +54,11 @@ def _sanitizer_runtime(library):
 def run_capi(mock, steps):
     library = _library()
     if not library.exists():
-        pytest.skip(f"libduckdb not built at {library} (set BUILD_DIR)")
+        message = f"libduckdb not built at {library} (set BUILD_DIR)"
+        if os.environ.get("CI"):
+            # CI ships the library with the build; a missing one would turn these tests into silent skips
+            pytest.fail(message)
+        pytest.skip(message)
     env = dict(os.environ)
     runtime = _sanitizer_runtime(library)
     if runtime:
@@ -145,14 +158,24 @@ def _main():
         if isinstance(answer, dict):
             raise RuntimeError(f"{sql}: {answer['error']}")
 
-    results, statement = [], None
+    results, statements, connections, current = [], {}, {0: con}, 0
     for step in request["steps"]:
-        if step[0] == "query":
+        statement = statements.get(current)
+        if step[0] == "connection":
+            current = step[1]
+            if current not in connections:
+                another = ptr()
+                connect(db, C.byref(another))
+                connections[current] = another
+            con = connections[current]
+            results.append(f"connection {current}")
+        elif step[0] == "query":
             results.append(run_query(step[1]))
         elif step[0] == "prepare":
             if statement is not None:
                 destroy_prepare(C.byref(statement))
             statement = ptr()
+            statements[current] = statement
             if prepare(con, step[1].encode(), C.byref(statement)):
                 results.append({"error": prepare_error(statement).decode()})
             else:
@@ -162,9 +185,10 @@ def _main():
             results.append(rows(execute_prepared(statement, C.byref(res)), res))
         else:
             raise ValueError(step)
-    if statement is not None:
+    for statement in statements.values():
         destroy_prepare(C.byref(statement))
-    disconnect(C.byref(con))
+    for connection in connections.values():
+        disconnect(C.byref(connection))
     close(C.byref(db))
     print(json.dumps(results))
 
