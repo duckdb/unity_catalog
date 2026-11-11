@@ -12,6 +12,7 @@
 #include "uc_mutex_protected.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/pair.hpp"
+#include "duckdb/common/atomic.hpp"
 
 namespace duckdb {
 class BoundAtClause;
@@ -122,18 +123,35 @@ struct UCExternalCreate {
 	OnCreateConflict on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
 };
 
+//! A managed create on its way to UC: the table UC staged for it, whose location version 0 goes to. UC owns that
+//! location, so a failed registration removes nothing there (delta still removes the files of a write that fails
+//! before its commit).
+struct UCManagedCreate {
+	string catalog_name;
+	string schema_name;
+	string table_name;
+	UCAPIStagingTable staging;
+	OnCreateConflict on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
+	//! Set once a statement runs with this staging, so that no later plan reuses it
+	shared_ptr<atomic<bool>> staging_used;
+};
+
 class UCTableSet {
 public:
 	explicit UCTableSet(UCSchemaEntry &schema);
 
 public:
 	optional_ptr<CatalogEntry> CreateTable(ClientContext &context, BoundCreateTableInfo &info);
-	//! CREATE TABLE AS with a location: writes version 0 with the query's rows through delta, then registers it
+	//! CREATE TABLE AS: writes version 0 with the query's rows through delta, then registers it. With a location the
+	//! table is EXTERNAL; without one UC stages a MANAGED table and version 0 commits through its committer.
 	PhysicalOperator &PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner, LogicalCreateTable &op,
 	                                    PhysicalOperator &plan);
 	//! Registers the version 0 a CREATE TABLE AS committed at `create.location`; removes what it wrote if UC refuses
 	//! it. False when IF NOT EXISTS found the name taken at registration, so nothing was created.
 	bool FinishExternalCreateTableAs(ClientContext &context, const UCExternalCreate &create);
+	//! Registers the version 0 a managed CREATE TABLE AS committed at the staging location; keeps the files whatever
+	//! happens. False as FinishExternalCreateTableAs.
+	bool FinishManagedCreateTableAs(ClientContext &context, const UCManagedCreate &create);
 	void AlterTable(ClientContext &context, AlterTableInfo &info);
 
 	optional_ptr<CatalogEntry> GetEntry(ClientContext &context, const EntryLookupInfo &lookup);
@@ -165,6 +183,17 @@ private:
 	//! FinishExternalCreateTableAs.
 	bool RegisterExternalCreate(ClientContext &context, const UCExternalCreate &create,
 	                            const UCAPICommittedTable &committed);
+
+	//! Stages the table with UC, or reuses a staging of it this connection made for a plan that never ran, and puts
+	//! what UC requires of it into `base`'s options, with credentials for the staging location. False when UC has the
+	//! name and the statement says IF NOT EXISTS; throws when it has it otherwise.
+	bool PrepareManagedCreate(ClientContext &context, CreateTableInfo &base, UCManagedCreate &create);
+	//! The delta attachment a managed create writes version 0 through: child-catalog mode, committing through this
+	//! catalog
+	AttachInfo ManagedAttachInfo(const UCManagedCreate &create) const;
+	//! Registers `committed` as MANAGED under the staged table id. False as FinishExternalCreateTableAs.
+	bool RegisterManagedCreate(ClientContext &context, const UCManagedCreate &create,
+	                           const UCAPICommittedTable &committed);
 
 	//! Whether this session's listing of the schema has `name`, loading it if it is not loaded yet
 	bool HasListedEntry(ClientContext &context, const string &name);

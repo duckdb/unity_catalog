@@ -129,12 +129,6 @@ SELECT
 # Refused before the write
 #
 
-# Without a location the table would be managed, which CREATE TABLE AS does not make yet
-statement error
-CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}_managed AS SELECT 1 AS id;
-----
-CREATE TABLE AS for a managed Unity Catalog table is not supported yet
-
 statement error
 CREATE TABLE duck.plain.{UC_TEST_NEW_TABLE}_type
 WITH (location = '{UC_TEST_LOCATION}/{UC_TEST_NEW_TABLE}_type')

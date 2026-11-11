@@ -1,0 +1,153 @@
+# name: test/oss_local/table-cmt/create_table_as.test
+# description: CREATE TABLE AS without a location makes a MANAGED (catalog-managed) table: DuckDB stages it with UC, writes version 0 with the query's rows through UC's committer, registers it, and then reads and writes it like any other managed table. Paired create_table_as.py picks the names, checks over REST what UC registered, and deletes the tables afterwards.
+# group: [table-cmt]
+
+require parquet
+
+require unity_catalog
+
+require delta
+
+require httpfs
+
+require-env UC_TEST_CATALOG
+
+require-env UC_TEST_NEW_TABLE
+
+require-env UC_ENDPOINT
+
+statement ok
+CREATE SECRET (
+    TYPE UNITY_CATALOG,
+    TOKEN 'not-used',
+    ENDPOINT '{UC_ENDPOINT}',
+    AWS_REGION 'us-east-2'
+);
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS duck (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'cmt');
+
+statement ok
+CALL enable_logging(level='DEBUG');
+
+# -----------------------------------------------------------------------------
+# Creating it
+#
+
+statement ok
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE} AS SELECT range::INTEGER AS id, 'v' || range AS name FROM range(3);
+
+# Staged once, then registered MANAGED after the write
+query II
+SELECT
+    count(*) FILTER (WHERE message = 'api.CreateStagingTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE}'),
+    count(*) FILTER (WHERE message = 'api.CreateTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE} MANAGED')
+FROM duckdb_logs();
+----
+1	1
+
+query II
+SELECT id, name FROM duck.cmt.{UC_TEST_NEW_TABLE} ORDER BY id;
+----
+0	v0
+1	v1
+2	v2
+
+# Partitioned, with nested columns, mapped by name as UC suggests
+statement ok
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_pn PARTITIONED BY (p) AS
+SELECT range::INTEGER AS id, (range % 2)::INTEGER AS p, {'a': range::INTEGER, 'tags': ['x' || range]} AS s
+FROM range(4);
+
+query III
+SELECT p, count(*), sum(s.a) FROM duck.cmt.{UC_TEST_NEW_TABLE}_pn GROUP BY p ORDER BY p;
+----
+0	2	2
+1	2	4
+
+# An empty query makes an empty table
+statement ok
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_empty AS SELECT 1::INTEGER AS id WHERE false;
+
+query I
+SELECT count(*) FROM duck.cmt.{UC_TEST_NEW_TABLE}_empty;
+----
+0
+
+# -----------------------------------------------------------------------------
+# Creating it again
+#
+
+# The session lists the name: IF NOT EXISTS skips the query, without a staging call
+statement ok
+CREATE TABLE IF NOT EXISTS duck.cmt.{UC_TEST_NEW_TABLE} AS SELECT error('the query ran') AS id;
+
+statement error
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE} AS SELECT 1 AS id;
+----
+already exists
+
+query I
+SELECT count(*) FROM duckdb_logs() WHERE message = 'api.CreateStagingTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE}';
+----
+1
+
+# -----------------------------------------------------------------------------
+# Using it: an INSERT commits through UC
+#
+
+statement ok
+INSERT INTO duck.cmt.{UC_TEST_NEW_TABLE} VALUES (3, 'v3');
+
+query I
+SELECT count(*) >= 1 FROM duckdb_logs()
+WHERE message LIKE 'api.UpdateTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE}%';
+----
+true
+
+# -----------------------------------------------------------------------------
+# What it refuses
+#
+
+# Refused by delta while planning, after UC staged the name: nothing is registered
+statement error
+CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_type AS SELECT 1::UHUGEINT AS id;
+----
+does not support column 'id' of type UHUGEINT
+
+statement error
+CREATE OR REPLACE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_replace AS SELECT 1 AS id;
+----
+CREATE OR REPLACE TABLE ... AS is not supported
+
+query I
+SELECT count(*) FROM duckdb_logs()
+WHERE message LIKE 'api.CreateTable {UC_TEST_CATALOG}.cmt.{UC_TEST_NEW_TABLE}\_type%' ESCAPE '\';
+----
+0
+
+# -----------------------------------------------------------------------------
+# A session that did not create it
+#
+
+statement ok
+CALL disable_logging();
+
+statement ok
+DETACH duck;
+
+statement ok
+ATTACH '{UC_TEST_CATALOG}' AS fresh (TYPE UNITY_CATALOG, DEFAULT_SCHEMA 'cmt');
+
+query II
+SELECT id, name FROM fresh.cmt.{UC_TEST_NEW_TABLE} ORDER BY id;
+----
+0	v0
+1	v1
+2	v2
+3	v3
+
+query II
+SELECT s.tags[1], p FROM fresh.cmt.{UC_TEST_NEW_TABLE}_pn WHERE id = 3;
+----
+x3	1

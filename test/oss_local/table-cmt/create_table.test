@@ -209,12 +209,7 @@ CREATE OR REPLACE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_replace (id INTEGER);
 ----
 REPLACE ON CONFLICT in CreateTable
 
-# Without a location CREATE TABLE AS would make a managed table, which it does not do yet; WITH (location = ...)
-# makes an EXTERNAL one (table-plain/create_table_as.test)
-statement error
-CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_as AS SELECT 1 AS id;
-----
-CREATE TABLE AS for a managed Unity Catalog table is not supported yet
+# CREATE TABLE AS without a location makes a managed table: table-cmt/create_table_as.test
 
 statement error
 CREATE TABLE duck.cmt.{UC_TEST_NEW_TABLE}_notnull (id INTEGER NOT NULL);

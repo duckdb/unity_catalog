@@ -2,8 +2,8 @@
 
 A CTAS with a location makes an EXTERNAL table: the name is checked with UC first, delta writes version 0 with the
 query's rows at the location (one commit: protocol, metadata and the add actions), and the table is registered with
-UC afterwards. A registration that fails removes what the statement wrote. A CTAS without a location would make a
-managed table, which is refused for now.
+UC afterwards. A registration that fails removes what the statement wrote. A CTAS without a location makes a managed
+table: test_create_table_as_managed.py.
 
 The mock keeps what it is told: a registered table is listed and loadable afterwards, so a later statement, or a
 fresh session, reads it through the catalog.
@@ -399,10 +399,6 @@ def test_a_registration_that_went_through_is_recognized_in_another_spelling(tmp_
     "sql, message",
     [
         (
-            "CREATE TABLE unity.plain.m AS SELECT 1 AS id",
-            "CREATE TABLE AS for a managed Unity Catalog table is not supported yet",
-        ),
-        (
             "CREATE OR REPLACE TABLE unity.plain.m WITH (location = '{loc}') AS SELECT 1 AS id",
             "CREATE OR REPLACE TABLE ... AS is not supported",
         ),
@@ -423,7 +419,7 @@ def test_a_registration_that_went_through_is_recognized_in_another_spelling(tmp_
             "does not support column 'id' of type UHUGEINT",
         ),
     ],
-    ids=["managed", "or-replace", "unknown-option", "sorted-by", "relative-location", "unstorable-type"],
+    ids=["or-replace", "unknown-option", "sorted-by", "relative-location", "unstorable-type"],
 )
 def test_refused_before_any_write(tmp_path, sql, message):
     location = tmp_path / "m"
