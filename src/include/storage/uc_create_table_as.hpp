@@ -15,12 +15,15 @@ namespace duckdb {
 
 //! What a CREATE TABLE AS holds from its plan to its registration
 struct UCCreateTableAsState {
+	//! Whether the table is MANAGED (`managed_create`) rather than EXTERNAL (`create`)
+	bool managed = false;
 	UCExternalCreate create;
+	UCManagedCreate managed_create;
 };
 
-//! Registers the EXTERNAL table its child -- delta's CREATE TABLE AS write -- committed as version 0, once that commit
-//! is done. Passes the child's row count on. Delta undoes a write that fails before its commit; a registration that
-//! fails removes what the commit wrote.
+//! Registers the table its child -- delta's CREATE TABLE AS write -- committed as version 0, once that commit is done.
+//! Passes the child's row count on. Delta undoes a write that fails before its commit; a registration that fails
+//! removes what the commit wrote for an EXTERNAL table, and keeps it for a MANAGED one (UC owns its location).
 class UCCreateTableAs : public PhysicalOperator {
 public:
 	UCCreateTableAs(PhysicalPlan &plan, vector<LogicalType> types, idx_t estimated_cardinality, UCTableSet &tables,

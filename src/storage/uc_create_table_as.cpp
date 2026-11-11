@@ -37,7 +37,8 @@ SinkFinalizeType UCCreateTableAs::Finalize(Pipeline &pipeline, Event &event, Cli
                                            OperatorSinkFinalizeInput &input) const {
 	auto &gstate = input.global_state.Cast<UCCreateTableAsGlobalState>();
 	// The child's commit is done: its pipeline finished before this one started
-	gstate.created = tables.FinishExternalCreateTableAs(context, state->create);
+	gstate.created = state->managed ? tables.FinishManagedCreateTableAs(context, state->managed_create)
+	                                : tables.FinishExternalCreateTableAs(context, state->create);
 	return SinkFinalizeType::READY;
 }
 
@@ -55,6 +56,13 @@ string UCCreateTableAs::GetName() const {
 
 InsertionOrderPreservingMap<string> UCCreateTableAs::ParamsToString() const {
 	InsertionOrderPreservingMap<string> result;
+	if (state->managed) {
+		auto &create = state->managed_create;
+		result["Table Name"] = create.catalog_name + "." + create.schema_name + "." + create.table_name;
+		result["Location"] = create.staging.location;
+		result["Staged Table Id"] = create.staging.table_id;
+		return result;
+	}
 	result["Table Name"] =
 	    state->create.catalog_name + "." + state->create.schema_name + "." + state->create.table_name;
 	result["Location"] = state->create.location;

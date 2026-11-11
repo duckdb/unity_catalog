@@ -1032,8 +1032,6 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	}
 	auto &base = info.Base().Cast<CreateTableInfo>();
 	auto table_name = base.GetTableName().GetIdentifierName();
-	auto catalog_name = catalog.GetDBPath();
-	auto schema_name = schema.name.GetIdentifierName();
 
 	// Core plans a plain CREATE, and drops a CREATE TABLE AS's query, when this session's listing has the name. So a
 	// listed name is the conflict core saw, whatever the server says now: otherwise a CTAS would make an empty table
@@ -1073,16 +1071,38 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 		return nullptr;
 	}
 
+	UCManagedCreate create;
+	if (!PrepareManagedCreate(context, base, create)) {
+		return nullptr;
+	}
+	auto attach_info = ManagedAttachInfo(create);
+	// Through the catalog committer delta serves no entry, so its return says nothing about whether it wrote
+	bool wrote = false;
+	auto committed = WriteVersionZero(context, info, attach_info, table_name, create.staging.location, wrote);
+	RegisterManagedCreate(context, create, committed);
+	return nullptr;
+}
+
+bool UCTableSet::PrepareManagedCreate(ClientContext &context, CreateTableInfo &base, UCManagedCreate &create) {
+	auto &uc_catalog = catalog.Cast<UnityCatalog>();
+	create.catalog_name = catalog.GetDBPath();
+	create.schema_name = schema.name.GetIdentifierName();
+	create.table_name = base.GetTableName().GetIdentifierName();
+	create.on_conflict = base.on_conflict;
+	auto &catalog_name = create.catalog_name;
+	auto &schema_name = create.schema_name;
+	auto &table_name = create.table_name;
+
 	// UC allocates the location and the table id, and says what the table has to be. The catalog is
 	// the only authority on whether the name is taken, so the name is not checked here first.
-	UCAPIStagingTable staging;
+	auto &staging = create.staging;
 	try {
 		staging = UCAPI::CreateStagingTable(context, catalog_name, schema_name, table_name, uc_catalog.credentials);
 	} catch (const CatalogException &e) {
 		if (IsEntryAlreadyExists(e)) {
 			MarkNeedsReload();
 			if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
-				return nullptr;
+				return false;
 			}
 		}
 		throw;
@@ -1112,39 +1132,70 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 			base.options["delta.feature." + feature] = ConstantExpression::String("supported");
 		}
 	}
+	return true;
+}
 
+AttachInfo UCTableSet::ManagedAttachInfo(const UCManagedCreate &create) const {
 	// Version 0 is written through this catalog's committer, so the delta catalog is attached the way a
 	// read attaches one, minus what only an existing table has (its commits and ratified version).
 	AttachInfo attach_info;
-	attach_info.name = Identifier("__unity_catalog_internal_staging_" + staging.table_id);
-	attach_info.path = staging.location;
+	attach_info.name = Identifier("__unity_catalog_internal_staging_" + create.staging.table_id);
+	attach_info.path = create.staging.location;
 	attach_info.options = {{"type", Value("Delta")},
 	                       {"child_catalog_mode", Value(true)},
-	                       {"internal_table_name", Value(table_name)},
-	                       {"unity_table_id", Value(staging.table_id)},
+	                       {"internal_table_name", Value(create.table_name)},
+	                       {"unity_table_id", Value(create.staging.table_id)},
 	                       {"parent_catalog", Value(catalog.GetName())},
-	                       {"parent_catalog_schema", Value(schema_name)},
+	                       {"parent_catalog_schema", Value(create.schema_name)},
 	                       {"parent_commit", Value(true)}};
-	// Through the catalog committer delta serves no entry, so its return says nothing about whether it wrote
-	bool wrote = false;
-	auto committed = WriteVersionZero(context, info, attach_info, table_name, staging.location, wrote);
+	return attach_info;
+}
+
+//! Says what a failed managed create leaves: the version 0 it committed stays in UC's staging location, which UC
+//! owns (and reaps); its table id is in the log
+static void KeepStagedVersionZero(ClientContext &context, const UCManagedCreate &create, const string &why) {
+	UC_LOG_WARNING(context,
+	               "CreateTable %s.%s.%s is not registered; the version 0 it committed stays in UC's staging location "
+	               "%s (staged table id %s): %s",
+	               create.catalog_name, create.schema_name, create.table_name, create.staging.location,
+	               create.staging.table_id, why);
+}
+
+bool UCTableSet::RegisterManagedCreate(ClientContext &context, const UCManagedCreate &create,
+                                       const UCAPICommittedTable &committed) {
+	auto &uc_catalog = catalog.Cast<UnityCatalog>();
 	try {
-		RegisterTable(context, uc_catalog, catalog_name, schema_name, committed, "MANAGED",
-		              [&](const UCAPICommitsResult &loaded) { return loaded.table_uuid == staging.table_id; });
+		RegisterTable(context, uc_catalog, create.catalog_name, create.schema_name, committed, "MANAGED",
+		              [&](const UCAPICommitsResult &loaded) { return loaded.table_uuid == create.staging.table_id; });
 	} catch (const CatalogException &e) {
+		KeepStagedVersionZero(context, create, e.what());
 		// Taken between staging and registration
 		if (IsEntryAlreadyExists(e)) {
 			MarkNeedsReload();
-			if (base.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
-				return nullptr;
+			if (create.on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
+				return false;
 			}
 		}
+		throw;
+	} catch (std::exception &e) {
+		KeepStagedVersionZero(context, create, e.what());
 		throw;
 	}
 
 	// The catalog now owns a table this set has never seen; its next lookup loads it from UC.
 	MarkNeedsReload();
-	return nullptr;
+	return true;
+}
+
+bool UCTableSet::FinishManagedCreateTableAs(ClientContext &context, const UCManagedCreate &create) {
+	UCAPICommittedTable committed;
+	try {
+		committed = ReadCommittedTable(context, create.table_name, create.staging.location);
+	} catch (std::exception &e) {
+		KeepStagedVersionZero(context, create, e.what());
+		throw;
+	}
+	return RegisterManagedCreate(context, create, committed);
 }
 
 PhysicalOperator &UCTableSet::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
@@ -1163,25 +1214,29 @@ PhysicalOperator &UCTableSet::PlanCreateTableAs(ClientContext &context, Physical
 		throw NotImplementedException("CREATE OR REPLACE TABLE ... AS is not supported for tables in a Unity Catalog "
 		                              "catalog");
 	}
-	if (base.options.find("location") == base.options.end()) {
-		// A managed table is staged by UC and committed through its committer, and version 0 with rows
-		// there waits on what UC promises about a failed one (cleanup of the staged files)
-		throw NotImplementedException(
-		    "CREATE TABLE AS for a managed Unity Catalog table is not supported yet: give the table a location, "
-		    "CREATE TABLE %s ... WITH (location = '...') AS SELECT ..., which makes it EXTERNAL; or create the managed "
-		    "table, then INSERT into it",
-		    base.GetTableName().GetIdentifierName());
-	}
 	auto create_state = make_shared_ptr<UCCreateTableAsState>();
 	auto &create = create_state->create;
-	if (!PrepareExternalCreate(context, base, create)) {
-		// IF NOT EXISTS, and UC has the name though this session had not listed it yet: the query is not run
-		return planner.Make<PhysicalEmptyResult>(op.types, op.estimated_cardinality);
+	AttachInfo attach_info;
+	string table_name = base.GetTableName().GetIdentifierName();
+	if (base.options.find("location") == base.options.end()) {
+		// MANAGED: UC stages the table here, at plan time, since delta builds the create transaction at the staging
+		// location while planning. Delta writes version 0 with the rows through this catalog's committer, which
+		// writes it at the published path, as the query ends; this catalog registers the table afterwards.
+		create_state->managed = true;
+		if (!PrepareManagedCreate(context, base, create_state->managed_create)) {
+			// IF NOT EXISTS, and UC has the name though this session had not listed it yet: the query is not run
+			return planner.Make<PhysicalEmptyResult>(op.types, op.estimated_cardinality);
+		}
+		attach_info = ManagedAttachInfo(create_state->managed_create);
+	} else {
+		if (!PrepareExternalCreate(context, base, create)) {
+			// IF NOT EXISTS, and UC has the name though this session had not listed it yet: the query is not run
+			return planner.Make<PhysicalEmptyResult>(op.types, op.estimated_cardinality);
+		}
+		// EXTERNAL: delta writes version 0 with the rows, committed through the filesystem committer as the query
+		// ends, at the location attached as CREATE attaches it; this catalog registers the table afterwards
+		attach_info = ExternalAttachInfo(create);
 	}
-
-	// Delta writes version 0 with the rows, committed through the filesystem committer as the query ends, at the
-	// location attached as CREATE attaches it; this catalog registers the table afterwards
-	auto attach_info = ExternalAttachInfo(create);
 	AttachOptions attach_options(attach_info.options, AccessMode::READ_WRITE);
 	attach_options.access_mode = AccessMode::READ_WRITE;
 	attach_options.db_type = "delta";
@@ -1197,8 +1252,8 @@ PhysicalOperator &UCTableSet::PlanCreateTableAs(ClientContext &context, Physical
 		try {
 			db_manager.DetachDatabase(context, attached_name, OnEntryNotFound::RETURN_NULL);
 		} catch (std::exception &detach_error) {
-			UC_LOG_WARNING(context, "CreateTable %s could not detach the database it planned through: %s",
-			               create.table_name, detach_error.what());
+			UC_LOG_WARNING(context, "CreateTable %s could not detach the database it planned through: %s", table_name,
+			               detach_error.what());
 		}
 		throw;
 	}
@@ -1206,7 +1261,7 @@ PhysicalOperator &UCTableSet::PlanCreateTableAs(ClientContext &context, Physical
 
 	// Delta refused a location that holds a Delta table while planning, so a version 0 there once the write is done
 	// is the one this statement committed
-	create.wrote_version_zero = true;
+	create.wrote_version_zero = !create_state->managed;
 	auto &result = planner.Make<UCCreateTableAs>(op.types, op.estimated_cardinality, *this, std::move(create_state));
 	result.children.push_back(*write);
 	return result;
