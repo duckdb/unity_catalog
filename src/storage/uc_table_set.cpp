@@ -37,6 +37,7 @@
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
 #include "storage/uc_create_table_as.hpp"
+#include "duckdb/main/client_context_state.hpp"
 
 namespace duckdb {
 
@@ -1072,9 +1073,11 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	}
 
 	UCManagedCreate create;
-	if (!PrepareManagedCreate(context, base, create)) {
+	if (!PrepareManagedCreate(context, base, nullptr, create)) {
 		return nullptr;
 	}
+	// Written right here: no later plan may reuse this staging
+	*create.staging_used = true;
 	auto attach_info = ManagedAttachInfo(create);
 	// Through the catalog committer delta serves no entry, so its return says nothing about whether it wrote
 	bool wrote = false;
@@ -1083,7 +1086,87 @@ optional_ptr<CatalogEntry> UCTableSet::CreateTable(ClientContext &context, Bound
 	return nullptr;
 }
 
-bool UCTableSet::PrepareManagedCreate(ClientContext &context, CreateTableInfo &base, UCManagedCreate &create) {
+namespace {
+
+//! The managed tables this connection staged and no statement has run with yet, so that a CREATE TABLE AS planned
+//! twice -- prepared, then planned again when it runs (API clients rebind every prepared statement) -- stages once.
+//! Only GetOrStageManagedCreate reads or writes it.
+class UCManagedStagingMemo : public ClientContextState {
+public:
+	static constexpr const char *KEY = "unity_catalog_managed_staging";
+
+	struct Entry {
+		UCAPIStagingTable staging;
+		shared_ptr<atomic<bool>> used;
+		//! Transactions ended since it was staged
+		idx_t transactions_ended = 0;
+	};
+	//! By the table's fully qualified name, the attachment and the statement (see GetOrStageManagedCreate)
+	unordered_map<string, Entry> entries;
+	mutex lock;
+
+	void TransactionCommit(MetaTransaction &transaction, ClientContext &context) override {
+		TransactionEnded();
+	}
+	void TransactionRollback(MetaTransaction &transaction, ClientContext &context,
+	                         optional_ptr<ErrorData> error) override {
+		TransactionEnded();
+	}
+
+private:
+	//! A staging lives into the transaction after the one that made it (where a prepared statement runs), and no
+	//! further; one a statement ran with goes at once
+	void TransactionEnded() {
+		lock_guard<mutex> guard(lock);
+		for (auto it = entries.begin(); it != entries.end();) {
+			if (*it->second.used || ++it->second.transactions_ended >= 2) {
+				it = entries.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+};
+
+} // namespace
+
+//! The one place a managed table is staged: UC's staging of `create`'s table, made here or reused from an earlier
+//! plan of the same statement on this connection that has not run. Keyed by the attachment, the fully qualified name
+//! and the statement (`base` as written, and the planned `query` of a CREATE TABLE AS), so another statement for the
+//! same name stages afresh. Credentials for the staging location are vended for this transaction every time, never
+//! carried over from another. Throws what staging throws (a 409 as EntryAlreadyExists).
+static void GetOrStageManagedCreate(ClientContext &context, UnityCatalog &uc_catalog, const string &attachment,
+                                    const CreateTableInfo &base, optional_ptr<PhysicalOperator> query,
+                                    UCManagedCreate &create) {
+	auto memo = context.registered_state->GetOrCreate<UCManagedStagingMemo>(UCManagedStagingMemo::KEY);
+	auto key = attachment + "\n" + create.catalog_name + "." + create.schema_name + "." + create.table_name + "\n" +
+	           base.ToString() + "\n" + (query ? query->ToString() : string());
+	bool reused = false;
+	{
+		lock_guard<mutex> guard(memo->lock);
+		auto entry = memo->entries.find(key);
+		if (entry != memo->entries.end() && !*entry->second.used) {
+			create.staging = entry->second.staging;
+			create.staging_used = entry->second.used;
+			reused = true;
+		}
+	}
+	if (!reused) {
+		// UC allocates the location and the table id, and says what the table has to be. The catalog is the only
+		// authority on whether the name is taken, so the name is not checked here first.
+		create.staging = UCAPI::CreateStagingTable(context, create.catalog_name, create.schema_name, create.table_name,
+		                                           uc_catalog.credentials);
+		create.staging_used = make_shared_ptr<atomic<bool>>(false);
+		lock_guard<mutex> guard(memo->lock);
+		memo->entries[key] = UCManagedStagingMemo::Entry {create.staging, create.staging_used, 0};
+	}
+	UC_LOG_DEBUG(context, "CreateTable %s.%s.%s %s staged table %s at %s", create.catalog_name, create.schema_name,
+	             create.table_name, reused ? "reuses" : "made", create.staging.table_id, create.staging.location);
+	StageCredentials(context, uc_catalog, create.staging);
+}
+
+bool UCTableSet::PrepareManagedCreate(ClientContext &context, CreateTableInfo &base,
+                                      optional_ptr<PhysicalOperator> query, UCManagedCreate &create) {
 	auto &uc_catalog = catalog.Cast<UnityCatalog>();
 	create.catalog_name = catalog.GetDBPath();
 	create.schema_name = schema.name.GetIdentifierName();
@@ -1093,11 +1176,8 @@ bool UCTableSet::PrepareManagedCreate(ClientContext &context, CreateTableInfo &b
 	auto &schema_name = create.schema_name;
 	auto &table_name = create.table_name;
 
-	// UC allocates the location and the table id, and says what the table has to be. The catalog is
-	// the only authority on whether the name is taken, so the name is not checked here first.
-	auto &staging = create.staging;
 	try {
-		staging = UCAPI::CreateStagingTable(context, catalog_name, schema_name, table_name, uc_catalog.credentials);
+		GetOrStageManagedCreate(context, uc_catalog, catalog.GetName().GetIdentifierName(), base, query, create);
 	} catch (const CatalogException &e) {
 		if (IsEntryAlreadyExists(e)) {
 			MarkNeedsReload();
@@ -1107,7 +1187,7 @@ bool UCTableSet::PrepareManagedCreate(ClientContext &context, CreateTableInfo &b
 		}
 		throw;
 	}
-	StageCredentials(context, uc_catalog, staging);
+	auto &staging = create.staging;
 
 	// A suggestion is UC saying "this is how we would write it", so take the ones that can be taken: kernel
 	// refuses at creation any `delta.*` key it does not accept.
@@ -1151,14 +1231,14 @@ AttachInfo UCTableSet::ManagedAttachInfo(const UCManagedCreate &create) const {
 	return attach_info;
 }
 
-//! Says what a failed managed create leaves: the version 0 it committed stays in UC's staging location, which UC
-//! owns (and reaps); its table id is in the log
-static void KeepStagedVersionZero(ClientContext &context, const UCManagedCreate &create, const string &why) {
+//! Says what a managed create whose registration could not be confirmed leaves: the version 0 it committed stays in
+//! UC's staging location, which UC owns (cleanup is left to UC); its table id is in the log. Whether the table is
+//! registered may be unknown here (a failed reply whose recovery lookup failed too), so it claims neither.
+static void KeepStagedVersionZero(ClientContext &context, const UCManagedCreate &create, const std::exception &why) {
 	UC_LOG_WARNING(context,
-	               "CreateTable %s.%s.%s is not registered; the version 0 it committed stays in UC's staging location "
-	               "%s (staged table id %s): %s",
+	               "CreateTable %s.%s.%s could not confirm registration; version 0 kept at %s (staged table id %s): %s",
 	               create.catalog_name, create.schema_name, create.table_name, create.staging.location,
-	               create.staging.table_id, why);
+	               create.staging.table_id, ErrorData(why).Message());
 }
 
 bool UCTableSet::RegisterManagedCreate(ClientContext &context, const UCManagedCreate &create,
@@ -1168,7 +1248,7 @@ bool UCTableSet::RegisterManagedCreate(ClientContext &context, const UCManagedCr
 		RegisterTable(context, uc_catalog, create.catalog_name, create.schema_name, committed, "MANAGED",
 		              [&](const UCAPICommitsResult &loaded) { return loaded.table_uuid == create.staging.table_id; });
 	} catch (const CatalogException &e) {
-		KeepStagedVersionZero(context, create, e.what());
+		KeepStagedVersionZero(context, create, e);
 		// Taken between staging and registration
 		if (IsEntryAlreadyExists(e)) {
 			MarkNeedsReload();
@@ -1178,7 +1258,7 @@ bool UCTableSet::RegisterManagedCreate(ClientContext &context, const UCManagedCr
 		}
 		throw;
 	} catch (std::exception &e) {
-		KeepStagedVersionZero(context, create, e.what());
+		KeepStagedVersionZero(context, create, e);
 		throw;
 	}
 
@@ -1192,7 +1272,7 @@ bool UCTableSet::FinishManagedCreateTableAs(ClientContext &context, const UCMana
 	try {
 		committed = ReadCommittedTable(context, create.table_name, create.staging.location);
 	} catch (std::exception &e) {
-		KeepStagedVersionZero(context, create, e.what());
+		KeepStagedVersionZero(context, create, e);
 		throw;
 	}
 	return RegisterManagedCreate(context, create, committed);
@@ -1223,14 +1303,14 @@ PhysicalOperator &UCTableSet::PlanCreateTableAs(ClientContext &context, Physical
 		// location while planning. Delta writes version 0 with the rows through this catalog's committer, which
 		// writes it at the published path, as the query ends; this catalog registers the table afterwards.
 		create_state->managed = true;
-		if (!PrepareManagedCreate(context, base, create_state->managed_create)) {
+		if (!PrepareManagedCreate(context, base, plan, create_state->managed_create)) {
 			// IF NOT EXISTS, and UC has the name though this session had not listed it yet: the query is not run
 			return planner.Make<PhysicalEmptyResult>(op.types, op.estimated_cardinality);
 		}
 		attach_info = ManagedAttachInfo(create_state->managed_create);
 	} else {
 		if (!PrepareExternalCreate(context, base, create)) {
-			// IF NOT EXISTS, and UC has the name though this session had not listed it yet: the query is not run
+			// As above
 			return planner.Make<PhysicalEmptyResult>(op.types, op.estimated_cardinality);
 		}
 		// EXTERNAL: delta writes version 0 with the rows, committed through the filesystem committer as the query
@@ -1245,8 +1325,9 @@ PhysicalOperator &UCTableSet::PlanCreateTableAs(ClientContext &context, Physical
 	auto delta_db = db_manager.AttachDatabase(context, attach_info, attach_options);
 	optional_ptr<PhysicalOperator> write;
 	try {
-		// What the plan runs holds no reference to the attached catalog, only to delta's create transaction, so the
-		// attachment goes again once the plan is made
+		// What the plan runs holds no reference to the attached catalog, only to delta's create transaction (whose
+		// catalog committer holds no pointer back, duckdb/duckdb-delta#429), so the attachment goes again once the
+		// plan is made
 		write = delta_db->GetCatalog().PlanCreateTableAs(context, planner, op, plan);
 	} catch (...) {
 		try {
@@ -1259,9 +1340,11 @@ PhysicalOperator &UCTableSet::PlanCreateTableAs(ClientContext &context, Physical
 	}
 	db_manager.DetachDatabase(context, attached_name, OnEntryNotFound::RETURN_NULL);
 
-	// Delta refused a location that holds a Delta table while planning, so a version 0 there once the write is done
-	// is the one this statement committed
-	create.wrote_version_zero = !create_state->managed;
+	if (!create_state->managed) {
+		// Delta refused a location that holds a Delta table while planning, so a version 0 there once the write is
+		// done is the one this statement committed
+		create.wrote_version_zero = true;
+	}
 	auto &result = planner.Make<UCCreateTableAs>(op.types, op.estimated_cardinality, *this, std::move(create_state));
 	result.children.push_back(*write);
 	return result;

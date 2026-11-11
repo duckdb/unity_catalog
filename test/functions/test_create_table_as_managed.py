@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from uc import delta_log_columns
+from uc.capi import run_capi
 from uc.mock import CATALOG, DROP, MockUnityCatalog, run
 
 SCHEMA = "cmt"
@@ -135,6 +136,7 @@ class ManagedCatalog(MockUnityCatalog):
     def __init__(self, root, register=None, taken=(), register_lands=False, load_uuid=None, suggested=None):
         self.tables = []
         self.staged = {}
+        self.stagings = []
         self.registered = []
         self.commits = {}
         self.calls = []
@@ -143,11 +145,10 @@ class ManagedCatalog(MockUnityCatalog):
         def find(name):
             return next((t for t in self.tables if t["name"] == name), None)
 
-        def table_id(name):
-            return f"00000000-0000-0000-0000-{abs(hash(name)) % 10**12:012d}"
-
         def staged(name):
-            id_ = table_id(name)
+            # A new table id and location for every staging, as UC hands them out
+            self.stagings.append(name)
+            id_ = f"00000000-0000-0000-0000-{len(self.stagings):012d}"
             location = root / f"{name}-{id_}"
             self.staged[name] = (id_, location)
             return {
@@ -423,10 +424,92 @@ def test_or_replace_is_refused_before_staging(tmp_path):
 
 def test_explain_stages_but_writes_and_registers_nothing(tmp_path):
     # Staging happens at plan time (delta needs the location to build the create transaction), so EXPLAIN leaves a
-    # staged table in UC: accepted for now
+    # staged table in UC (a documented limit)
     with ManagedCatalog(tmp_path) as uc:
         plan = "\n".join(_ok(uc, f"EXPLAIN CREATE TABLE unity.{SCHEMA}.x AS SELECT 1 AS id;"))
         assert "Uc Create Table As" in plan and "Delta Create Table As" in plan, plan
         assert uc.registered == []
         assert ("POST", STAGING) in uc.calls
         assert not (uc.location("x") / VERSION_ZERO).exists()
+
+
+# -----------------------------------------------------------------------------
+# API clients: prepare, then execute (a second plan)
+#
+
+CTAS_M = f"CREATE TABLE unity.{SCHEMA}.m AS SELECT range::INTEGER AS id FROM range(3)"
+
+
+def test_an_api_client_that_prepares_then_executes_stages_once(tmp_path):
+    # Execute plans the statement again, in the next transaction; it reuses the staging the prepare made
+    with ManagedCatalog(tmp_path) as uc:
+        results = run_capi(uc, [("prepare", CTAS_M), ("execute",), ("query", f"SELECT count(*) FROM unity.{SCHEMA}.m")])
+        assert results[0] == "prepared" and not isinstance(results[1], dict), results
+        assert results[2] == [["3"]], results
+        assert uc.stagings == ["m"], uc.calls
+        [registered] = uc.registered
+        assert registered["location"].removeprefix("file://") == str(uc.location("m"))
+
+
+def test_a_prepared_ctas_that_never_runs_stages_once_and_registers_nothing(tmp_path):
+    with ManagedCatalog(tmp_path) as uc:
+        assert run_capi(uc, [("prepare", CTAS_M)]) == ["prepared"]
+        assert uc.stagings == ["m"]
+        assert uc.registered == []
+
+
+def test_another_statement_for_the_name_stages_afresh(tmp_path):
+    # A staging is reused only by the statement that made it
+    with ManagedCatalog(tmp_path) as uc:
+        other = f"CREATE TABLE unity.{SCHEMA}.m AS SELECT 42::INTEGER AS id"
+        results = run_capi(
+            uc, [("prepare", CTAS_M), ("prepare", other), ("execute",), ("query", f"SELECT id FROM unity.{SCHEMA}.m")]
+        )
+        assert results[3] == [["42"]], results
+        assert uc.stagings == ["m", "m"], uc.calls
+        [registered] = uc.registered
+        assert registered["location"].removeprefix("file://") == str(uc.location("m"))
+        assert uc.location("m").name.endswith("2"), uc.location("m")
+
+
+def test_executing_a_prepared_ctas_again_finds_the_table(tmp_path):
+    # The second execute plans again; the session now lists the name, so it is taken, and nothing is staged or
+    # registered again
+    with ManagedCatalog(tmp_path) as uc:
+        results = run_capi(uc, [("prepare", CTAS_M), ("execute",), ("execute",)])
+        assert "already exists" in results[2]["error"], results
+        assert uc.stagings == ["m"], uc.calls
+        assert len(uc.registered) == 1
+
+
+# -----------------------------------------------------------------------------
+# The warning when a registration cannot be confirmed
+#
+
+WARNINGS = "SELECT message FROM duckdb_logs() WHERE log_level = 'WARNING' AND message LIKE 'CreateTable %'"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [f"CREATE TABLE unity.{SCHEMA}.w (id INTEGER)", f"CREATE TABLE unity.{SCHEMA}.w AS SELECT 1::INTEGER AS id"],
+    ids=["create", "ctas"],
+)
+def test_an_unconfirmed_registration_warns_with_the_staged_location_and_id(tmp_path, sql):
+    with ManagedCatalog(tmp_path, register=lambda body: (500, REGISTER_FAILED)) as uc:
+        results = run_capi(
+            uc,
+            [
+                ("query", "CALL enable_logging(level = 'WARNING', storage = 'memory')"),
+                ("query", sql),
+                ("query", WARNINGS),
+            ],
+        )
+        assert REGISTER_500 in results[1]["error"], results
+        id_, location = uc.staged["w"]
+        [[message]] = results[2]
+        assert message.startswith(
+            f"CreateTable {CATALOG}.{SCHEMA}.w could not confirm registration; version 0 kept at file://{location} "
+            f"(staged table id {id_}): "
+        ), message
+        # The error's message, not its JSON form
+        assert REGISTER_500 in message and not message.rstrip().endswith("}"), message

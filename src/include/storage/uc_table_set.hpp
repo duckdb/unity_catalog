@@ -12,6 +12,7 @@
 #include "uc_mutex_protected.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/pair.hpp"
+#include "duckdb/common/atomic.hpp"
 
 namespace duckdb {
 class BoundAtClause;
@@ -123,13 +124,16 @@ struct UCExternalCreate {
 };
 
 //! A managed create on its way to UC: the table UC staged for it, whose location version 0 goes to. UC owns that
-//! location, so a failed create removes nothing there.
+//! location, so a failed registration removes nothing there (delta still removes the files of a write that fails
+//! before its commit).
 struct UCManagedCreate {
 	string catalog_name;
 	string schema_name;
 	string table_name;
 	UCAPIStagingTable staging;
 	OnCreateConflict on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
+	//! Set once a statement runs with this staging, so that no later plan reuses it (GetOrStageManagedCreate)
+	shared_ptr<atomic<bool>> staging_used;
 };
 
 class UCTableSet {
@@ -180,10 +184,12 @@ private:
 	bool RegisterExternalCreate(ClientContext &context, const UCExternalCreate &create,
 	                            const UCAPICommittedTable &committed);
 
-	//! Stages the table with UC and puts what UC requires of it into `base`'s options, with credentials for the
-	//! staging location. False when UC has the name and the statement says IF NOT EXISTS; throws when it has it
-	//! otherwise.
-	bool PrepareManagedCreate(ClientContext &context, CreateTableInfo &base, UCManagedCreate &create);
+	//! Stages the table with UC, or reuses this connection's staging of the same statement (GetOrStageManagedCreate),
+	//! and puts what UC requires of it into `base`'s options, with credentials for the staging location. `query` is
+	//! a CREATE TABLE AS's planned query, nullptr for a CREATE. False when UC has the name and the statement says IF
+	//! NOT EXISTS; throws when it has it otherwise.
+	bool PrepareManagedCreate(ClientContext &context, CreateTableInfo &base, optional_ptr<PhysicalOperator> query,
+	                          UCManagedCreate &create);
 	//! The delta attachment a managed create writes version 0 through: child-catalog mode, committing through this
 	//! catalog
 	AttachInfo ManagedAttachInfo(const UCManagedCreate &create) const;

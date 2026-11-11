@@ -19,6 +19,10 @@ public:
 };
 
 unique_ptr<GlobalSinkState> UCCreateTableAs::GetGlobalSinkState(ClientContext &context) const {
+	if (state->managed && state->managed_create.staging_used) {
+		// The statement runs with this staging: no later plan may reuse it
+		*state->managed_create.staging_used = true;
+	}
 	return make_uniq<UCCreateTableAsGlobalState>();
 }
 
