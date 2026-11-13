@@ -1,6 +1,7 @@
 #include "uc_utils.hpp"
 #include "uc_logging.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/common/types/decimal.hpp"
 #include "yyjson.hpp"
 #include "duckdb/common/path.hpp"
 #include "storage/uc_schema_entry.hpp"
@@ -381,8 +382,30 @@ static size_t FindChildSeparator(const string &type_text, size_t cur, size_t typ
 	return pos;
 }
 
+// A bare `decimal` type text leaves precision and scale to the column's type_precision and type_scale, which the
+// UC API requires for a decimal. Either one missing, or out of DECIMAL's range, is refused rather than defaulted:
+// engines disagree on the default, and the reads that bind this type (scan planning, a table with no Delta log yet)
+// never consult the log, so nothing would catch a wrong guess.
+static LogicalType DecimalFromColumnFields(const UCAPIColumnDefinition &column) {
+	auto field = [](const optional_idx &value) {
+		return value.IsValid() ? to_string(value.GetIndex()) : string("none");
+	};
+	if (!column.precision.IsValid() || !column.scale.IsValid() || column.precision.GetIndex() < 1 ||
+	    column.precision.GetIndex() > Decimal::MAX_WIDTH_DECIMAL ||
+	    column.scale.GetIndex() > column.precision.GetIndex()) {
+		throw NotImplementedException(
+		    "Unity Catalog reports type '%s' with type_precision %s and type_scale %s, which is not a valid DECIMAL",
+		    column.type_text, field(column.precision), field(column.scale));
+	}
+	return LogicalType::DECIMAL(NumericCast<uint8_t>(column.precision.GetIndex()),
+	                            NumericCast<uint8_t>(column.scale.GetIndex()));
+}
+
 LogicalType UCUtils::ColumnTypeFromDefinition(const UCAPIColumnDefinition &column) {
 	if (column.type_json.empty()) {
+		if (column.type_text == "decimal") {
+			return DecimalFromColumnFields(column);
+		}
 		return UCUtils::TypeToLogicalType(column.type_text);
 	}
 	return UCUtils::TypeFromJson(column.type_json);

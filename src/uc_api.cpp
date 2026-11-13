@@ -740,19 +740,26 @@ vector<string> UCAPI::GetCatalogs(ClientContext &ctx, Catalog &catalog, const UC
 	throw NotImplementedException("UCAPI::GetCatalogs");
 }
 
+// type_precision/type_scale are OPTIONAL in the UC /tables ColumnInfo: Delta-Spark-created tables report them as
+// JSON null (only DECIMAL columns carry a real value), so a missing one must not throw, or any parse of the /tables
+// response (SHOW ALL TABLES / DESCRIBE / SELECT) fails as soon as such a column is present. Unset unless the field is
+// a non-negative integer, so a decimal column can tell a missing scale from a scale of 0.
+static optional_idx TryGetColumnTypeField(duckdb_yyjson::yyjson_val *column_def, const char *field) {
+	auto *val = yyjson_obj_get(column_def, field);
+	if (!val || !duckdb_yyjson::yyjson_is_uint(val)) {
+		return optional_idx();
+	}
+	return optional_idx(duckdb_yyjson::yyjson_get_uint(val));
+}
+
 static UCAPIColumnDefinition ParseColumnDefinition(duckdb_yyjson::yyjson_val *column_def) {
 	UCAPIColumnDefinition result;
 
 	result.name = TryGetStrFromObject(column_def, "name");
 	result.type_text = TryGetStrFromObject(column_def, "type_text");
 	result.type_json = TryGetStrFromObject(column_def, "type_json", false);
-	// type_precision/type_scale are OPTIONAL in the UC /tables ColumnInfo: Delta-Spark-created
-	// tables report them as JSON null (only DECIMAL columns carry a real value), and a null/absent
-	// value must coerce to 0, not throw. Without fail_on_missing=false, ANY parse of the /tables
-	// response (SHOW ALL TABLES / DESCRIBE / SELECT) raises "Invalid field ... type_precision" as
-	// soon as such a column is present. (Matches the sibling optional fields below.)
-	result.precision = TryGetNumFromObject(column_def, "type_precision", false);
-	result.scale = TryGetNumFromObject(column_def, "type_scale", false);
+	result.precision = TryGetColumnTypeField(column_def, "type_precision");
+	result.scale = TryGetColumnTypeField(column_def, "type_scale");
 	result.position = TryGetNumFromObject(column_def, "position");
 	// Present on partition columns only
 	auto *partition_index = yyjson_obj_get(column_def, "partition_index");
