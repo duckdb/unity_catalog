@@ -1,4 +1,4 @@
-"""Regression: a UC /tables ColumnInfo with null type_precision must parse (coerce to 0), not throw.
+"""Regression: a UC /tables ColumnInfo with null type_precision must parse, not throw.
 
 Delta-Spark-created tables report type_precision/type_scale as JSON null in the UC /tables response;
 `ParseColumnDefinition` (src/uc_api.cpp) once parsed them with fail_on_missing=true and threw
@@ -45,5 +45,5 @@ def test_type_precision_null():
     detail = f"\n--- stderr ---\n{result.stderr}\n--- mock requests ---\n" + "\n".join(mock.requests)
     # Core regression: the null type_precision must not raise while listing.
     assert result.returncode == 0, "SHOW ALL TABLES errored on a null-type_precision ColumnInfo" + detail
-    # And the table must actually list -- proving the value was coerced (null -> 0), not dropped.
+    # And the table must actually list -- proving the null did not fail the parse.
     assert "spark_like_count=1" in stdout, "spark_like was not listed" + detail

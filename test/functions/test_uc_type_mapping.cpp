@@ -1,5 +1,6 @@
 // Server-free unit coverage of UCUtils::TypeToLogicalType (src/uc_utils.cpp), the type text map a
-// column falls back to when the catalog sends no type_json. The nested spellings need a table per
+// column falls back to when the catalog sends no type_json, and of UCUtils::ColumnTypeFromDefinition
+// for a bare `decimal` whose precision and scale are in the column's fields. The nested spellings need a table per
 // shape to reach from a live catalog, so they are pinned here.
 //
 // Runner: the standalone `unittest_cpp` Catch executable -- see test_uc_irc_expression.cpp
@@ -92,4 +93,46 @@ TEST_CASE("uc types: unmapped or malformed type text throws", "[uc][types]") {
 	// An empty child list must throw, not scan past the closing '>'.
 	CHECK_THROWS_AS(Map("struct<>"), NotImplementedException);
 	CHECK_THROWS_AS(Map("map<>"), NotImplementedException);
+}
+
+namespace {
+
+//! A column with no type_precision or type_scale passes optional_idx(), as the parser leaves them when absent
+LogicalType Column(const string &type_text, optional_idx precision, optional_idx scale, const string &type_json = "") {
+	UCAPIColumnDefinition column;
+	column.name = "c";
+	column.type_text = type_text;
+	column.type_json = type_json;
+	column.precision = precision;
+	column.scale = scale;
+	return UCUtils::ColumnTypeFromDefinition(column);
+}
+
+} // namespace
+
+// A bare `decimal` type text, with p and s in type_precision/type_scale (duckdb/unity_catalog#14)
+TEST_CASE("uc types: a bare decimal takes the column's type_precision and type_scale", "[uc][types]") {
+	CHECK(Column("decimal", 32, 6) == LogicalType::DECIMAL(32, 6));
+	CHECK(Column("decimal", 38, 0) == LogicalType::DECIMAL(38, 0));
+	CHECK(Column("decimal", 1, 1) == LogicalType::DECIMAL(1, 1));
+	// A spelled-out (p,s) wins over the fields, and type_json over both. (The raw string stays out of CHECK:
+	// MSVC cannot take one inside a macro argument.)
+	CHECK(Column("decimal(10,2)", 32, 6) == LogicalType::DECIMAL(10, 2));
+	const string type_json = R"j({"name":"c","type":"decimal(9,3)","nullable":true,"metadata":{}})j";
+	CHECK(Column("decimal", 32, 6, type_json) == LogicalType::DECIMAL(9, 3));
+	// The fields belong to the column, not to a decimal nested inside it
+	CHECK_THROWS_AS(Column("array<decimal>", 32, 6), NotImplementedException);
+	CHECK_THROWS_AS(Column("struct<a:decimal>", 32, 6), NotImplementedException);
+}
+
+TEST_CASE("uc types: a bare decimal without a valid precision and scale throws", "[uc][types]") {
+	CHECK_THROWS_AS(Column("decimal", optional_idx(), optional_idx()), NotImplementedException);
+	CHECK_THROWS_AS(Column("decimal", 10, optional_idx()), NotImplementedException);
+	CHECK_THROWS_AS(Column("decimal", optional_idx(), 2), NotImplementedException);
+	CHECK_THROWS_AS(Column("decimal", 0, 0), NotImplementedException);
+	CHECK_THROWS_AS(Column("decimal", 39, 0), NotImplementedException);
+	CHECK_THROWS_AS(Column("decimal", 300, 2), NotImplementedException);
+	CHECK_THROWS_AS(Column("decimal", 5, 6), NotImplementedException);
+	// Without the fields there is nothing to go on: still unmapped as plain type text
+	CHECK_THROWS_AS(Map("decimal"), NotImplementedException);
 }

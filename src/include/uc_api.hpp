@@ -19,8 +19,9 @@ struct UCAPIColumnDefinition {
 	string name;
 	string type_text;
 	string type_json; // optional, preferred over type_text if available
-	idx_t precision;
-	idx_t scale;
+	// type_precision and type_scale: unset when absent, null or not a non-negative integer
+	optional_idx precision;
+	optional_idx scale;
 	idx_t position;
 	bool is_partition_column = false;
 };
