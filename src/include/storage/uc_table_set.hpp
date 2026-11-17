@@ -40,6 +40,10 @@ struct UCCommitState {
 	optional_idx backfilled_version; // highest version copied; invalid until the first backfill
 };
 
+//! Copy one staged Delta commit `src` into `_delta_log/` at `dst`; false when `dst` already holds a backfilled
+//! commit, throws on I/O or authentication errors (declared here for server-free unit coverage)
+bool CopyStagedCommitToDeltaLog(ClientContext &context, const string &src, const string &dst);
+
 class TableInformation {
 public:
 	TableInformation(UnityCatalog &catalog, UCSchemaEntry &schema) : catalog(catalog), schema(schema) {

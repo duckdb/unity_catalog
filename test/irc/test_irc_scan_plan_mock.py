@@ -399,17 +399,18 @@ def test_gs_read_signs_with_the_vended_token_else_the_users_secret(data_files, c
 # -----------------------------------------------------------------------------
 # Each cloud's /plan credential, and credentials applied again in one transaction
 #
-# The data files stay local, so these check the secrets only. Azure needs the azure extension, which
-# this repo does not build: it is loaded from $UC_TEST_AZURE_EXTENSION, else the case is skipped.
+# The data files stay local, so these check the secrets only. Azure needs the azure extension, loaded
+# from $UC_TEST_AZURE_EXTENSION or `<build_dir>/extension/azure/azure.duckdb_extension`; else skipped.
 #
 
 _ABFSS = "abfss://container@account.dfs.core.windows.net/days/"
 
 
 def _azure_load():
-    path = os.environ.get("UC_TEST_AZURE_EXTENSION")
-    if not path or not Path(path).exists():
-        pytest.skip("azure extension not available (set UC_TEST_AZURE_EXTENSION to its .duckdb_extension)")
+    env_path = os.environ.get("UC_TEST_AZURE_EXTENSION")
+    path = Path(env_path) if env_path else build_dir() / "extension" / "azure" / "azure.duckdb_extension"
+    if not path.exists():
+        pytest.skip("azure extension not available (build it or set UC_TEST_AZURE_EXTENSION to its .duckdb_extension)")
     return f"LOAD '{path}';"
 
 
@@ -465,6 +466,93 @@ def test_plan_credential_of_each_cloud(data_files, prefix, config, secret_type, 
             assert part in secret_string, r.stdout
         # The secret is the one found for a file under the prefix
         assert rows.get("which") == f"{_VENDED}unity__{CATALOG}__{SCHEMA}__{TABLE}__0", r.stdout
+
+
+def test_azure_abfs_secret_matches_both_authority_forms(data_files):
+    """REGRESSION (#170): duckdb-azure paths can arrive as `<scheme>://<container>@<host>/...` (vended by UC) or
+    `<scheme>://<host>/<container>/...` (e.g. Glob results); both forms name the same ADLS Gen2 path and must
+    resolve the vended secret without spilling into sibling containers."""
+    load = _azure_load()
+    at_prefix = "abfss://container@account.dfs.core.windows.net/days/"
+    host_prefix = "abfss://account.dfs.core.windows.net/container/days/"
+    cfg = {"adls.sas-token.account.dfs.core.windows.net": "sv=2026&sr=d&sig=abc%2Bdef%3D"}
+
+    for prefix in (at_prefix, host_prefix):
+        with MockUC(_vending_one(data_files, prefix, cfg)) as srv:
+            r = srv.query(
+                f"{load} BEGIN; SELECT 'rows', count(*) FROM {TABLE}; "
+                f"SELECT 'at_form', name FROM which_secret('{at_prefix}part-0.parquet', 'azure'); "
+                f"SELECT 'host_form', name FROM which_secret('{host_prefix}part-0.parquet', 'azure'); "
+                "SELECT 'other_container', count(*) FROM "
+                "which_secret('abfss://account.dfs.core.windows.net/container2/days/part-0.parquet', 'azure'); "
+                "COMMIT;"
+            )
+            assert r.returncode == 0, r.stderr
+            rows = _labelled(_strip_colour(r.stdout))
+            expected = f"{_VENDED}unity__{CATALOG}__{SCHEMA}__{TABLE}__0"
+            assert rows.get("rows") == "50", r.stdout
+            assert rows.get("at_form") == expected, r.stdout
+            assert rows.get("host_form") == expected, r.stdout
+            assert rows.get("other_container") == "0", r.stdout
+
+
+@pytest.mark.parametrize(
+    "table_type,read_only,catalog_managed,expected_endpoint,expected_op",
+    [
+        ("MANAGED", False, False, "temporary", "READ"),
+        ("EXTERNAL", False, False, "temporary", "READ_WRITE"),
+        ("EXTERNAL", True, False, "temporary", "READ"),
+        ("MANAGED", False, True, "delta_v1", "READ_WRITE"),
+    ],
+    ids=["plain-managed-rw", "external-rw", "external-ro", "catalog-managed-rw"],
+)
+def test_table_credentials_operation_by_table_and_attach_mode(
+    table_type, read_only, catalog_managed, expected_endpoint, expected_op
+):
+    """REGRESSION (#170): UC rejects `READ_WRITE` on `temporary-table-credentials` for non-catalogManaged `MANAGED`
+    tables (`EXTERNAL_WRITE_NOT_ALLOWED_FOR_TABLE`), breaking `SELECT` under a default (`READ_WRITE`) `ATTACH`.
+    Non-catalogManaged `MANAGED` tables request `READ`; `EXTERNAL` and `catalogManaged` tables keep `READ_WRITE`
+    unless attached `READ_ONLY`."""
+
+    def script(method, path, requests):
+        if "/api/2.1/unity-catalog/temporary-table-credentials" in path:
+            return {"expiration_time": 1}
+        if "/credentials?" in path:
+            return {"storage-credentials": []}
+        return {}
+
+    with MockUC(script) as srv:
+        srv._httpd.table_info["table_type"] = table_type
+        if catalog_managed:
+            srv._httpd.table_info["properties"] = {"delta.feature.catalogManaged": "supported"}
+        srv.set_storage_location("abfss://container@account.dfs.core.windows.net/tables/t1")
+        ro_clause = ", READ_ONLY" if read_only else ""
+        sql = (
+            f"{load_statements(build_dir())} "
+            f"CREATE SECRET uc_auth (TYPE unity_catalog, TOKEN 'tok', ENDPOINT '{srv.endpoint}'); "
+            f"ATTACH '{CATALOG}' AS unity (TYPE unity_catalog, SECRET 'uc_auth', DEFAULT_SCHEMA '{SCHEMA}'{ro_clause}); "
+            f"SELECT count(*) FROM unity.{SCHEMA}.{TABLE};"
+        )
+        r = _run_sql(sql)
+        combined = r.stdout + r.stderr
+        assert r.returncode != 0, f"expected storage open failure without live Azure, got:\n{combined}"
+        assert "assertion failure" not in combined.lower(), f"crashed on assertion:\n{combined}"
+        assert "internal error" not in combined.lower(), f"hit internal error:\n{combined}"
+
+        if expected_endpoint == "temporary":
+            cred_reqs = [
+                json.loads(req["body"])
+                for req in srv.requests
+                if "/api/2.1/unity-catalog/temporary-table-credentials" in req["path"] and req["body"]
+            ]
+            assert cred_reqs, f"expected a temporary-table-credentials call, got: {srv.requests}"
+            assert {req.get("operation") for req in cred_reqs} == {expected_op}, cred_reqs
+        else:
+            delta_reqs = [
+                req["path"] for req in srv.requests if "/delta/v1/" in req["path"] and "/credentials?" in req["path"]
+            ]
+            assert delta_reqs, f"expected a delta/v1 credentials call, got: {srv.requests}"
+            assert all(f"operation={expected_op}" in p for p in delta_reqs), delta_reqs
 
 
 def test_a_lone_slash_prefix_is_scoped_to_the_table(data_files):

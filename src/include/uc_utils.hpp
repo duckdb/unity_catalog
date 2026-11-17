@@ -24,6 +24,14 @@ struct UCType {
 	vector<UCType> children;
 };
 
+//! Whether `location` has one of the Azure storage schemes (`abfss://`, `abfs://`, `az://`, `azure://`)
+bool IsAzureLocation(const string &location);
+
+//! The scopes a vended secret carries for `location`: `location` itself, plus the alternate ABFS authority spelling
+//! (`<scheme>://<host>/<container>/...` vs `<scheme>://<container>@<host>/...`) when `location` is an `abfs://` or
+//! `abfss://` URL naming both a container and a dotted host, so lookups under either spelling match
+vector<string> VendedSecretScopes(const string &location);
+
 //! The credentials in a storage credential's `config` map, as delta/v1 and Iceberg REST both vend them: `s3.*`,
 //! `gcs.oauth2.token` (Iceberg REST) or `gcs.oauth-token` (delta/v1), `adls.sas-token.<host>` (Iceberg REST) or
 //! `azure.sas-token` (delta/v1), and `client.region`. Of several Azure hosts, the one in `prefix` is taken.
@@ -42,8 +50,9 @@ string PlanCredentialScope(const string &prefix, const string &table_location);
 bool BuildVendedSecret(ClientContext &context, const string &location, const UCAPITableCredentials &credentials,
                        const string &aws_region, CreateSecretInput &input);
 
-//! Create the internal secret `name`, scoped to `location`, from vended credentials, for this transaction only;
-//! it replaces an earlier one of that name. When nothing usable was vended, drop any earlier one instead.
+//! Create the internal secret `name`, scoped to `VendedSecretScopes(location)`, from vended credentials, for this
+//! transaction only; it replaces an earlier one of that name. When nothing usable was vended, drop any earlier one
+//! instead.
 void ApplyVendedCredentials(ClientContext &context, const string &name, const string &location,
                             const UCAPITableCredentials &credentials, const string &aws_region);
 
