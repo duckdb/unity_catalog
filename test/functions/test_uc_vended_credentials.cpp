@@ -330,3 +330,65 @@ TEST_CASE("Re-applied credentials replace the secret, or drop it when nothing is
 	ApplyVendedCredentials(context, "__internal_uc_t1", "s3://bucket/table", UCAPITableCredentials(), "us-east-1");
 	ctx.con.Commit();
 }
+
+TEST_CASE("ABFS vended secret scopes cover both container@host and host/container URLs", "[uc][credentials]") {
+	REQUIRE(VendedSecretScopes("abfss://container@account.dfs.core.windows.net/dir/table") ==
+	        vector<string> {"abfss://container@account.dfs.core.windows.net/dir/table",
+	                        "abfss://account.dfs.core.windows.net/container/dir/table"});
+	REQUIRE(VendedSecretScopes("abfs://container@account.dfs.core.windows.net/dir/") ==
+	        vector<string> {"abfs://container@account.dfs.core.windows.net/dir/",
+	                        "abfs://account.dfs.core.windows.net/container/dir/"});
+	REQUIRE(VendedSecretScopes("abfss://account.dfs.core.windows.net/container/dir/table") ==
+	        vector<string> {"abfss://account.dfs.core.windows.net/container/dir/table",
+	                        "abfss://container@account.dfs.core.windows.net/dir/table"});
+	// Root scopes keep a trailing '/' on the alternate form so sibling containers or host suffixes cannot prefix-match.
+	REQUIRE(VendedSecretScopes("abfss://container@account.dfs.core.windows.net") ==
+	        vector<string> {"abfss://container@account.dfs.core.windows.net",
+	                        "abfss://account.dfs.core.windows.net/container/"});
+	REQUIRE(VendedSecretScopes("abfss://account.dfs.core.windows.net/container") ==
+	        vector<string> {"abfss://account.dfs.core.windows.net/container",
+	                        "abfss://container@account.dfs.core.windows.net/"});
+
+	// Non-ABFS schemes, bare schemes, and incomplete or malformed authorities stay single-scoped.
+	for (auto &loc :
+	     {"az://container/table", "azure://account.blob.core.windows.net/container/table", "s3://b/t", "gs://b/t",
+	      "abfss://", "abfss://@account.dfs.core.windows.net/t", "abfss://user@c@account.dfs.core.windows.net/t",
+	      "abfss://account.dfs.core.windows.net/", "abfss://c@localhost/t"}) {
+		REQUIRE(VendedSecretScopes(loc) == vector<string> {loc});
+	}
+
+	TestContext ctx;
+	// A malformed authority with two '@'s names no valid Azure account either way.
+	UCAPITableCredentials sas;
+	sas.azure_sas_token = "sv=2026&sr=d&sig=abc%2Bdef%3D";
+	REQUIRE(Build(ctx, "abfss://user@c@account.dfs.core.windows.net/t", sas).type == "none");
+
+	auto &context = ctx.Get();
+	auto &secret_manager = SecretManager::Get(context);
+	SecretType azure_type;
+	azure_type.name = Identifier("azure");
+	azure_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
+	azure_type.default_provider = "config";
+	secret_manager.RegisterSecretType(azure_type);
+	CreateSecretFunction azure_config = {
+	    "azure", "config", [](ClientContext &, CreateSecretInput &input) -> unique_ptr<BaseSecret> {
+		    return make_uniq<KeyValueSecret>(input.scope, input.type, input.provider, input.name);
+	    }};
+	secret_manager.RegisterSecretFunction(azure_config, OnCreateConflict::ERROR_ON_CONFLICT);
+
+	ctx.con.BeginTransaction();
+	auto lookup_azure = [&](const string &path) {
+		auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+		auto match = secret_manager.LookupSecret(transaction, path, "azure");
+		return match.HasMatch() ? match.GetSecret().GetName().GetIdentifierName() : string();
+	};
+	ApplyVendedCredentials(context, "__internal_uc_az", "abfss://container@account.dfs.core.windows.net/tables/t1", sas,
+	                       "");
+	REQUIRE(lookup_azure("abfss://container@account.dfs.core.windows.net/tables/t1/part-0.parquet") ==
+	        "__internal_uc_az");
+	REQUIRE(lookup_azure("abfss://account.dfs.core.windows.net/container/tables/t1/part-0.parquet") ==
+	        "__internal_uc_az");
+	REQUIRE(lookup_azure("abfss://container2@account.dfs.core.windows.net/tables/t1/part-0.parquet").empty());
+	REQUIRE(lookup_azure("abfss://account.dfs.core.windows.net/container2/tables/t1/part-0.parquet").empty());
+	ctx.con.Commit();
+}

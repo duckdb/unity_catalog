@@ -250,9 +250,14 @@ void TableInformation::RefreshCredentials(ClientContext &context) {
 	if (table_data->storage_location.find("file://") == 0) {
 		return;
 	}
-	auto table_credentials = UCAPI::GetTableCredentials(
-	    context, table_data->catalog_name, table_data->schema_name, table_data->name, table_data->table_id,
-	    IsCatalogManaged(), !(catalog.access_mode == AccessMode::READ_ONLY), catalog.credentials);
+	// Unity Catalog's temporary-table-credentials endpoint rejects READ_WRITE for non-catalog-managed
+	// MANAGED tables (EXTERNAL_WRITE_NOT_ALLOWED_FOR_TABLE), and those tables have no staged commits
+	// to backfill, so request READ even when the catalog is attached read-write.
+	bool write = !(catalog.access_mode == AccessMode::READ_ONLY) &&
+	             (IsCatalogManaged() || !StringUtil::CIEquals(table_data->table_type, "MANAGED"));
+	auto table_credentials =
+	    UCAPI::GetTableCredentials(context, table_data->catalog_name, table_data->schema_name, table_data->name,
+	                               table_data->table_id, IsCatalogManaged(), write, catalog.credentials);
 	ApplyVendedCredentials(context, "__internal_uc_" + table_data->table_id, table_data->storage_location,
 	                       table_credentials, catalog.credentials.aws_region);
 }
@@ -278,18 +283,38 @@ void TableInformation::InternalDetach(ClientContext &context, const lock_guard<m
 	internal_attached_database = nullptr;
 }
 
-// Returns false if dst already exists (another session backfilled it); throws on real errors.
-static bool CopyStagedCommitToDeltaLog(ClientContext &context, const string &src, const string &dst) {
+static bool IsAzureAlreadyExistsError(const std::exception &e) {
+	// Catch std::exception rather than IOException: azure and unity_catalog are separate loadable
+	// extensions, so on platforms with per-library RTTI (macOS) IOException thrown in duckdb-azure
+	// does not match IOException's typeinfo here; ErrorData reconstructs the type and message from
+	// Exception::what().
+	ErrorData error(e);
+	if (error.Type() != ExceptionType::IO) {
+		return false;
+	}
+	const auto &msg = error.RawMessage();
+	// duckdb-azure's LoadRemoteFileInfo throws on ExclusiveCreate() before LoadFileInfo reaches
+	// ReturnNullIfExists(); anchor conditional-create codes so a path containing the code word on
+	// an unrelated IO error cannot match.
+	return StringUtil::Contains(msg, "ExclusiveCreate specified while file already exists") ||
+	       StringUtil::Contains(msg, "failed with code 'PathAlreadyExists'") ||
+	       StringUtil::Contains(msg, "failed with code 'BlobAlreadyExists'");
+}
+
+bool CopyStagedCommitToDeltaLog(ClientContext &context, const string &src, const string &dst) {
 	constexpr idx_t BUFFER_SIZE = 8ULL * 1024 * 1024;
 	auto &fs = FileSystem::GetFileSystem(context);
 	auto src_file = fs.OpenFile(src, FileOpenFlags::FILE_FLAGS_READ);
-	// Exclusive create + null-if-exists: skip (return null) if another session already backfilled
-	// this version, rather than clobbering it. NULL_IF_EXISTS is only valid with EXCLUSIVE_CREATE
-	// (asserted in debug builds); EXCLUSIVE_CREATE in turn requires a base FILE_CREATE.
-	auto dst_flags = FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE |
-	                 FileOpenFlags::FILE_FLAGS_EXCLUSIVE_CREATE | FileOpenFlags::FILE_FLAGS_NULL_IF_EXISTS;
-	auto dst_file = fs.OpenFile(dst, dst_flags);
-	if (dst_file) {
+	if (!IsAzureLocation(dst)) {
+		// Exclusive create + null-if-exists: skip (return null) if another session already backfilled
+		// this version, rather than clobbering it. NULL_IF_EXISTS is only valid with EXCLUSIVE_CREATE
+		// (asserted in debug builds); EXCLUSIVE_CREATE in turn requires a base FILE_CREATE.
+		auto dst_flags = FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE |
+		                 FileOpenFlags::FILE_FLAGS_EXCLUSIVE_CREATE | FileOpenFlags::FILE_FLAGS_NULL_IF_EXISTS;
+		auto dst_file = fs.OpenFile(dst, dst_flags);
+		if (!dst_file) {
+			return false;
+		}
 		auto buf = make_unsafe_uniq_array<char>(BUFFER_SIZE);
 		int64_t n;
 		while ((n = src_file->Read(buf.get(), BUFFER_SIZE)) > 0) {
@@ -297,9 +322,60 @@ static bool CopyStagedCommitToDeltaLog(ClientContext &context, const string &src
 		}
 		dst_file->Close();
 		return true;
-	} else {
+	}
+
+	// Read src before touching dst on Azure so a source read failure never creates a 0-byte placeholder
+	// in _delta_log/. Staged Delta commits are immutable JSON files (typically a few KiB).
+	vector<string> chunks;
+	{
+		auto buf = make_unsafe_uniq_array<char>(BUFFER_SIZE);
+		int64_t n;
+		while ((n = src_file->Read(buf.get(), BUFFER_SIZE)) > 0) {
+			chunks.emplace_back(buf.get(), NumericCast<size_t>(n));
+		}
+	}
+
+	// duckdb-azure mishandles NULL_IF_EXISTS: on 404 LoadRemoteFileInfo creates a 0-byte file and
+	// LoadFileInfo then checks ReturnNullIfExists() and returns null, leaving an empty commit in
+	// _delta_log/; on 200 LoadRemoteFileInfo throws on ExclusiveCreate() before ReturnNullIfExists().
+	// Omit NULL_IF_EXISTS, never delete dst on error (a peer writer may have flushed a valid commit),
+	// and when ExclusiveCreate reports an existing file, treat it as backfilled only if non-empty.
+	auto dst_flags = FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE |
+	                 FileOpenFlags::FILE_FLAGS_EXCLUSIVE_CREATE;
+	unique_ptr<FileHandle> dst_file;
+	try {
+		dst_file = fs.OpenFile(dst, dst_flags);
+	} catch (const std::exception &e) {
+		if (!IsAzureAlreadyExistsError(e)) {
+			throw;
+		}
+		auto existing = fs.OpenFile(dst, FileOpenFlags::FILE_FLAGS_READ | FileOpenFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
+		if (!existing) {
+			dst_file = fs.OpenFile(dst, dst_flags);
+		} else if (existing->GetFileSize() > 0) {
+			return false;
+		} else {
+			// A recent 0-byte file can belong to an in-flight peer writer (Azure creates a 0-byte blob on
+			// OpenFile and publishes its size on Flush/CommitBlockList): leave it alone and defer watermark
+			// advancement rather than truncating the peer. Only overwrite a stale (>60s) orphan placeholder.
+			constexpr int64_t STALE_PLACEHOLDER_MICROS = 60LL * 1000000LL;
+			auto mtime = fs.GetLastModifiedTime(*existing);
+			auto now = Timestamp::GetCurrentTimestamp();
+			if (mtime.value > 0 && now.value >= mtime.value && (now.value - mtime.value) < STALE_PLACEHOLDER_MICROS) {
+				throw IOException("Staged commit backfill target '%s' is currently empty (in-flight write)", dst);
+			}
+			existing.reset();
+			dst_file = fs.OpenFile(dst, FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE_NEW);
+		}
+	}
+	if (!dst_file) {
 		return false;
 	}
+	for (auto &chunk : chunks) {
+		dst_file->Write((void *)chunk.data(), NumericCast<int64_t>(chunk.size()));
+	}
+	dst_file->Close();
+	return true;
 }
 
 optional_idx TableInformation::BackfillCommits(ClientContext &context, const vector<UCAPICommit> &commits,

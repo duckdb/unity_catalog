@@ -16,27 +16,74 @@ static bool IsGcsLocation(const string &location) {
 	return StringUtil::StartsWith(location, "gs://") || StringUtil::StartsWith(location, "gcs://");
 }
 
-static bool IsAzureLocation(const string &location) {
+bool IsAzureLocation(const string &location) {
 	return StringUtil::StartsWith(location, "abfss://") || StringUtil::StartsWith(location, "abfs://") ||
 	       StringUtil::StartsWith(location, "az://") || StringUtil::StartsWith(location, "azure://");
+}
+
+struct ParsedAzureLocation {
+	string scheme_prefix;
+	string container;
+	string host;
+	string rest;
+	bool container_at_host = false;
+};
+
+static ParsedAzureLocation ParseAzureLocation(const string &location) {
+	ParsedAzureLocation parsed;
+	auto scheme_end = location.find("://");
+	if (scheme_end == string::npos) {
+		return parsed;
+	}
+	auto authority_start = scheme_end + 3;
+	parsed.scheme_prefix = location.substr(0, authority_start);
+	auto slash = location.find('/', authority_start);
+	auto authority = location.substr(authority_start, slash == string::npos ? string::npos : slash - authority_start);
+	auto at = authority.find('@');
+	if (at != string::npos) {
+		auto candidate_host = authority.substr(at + 1);
+		if (candidate_host.find('@') == string::npos && candidate_host.find('.') != string::npos) {
+			parsed.container = authority.substr(0, at);
+			parsed.host = std::move(candidate_host);
+			parsed.rest = slash == string::npos ? string() : location.substr(slash);
+			parsed.container_at_host = true;
+		}
+		return parsed;
+	}
+	if (authority.find('.') != string::npos) {
+		parsed.host = authority;
+		if (slash != string::npos) {
+			auto after_host = location.substr(slash + 1);
+			auto path_slash = after_host.find('/');
+			auto candidate_container = after_host.substr(0, path_slash);
+			if (!candidate_container.empty() && candidate_container.find('@') == string::npos) {
+				parsed.container = std::move(candidate_container);
+				parsed.rest = path_slash == string::npos ? string() : after_host.substr(path_slash);
+			}
+		}
+	}
+	return parsed;
 }
 
 //! The storage host of an Azure location: <host> in <scheme>://<container>@<host>/... and in
 //! <scheme>://<host>/<container>/... (a host has a dot), else empty: az://<container>/... names no account.
 static string AzureHostOf(const string &location) {
-	auto scheme_end = location.find("://");
-	if (scheme_end == string::npos) {
-		return string();
+	return ParseAzureLocation(location).host;
+}
+
+vector<string> VendedSecretScopes(const string &location) {
+	if (!StringUtil::StartsWith(location, "abfss://") && !StringUtil::StartsWith(location, "abfs://")) {
+		return {location};
 	}
-	auto authority_start = scheme_end + 3;
-	auto authority_end = location.find('/', authority_start);
-	auto authority = location.substr(authority_start,
-	                                 authority_end == string::npos ? string::npos : authority_end - authority_start);
-	auto at = authority.find('@');
-	if (at != string::npos) {
-		return authority.substr(at + 1);
+	auto parsed = ParseAzureLocation(location);
+	if (parsed.container.empty() || parsed.host.empty()) {
+		return {location};
 	}
-	return authority.find('.') != string::npos ? authority : string();
+	auto rest = parsed.rest.empty() ? "/" : parsed.rest;
+	if (parsed.container_at_host) {
+		return {location, parsed.scheme_prefix + parsed.host + "/" + parsed.container + rest};
+	}
+	return {location, parsed.scheme_prefix + parsed.container + "@" + parsed.host + rest};
 }
 
 string PlanCredentialScope(const string &prefix, const string &table_location) {
@@ -172,7 +219,7 @@ void ApplyVendedCredentials(ClientContext &context, const string &name, const st
 		return;
 	}
 	input.name = Identifier(name);
-	input.scope = {location};
+	input.scope = VendedSecretScopes(location);
 	input.provider = "config";
 	// For this transaction only: a TEMPORARY secret lives in a transactional catalog set, so two open transactions
 	// replacing the same name conflict (a write-write conflict on "__internal_uc_<table_id>").
