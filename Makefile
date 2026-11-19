@@ -14,6 +14,9 @@ export DUCKTEST_UC_IMAGE ?= ghcr.io/benfleis/ducktest-unitycatalog:local
 UC_REPO ?= $(HOME)/src/d/unitycatalog
 ENV_DATABRICKS_CMD ?= scripts/env_databricks   # injects DATABRICKS_* creds -- read the script to hack at it
 
+# Preserve the distribution workflow's regular selection of this repo's SQL tests.
+T ?= "test/*"
+
 # Build targets (release/debug/…).
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
