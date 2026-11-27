@@ -421,6 +421,53 @@ def test_timestamp_text_types_agree_with_the_log():
     assert [line for line in stdout.splitlines() if line[:1].isdigit()] == _TIMESTAMP_ROWS, combined
 
 
+_DECIMAL = _Type("decimal(32,6)", '"decimal(32,6)"')
+
+
+def _bare_decimal_columns(precision, scale):
+    """Type text `decimal` with precision and scale in their own fields, and no type_json. The OSS CLI
+    sends type_json too, which is read first; a column registered without it is this shape."""
+    columns = _columns([_col("id", _INT), _col("price", _text("decimal"))])
+    columns[1].update(type_name="DECIMAL", type_precision=precision, type_scale=scale)
+    return columns
+
+
+def test_bare_decimal_text_takes_precision_and_scale(tmp_path):
+    """A bare `decimal` maps to DECIMAL(type_precision, type_scale), as the log types it, so the
+    listing is accurate and the read reports no divergence."""
+    _write_log(tmp_path, [_col("id", _INT), _col("price", _DECIMAL)])
+    with _catalog(_bare_decimal_columns(32, 6), tmp_path, "prices") as mock:
+        result, stdout = run(
+            mock,
+            "SELECT column_types FROM (SHOW ALL TABLES) WHERE name = 'prices';"
+            "SELECT count(*), 'rows' FROM unity.plain.prices;",
+        )
+
+    combined = stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "[INTEGER, 'DECIMAL(32,6)']" in stdout, combined
+    assert "0|rows" in stdout, combined
+    assert "schema.Resolve" not in stdout, combined
+
+
+@pytest.mark.parametrize(
+    "precision,scale", [(None, None), (10, None), (0, 0)], ids=["no_fields", "no_scale", "zero_precision"]
+)
+def test_bare_decimal_without_precision_and_scale_is_refused(precision, scale, tmp_path):
+    """A bare `decimal` without a valid precision and scale is not guessed: the column lists as
+    UNKNOWN and a read from the reported schema is refused."""
+    with _catalog(_bare_decimal_columns(precision, scale), tmp_path, "prices") as mock:
+        listed, listed_out = run(mock, "SELECT column_types FROM (SHOW ALL TABLES) WHERE name = 'prices';")
+        read, read_out = run(mock, "SELECT price FROM unity.plain.prices;")
+
+    assert listed.returncode == 0, listed_out + listed.stderr
+    assert "[INTEGER, UNKNOWN]" in listed_out, listed_out
+
+    combined = read_out + read.stderr
+    assert read.returncode != 0, combined
+    assert "'price', which Unity Catalog reports as 'decimal'" in read.stderr, combined
+
+
 @pytest.mark.parametrize("name", sorted(_CASES))
 def test_described_schema(name):
     case = _CASES[name]

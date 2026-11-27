@@ -90,7 +90,8 @@ Databricks (live):
 Server-free (`functions/`):
 
 - The type text map a column falls back to without `type_json` (`test_uc_type_mapping.cpp`, tag
-  `[uc][types]`): scalars, `decimal(p,s)`, nested `array`/`map`/`struct` spellings, and malformed text.
+  `[uc][types]`): scalars, `decimal(p,s)`, a bare `decimal` with `type_precision`/`type_scale`, nested
+  `array`/`map`/`struct` spellings, and malformed text.
 - Column mapping on Spark-written tables (`test_column_mapping.py`), name and id mode: partition values
   and a renamed column read through the catalog, and a partitioned or mapped table reads its Delta log
   even when scan planning is on. INSERTs into the partitioned table key partition values physically;
